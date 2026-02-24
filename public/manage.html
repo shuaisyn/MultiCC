@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebCC — Session Manager</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    #header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 0 24px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    #header .logo {
+      font-size: 15px;
+      font-weight: 700;
+      color: #f78166;
+      letter-spacing: 0.5px;
+      text-decoration: none;
+    }
+    #header .logo span { color: #79c0ff; }
+
+    #header .title {
+      font-size: 13px;
+      color: #8b949e;
+    }
+
+    #header .spacer { flex: 1; }
+
+    /* ── Main content ── */
+    #main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 28px 24px;
+    }
+
+    .page-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: #f0f6fc;
+      margin-bottom: 6px;
+    }
+
+    .page-subtitle {
+      font-size: 13px;
+      color: #8b949e;
+      margin-bottom: 24px;
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .btn {
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #c9d1d9;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #30363d; border-color: #8b949e; }
+
+    .btn-green {
+      background: #238636;
+      border-color: #2ea043;
+      color: #fff;
+      font-weight: 600;
+    }
+    .btn-green:hover { background: #2ea043; }
+
+    .btn-danger {
+      background: transparent;
+      border-color: #f85149;
+      color: #f85149;
+    }
+    .btn-danger:hover { background: #f8514920; }
+
+    .refresh-info {
+      font-size: 12px;
+      color: #6e7681;
+      margin-left: auto;
+    }
+
+    /* ── Sessions table ── */
+    .session-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .session-table th {
+      background: #161b22;
+      color: #8b949e;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid #30363d;
+      white-space: nowrap;
+    }
+
+    .session-table td {
+      padding: 11px 14px;
+      border-bottom: 1px solid #21262d;
+      font-size: 13px;
+      vertical-align: middle;
+    }
+
+    .session-table tr:last-child td { border-bottom: none; }
+    .session-table tr:hover td { background: #161b22; }
+
+    .session-id {
+      font-family: monospace;
+      color: #58a6ff;
+      font-size: 13px;
+    }
+
+    .client-badge {
+      display: inline-block;
+      background: #1f6feb30;
+      color: #58a6ff;
+      border: 1px solid #1f6feb60;
+      border-radius: 12px;
+      padding: 1px 8px;
+      font-size: 11px;
+    }
+    .client-badge.zero {
+      background: transparent;
+      color: #6e7681;
+      border-color: #30363d;
+    }
+
+    .time-cell { color: #8b949e; font-size: 12px; }
+
+    .actions { display: flex; gap: 6px; }
+
+    /* ── Empty state ── */
+    .empty-state {
+      text-align: center;
+      padding: 56px 24px;
+      color: #8b949e;
+    }
+    .empty-state .empty-icon { font-size: 40px; margin-bottom: 12px; }
+    .empty-state p { font-size: 14px; margin-bottom: 20px; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #238636;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      opacity: 0;
+      transition: opacity 0.2s;
+      pointer-events: none;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <a class="logo" href="/">Web<span>CC</span></a>
+    <span class="title">/ Session Manager</span>
+    <span class="spacer"></span>
+  </div>
+
+  <div id="main">
+    <div class="page-title">Sessions</div>
+    <div class="page-subtitle">Active PTY sessions — close a tab without ending a session, reopen it by URL.</div>
+
+    <div class="toolbar">
+      <button class="btn btn-green" onclick="newSession()">+ New Session</button>
+      <button class="btn" onclick="loadSessions()">Refresh</button>
+      <span class="refresh-info" id="refresh-info">Auto-refresh every 5s</span>
+    </div>
+
+    <div id="session-list"></div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="manage.js"></script>
+</body>
+</html>
