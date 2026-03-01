@@ -8,7 +8,7 @@ const pty = require('node-pty');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 
 const app = express();
 
@@ -362,6 +362,261 @@ app.get('/api/download', (req, res) => {
   } catch (e) {
     res.status(404).json({ error: '文件不存在' });
   }
+});
+
+// ── Voice Refine Worker (global, starts with server) ──
+const VOICE_EXAMPLES_FILE = path.join(__dirname, 'voice_examples.json');
+
+function loadVoiceExamples() {
+  try {
+    if (fs.existsSync(VOICE_EXAMPLES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8'));
+      return Array.isArray(data) ? data.slice(-5) : [];
+    }
+  } catch (_) {}
+  return [];
+}
+
+function appendVoiceExample(entry) {
+  let data = [];
+  try {
+    if (fs.existsSync(VOICE_EXAMPLES_FILE)) {
+      data = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8'));
+      if (!Array.isArray(data)) data = [];
+    }
+  } catch (_) {}
+  data.push(entry);
+  if (data.length > 50) data = data.slice(-50);
+  try {
+    fs.writeFileSync(VOICE_EXAMPLES_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error('[webcc] Failed to write voice_examples.json:', e.message);
+  }
+}
+
+// Build a clean env for voice subprocess (no CLAUDECODE to avoid nested session error)
+const voiceChildEnv = { ...process.env };
+delete voiceChildEnv.CLAUDECODE;
+
+/**
+ * Global voice worker: processes refine requests sequentially via a queue.
+ * Only one `claude -p` process runs at a time. The process is NOT killed
+ * when the HTTP client disconnects — output is buffered and delivered.
+ */
+const voiceWorker = {
+  queue: [],       // { prompt, onChunk(text), onDone(), onError(msg) }
+  busy: false,
+  currentChild: null,
+
+  enqueue(job) {
+    this.queue.push(job);
+    console.log(`[webcc/voice] Queued job (queue length: ${this.queue.length})`);
+    this._processNext();
+  },
+
+  _processNext() {
+    if (this.busy || this.queue.length === 0) return;
+    this.busy = true;
+    const job = this.queue.shift();
+
+    // Use stdin to pass prompt (avoids ARG_MAX issues with long prompts)
+    const child = spawn(CLAUDE_CMD, ['-p'], {
+      env: voiceChildEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.currentChild = child;
+    console.log(`[webcc/voice] Worker spawned claude pid=${child.pid}`);
+    // Feed prompt via stdin, then close stdin to signal end-of-input
+    child.stdin.write(job.prompt);
+    child.stdin.end();
+
+    // 60-second timeout
+    const killTimer = setTimeout(() => {
+      console.error('[webcc/voice] Worker timeout: killing claude process');
+      try { child.kill(); } catch (_) {}
+      job.onChunk('[超时：AI处理超过60秒，已中止]');
+    }, 60000);
+
+    child.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      console.log(`[webcc/voice] stdout chunk: ${text.slice(0, 80)}`);
+      job.onChunk(text);
+    });
+
+    child.stderr.on('data', (chunk) => {
+      console.error('[webcc/voice] stderr:', chunk.toString());
+    });
+
+    child.on('close', (code, signal) => {
+      clearTimeout(killTimer);
+      console.log(`[webcc/voice] Worker claude exited code=${code} signal=${signal}`);
+      this.currentChild = null;
+      this.busy = false;
+      job.onDone();
+      // Process next job in queue
+      this._processNext();
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(killTimer);
+      console.error('[webcc/voice] Worker spawn error:', err.message);
+      this.currentChild = null;
+      this.busy = false;
+      job.onError(err.message);
+      this._processNext();
+    });
+  },
+};
+
+console.log('[webcc/voice] Voice worker initialized (queue-based, sequential processing)');
+
+app.post('/api/voice/refine', (req, res) => {
+  const reqId = `vr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const raw = (req.body.raw || '').trim();
+  console.log(`[webcc/voice][${reqId}] POST /api/voice/refine received, raw length: ${raw.length}, raw: ${JSON.stringify(raw.slice(0, 100))}`);
+
+  if (!raw) {
+    console.log(`[webcc/voice][${reqId}] Empty raw, sending immediate [DONE]`);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  }
+
+  const examples = loadVoiceExamples();
+  let examplesStr = '';
+  if (examples.length > 0) {
+    examplesStr = '\n\n历史优化案例（供参考）：\n' + examples.map((ex, i) =>
+      `[案例${i + 1}] 原始：${ex.raw}\n优化后：${ex.userFinal}`
+    ).join('\n');
+  }
+
+  const prompt = `你是程序员语音输入助手。原始语音识别文字可能口语化、夹杂中英文。
+任务：
+1. 保留所有英文技术词汇/命令/API名（React, useState, git commit等）
+2. 将口语转为专业简洁的程序员描述
+3. 整理成清晰可操作的需求
+4. 忠实原意，不臆造功能${examplesStr}
+
+原始语音：${raw}
+直接输出优化后的文本，不要任何解释或前缀。`;
+
+  console.log(`[webcc/voice][${reqId}] Prompt length: ${prompt.length} chars`);
+  console.log(`[webcc/voice][${reqId}] Setting SSE response headers...`);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');  // disable proxy buffering
+  res.flushHeaders();
+  console.log(`[webcc/voice][${reqId}] SSE headers flushed`);
+  // Disable Nagle's algorithm so small SSE chunks are sent immediately (important for TLS/HTTPS)
+  if (res.socket) {
+    res.socket.setNoDelay(true);
+    console.log(`[webcc/voice][${reqId}] Socket NoDelay set`);
+  }
+
+  // Send SSE comment heartbeats every 5s to prevent browser/proxy idle disconnects
+  const heartbeat = setInterval(() => {
+    if (!clientDisconnected) {
+      try { res.write(': heartbeat\n\n'); } catch (_) {}
+    }
+  }, 5000);
+
+  let clientDisconnected = false;
+  res.on('close', () => {
+    clientDisconnected = true;
+    clearInterval(heartbeat);
+    console.log(`[webcc/voice][${reqId}] Client disconnected (res close event)`);
+  });
+
+  // Helper: write SSE event and force flush (important for TLS/HTTPS)
+  function sseWrite(chunk) {
+    if (clientDisconnected) {
+      console.warn(`[webcc/voice][${reqId}] sseWrite skipped (client disconnected), chunk: ${JSON.stringify(chunk.slice(0, 100))}`);
+      return;
+    }
+    try {
+      const writeResult = res.write(chunk);
+      console.log(`[webcc/voice][${reqId}] res.write returned: ${writeResult}, chunk: ${JSON.stringify(chunk.slice(0, 120))}`);
+      // Force flush the underlying socket for TLS connections
+      if (res.socket && typeof res.socket.uncork === 'function') {
+        res.socket.cork();
+        res.socket.uncork();
+      }
+    } catch (writeErr) {
+      console.error(`[webcc/voice][${reqId}] sseWrite error:`, writeErr.message);
+    }
+  }
+
+  console.log(`[webcc/voice][${reqId}] Enqueueing job to voiceWorker (busy=${voiceWorker.busy}, queue=${voiceWorker.queue.length})`);
+
+  voiceWorker.enqueue({
+    prompt,
+    onChunk(text) {
+      console.log(`[webcc/voice][${reqId}] onChunk called, text length: ${text.length}, text: ${JSON.stringify(text.slice(0, 100))}`);
+      const sseData = `data: ${JSON.stringify({ text })}\n\n`;
+      console.log(`[webcc/voice][${reqId}] SSE data to send: ${JSON.stringify(sseData.slice(0, 150))}`);
+      sseWrite(sseData);
+    },
+    onDone() {
+      clearInterval(heartbeat);
+      console.log(`[webcc/voice][${reqId}] onDone called, clientDisconnected=${clientDisconnected}`);
+      if (!clientDisconnected) {
+        try {
+          const writeResult = res.write('data: [DONE]\n\n');
+          console.log(`[webcc/voice][${reqId}] [DONE] write result: ${writeResult}`);
+          res.end();
+          console.log(`[webcc/voice][${reqId}] res.end() called successfully`);
+        } catch (endErr) {
+          console.error(`[webcc/voice][${reqId}] Error writing [DONE] or ending response:`, endErr.message);
+        }
+      } else {
+        console.log(`[webcc/voice][${reqId}] Skipping [DONE] (client already disconnected)`);
+      }
+    },
+    onError(msg) {
+      clearInterval(heartbeat);
+      console.error(`[webcc/voice][${reqId}] onError called: ${msg}, clientDisconnected=${clientDisconnected}`);
+      if (!clientDisconnected) {
+        try {
+          res.write(`data: ${JSON.stringify({ text: `[错误: ${msg}]` })}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } catch (errWriteErr) {
+          console.error(`[webcc/voice][${reqId}] Error writing error response:`, errWriteErr.message);
+        }
+      }
+    },
+  });
+});
+
+app.post('/api/voice/feedback', (req, res) => {
+  const { raw, refined, userFinal } = req.body;
+  if (raw && refined !== undefined && userFinal !== undefined && userFinal !== refined) {
+    appendVoiceExample({ raw, refined, userFinal, ts: new Date().toISOString() });
+  }
+  res.json({ ok: true });
+});
+
+// SSE test endpoint (for debugging voice streaming issues)
+app.get('/api/voice/test-sse', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  if (res.socket) res.socket.setNoDelay(true);
+
+  let i = 0;
+  const iv = setInterval(() => {
+    res.write(`data: ${JSON.stringify({ text: `SSE test chunk ${++i}` })}\n\n`);
+    if (i >= 3) {
+      clearInterval(iv);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+  }, 500);
+  req.on('close', () => clearInterval(iv));
 });
 
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
