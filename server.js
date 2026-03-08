@@ -23,6 +23,19 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 
 const app = express();
 
+// ── Access token authentication ──
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+if (ACCESS_TOKEN) {
+  app.use((req, res, next) => {
+    // Allow localhost without token
+    const ip = req.ip || req.connection.remoteAddress;
+    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+    const token = req.query.token || req.headers['x-access-token'];
+    if (token === ACCESS_TOKEN) return next();
+    res.status(403).send('Forbidden: invalid or missing token');
+  });
+}
+
 const certPath = path.join(__dirname, 'cert.pem');
 const keyPath = path.join(__dirname, 'key.pem');
 const useHttps = fs.existsSync(certPath) && fs.existsSync(keyPath);
@@ -944,6 +957,17 @@ app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] })
 // ── WebSocket connections ──
 wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, 'http://localhost');
+
+  // Token check for WebSocket
+  if (ACCESS_TOKEN) {
+    const ip = req.socket.remoteAddress;
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (!isLocal && urlObj.searchParams.get('token') !== ACCESS_TOKEN) {
+      ws.close(4003, 'Forbidden');
+      return;
+    }
+  }
+
   let sessionId = urlObj.searchParams.get('id') || '';
   let session;
 
@@ -972,6 +996,10 @@ wss.on('connection', (ws, req) => {
   }
 
   session.clients.add(ws);
+
+  // Keep-alive tracking (server pings periodically)
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   // Tell client its session ID
   ws.send(JSON.stringify({ type: 'session_id', id: sessionId }));
@@ -1043,6 +1071,17 @@ wss.on('connection', (ws, req) => {
     session.clients.delete(ws);
   });
 });
+
+// WebSocket keep-alive: ping clients every 30s, terminate unresponsive ones
+const wsPingInterval = setInterval(() => {
+  wss.clients.forEach(client => {
+    if (client.isAlive === false) return client.terminate();
+    client.isAlive = false;
+    client.ping();
+  });
+}, 30000);
+
+wss.on('close', () => clearInterval(wsPingInterval));
 
 server.listen(PORT, () => {
   const proto = useHttps ? 'https' : 'http';

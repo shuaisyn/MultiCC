@@ -63,23 +63,173 @@ if (sessionLabel) {
   });
 }
 
-/* ── WebSocket / PTY bridge ── */
+/* ── Voice Notifications (task complete / waiting for action) ── */
+const notifyBtn = document.getElementById('notify-btn');
+let _notifyEnabled = localStorage.getItem('webcc_notify') !== 'off';
+let _notifyState = 'idle';       // idle | active | waiting
+let _notifyOutputChars = 0;
+let _notifyIdleTimer = null;
+let _notifyLastCompleted = 0;
+let _notifyLastAction = 0;
+let _notifyConnectedAt = 0;
+
+const NOTIFY_COOLDOWN = 8000;     // min ms between same-type notifications
+const NOTIFY_IDLE_MS = 4000;      // idle duration to trigger "completed"
+const NOTIFY_MIN_CHARS = 80;      // min output chars before idle = "completed"
+
+const NOTIFY_WAITING_PATTERNS = [
+  /\[Y\/n\]/,
+  /\[y\/N\]/,
+  /\(y\/n\)/i,
+  /\(yes\/no\)/i,
+  /Do you want to/i,
+  /Allow\b/,
+  /Approve\?/i,
+  /Press Enter/i,
+  /Yes\s*\/\s*No/i,
+];
+
+const NOTIFY_ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*(?:\x07|\x1b\\)|[()][AB012]|.)/g;
+
+function notifyStripAnsi(str) {
+  return str.replace(NOTIFY_ANSI_RE, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+}
+
+function updateNotifyBtn() {
+  if (!notifyBtn) return;
+  if (_notifyEnabled) {
+    notifyBtn.style.background = '#1f6feb';
+    notifyBtn.style.borderColor = '#58a6ff';
+    notifyBtn.style.color = '#fff';
+    notifyBtn.title = '语音通知 (已开启)';
+  } else {
+    notifyBtn.style.background = '#21262d';
+    notifyBtn.style.borderColor = '#30363d';
+    notifyBtn.style.color = '#c9d1d9';
+    notifyBtn.title = '语音通知 (已关闭)';
+  }
+}
+updateNotifyBtn();
+
+if (notifyBtn) {
+  notifyBtn.addEventListener('click', () => {
+    _notifyEnabled = !_notifyEnabled;
+    localStorage.setItem('webcc_notify', _notifyEnabled ? 'on' : 'off');
+    updateNotifyBtn();
+  });
+}
+
+function speakNotify(text, type) {
+  if (!_notifyEnabled || !window.speechSynthesis) return;
+  const now = Date.now();
+  // Skip within first 5s of connection (replay buffer)
+  if (now - _notifyConnectedAt < 5000) return;
+
+  if (type === 'completed') {
+    if (now - _notifyLastCompleted < NOTIFY_COOLDOWN) return;
+    _notifyLastCompleted = now;
+  } else {
+    if (now - _notifyLastAction < NOTIFY_COOLDOWN) return;
+    _notifyLastAction = now;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'zh-CN';
+  utterance.rate = 1.1;
+  utterance.volume = 0.8;
+  window.speechSynthesis.speak(utterance);
+}
+
+function notifyOnOutput(rawData) {
+  if (!_notifyEnabled) return;
+
+  const text = notifyStripAnsi(rawData);
+  const printable = text.replace(/\s+/g, '');
+
+  if (printable.length > 0) {
+    _notifyOutputChars += printable.length;
+    if (_notifyState === 'idle') _notifyState = 'active';
+  }
+
+  // Check for waiting-for-action patterns
+  if (_notifyState === 'active') {
+    for (const pat of NOTIFY_WAITING_PATTERNS) {
+      if (pat.test(text)) {
+        _notifyState = 'waiting';
+        speakNotify('正在等待您的操作', 'action');
+        break;
+      }
+    }
+  }
+
+  // Reset idle timer — if output stops for NOTIFY_IDLE_MS, consider task done
+  if (_notifyIdleTimer) clearTimeout(_notifyIdleTimer);
+  _notifyIdleTimer = setTimeout(() => {
+    if (_notifyState === 'active' && _notifyOutputChars >= NOTIFY_MIN_CHARS) {
+      speakNotify('任务已完成', 'completed');
+    }
+    _notifyState = 'idle';
+    _notifyOutputChars = 0;
+  }, NOTIFY_IDLE_MS);
+}
+
+function notifyOnInput(data) {
+  // Reset on Enter key (user submitting input/response)
+  if (data.includes('\r') || data.includes('\n')) {
+    _notifyState = 'idle';
+    _notifyOutputChars = 0;
+    if (_notifyIdleTimer) {
+      clearTimeout(_notifyIdleTimer);
+      _notifyIdleTimer = null;
+    }
+  }
+}
+
+/* ── WebSocket / PTY bridge (with auto-reconnect) ── */
 let ws = null;
+let _wsGen = 0;               // generation counter — stale onclose handlers become no-ops
+let _reconnectTimer = null;
+let _reconnectAttempt = 0;
+let _sessionExited = false;
+
+function scheduleReconnect() {
+  if (_sessionExited || _reconnectTimer) return;
+  const delay = Math.min(1000 * Math.pow(2, _reconnectAttempt), 30000);
+  _reconnectAttempt++;
+  setStatus('connecting', `${Math.ceil(delay / 1000)}s 后重连…`);
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    connect();
+  }, delay);
+}
 
 function connect() {
+  // Cancel any pending reconnect
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+
   if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+
+  const gen = ++_wsGen;
+  _sessionExited = false;
 
   setStatus('connecting', 'Connecting…');
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const urlToken = new URLSearchParams(location.search).get('token');
+  const tokenParam = urlToken ? `&token=${urlToken}` : '';
   const wsUrl = currentSessionId
-    ? `${proto}//${location.host}/?id=${currentSessionId}`
-    : `${proto}//${location.host}/`;
+    ? `${proto}//${location.host}/?id=${currentSessionId}${tokenParam}`
+    : `${proto}//${location.host}/?_=1${tokenParam}`;
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     setStatus('connected', 'Connected');
     sendResize();
+    _notifyConnectedAt = Date.now();
+    _reconnectAttempt = 0;
   };
 
   ws.onmessage = ({ data }) => {
@@ -94,13 +244,16 @@ function connect() {
         }
       } else if (msg.type === 'output' || msg.type === 'error') {
         term.write(msg.data);
+        notifyOnOutput(msg.data);
       } else if (msg.type === 'exit') {
         term.write(msg.data);
+        _sessionExited = true;
         setStatus('disconnected', 'Session ended');
       } else if (msg.type === 'relocate') {
         term.clear();
         term.write(`\x1b[33m[正在切换到: ${msg.cwd}]\x1b[0m\r\n`);
         filesBrowsePath = null; // reset so panel loads new cwd on next open/refresh
+        _wsGen++;  // invalidate current onclose handler to prevent auto-reconnect
         ws.close();
         setTimeout(() => {
           connect();
@@ -114,9 +267,32 @@ function connect() {
     }
   };
 
-  ws.onclose = () => setStatus('disconnected', 'Disconnected');
-  ws.onerror = ()  => setStatus('disconnected', 'Connection failed');
+  ws.onclose = () => {
+    if (gen !== _wsGen) return;    // stale — connect() or relocate already called
+    if (_sessionExited) {
+      setStatus('disconnected', 'Session ended');
+    } else {
+      setStatus('disconnected', 'Disconnected');
+      scheduleReconnect();
+    }
+  };
+
+  ws.onerror = () => {};  // onclose fires after onerror, reconnect handled there
 }
+
+// Immediately reconnect when page returns to foreground (mobile app switch)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (_sessionExited) return;
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Page came back to foreground with a dead connection — reconnect immediately
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+  _reconnectAttempt = 0;
+  connect();
+});
 
 function sendResize() {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -129,6 +305,7 @@ term.onData((data) => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'input', data }));
   }
+  notifyOnInput(data);
 });
 
 /* ── Resize handling ── */
