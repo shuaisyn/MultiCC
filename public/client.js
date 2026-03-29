@@ -74,7 +74,6 @@ let _notifyLastCompleted = 0;
 let _notifyLastAction = 0;
 let _notifyConnectedAt = 0;
 let _notifyRecentText = '';
-let _notifyAcknowledged = false; // true after user sees/dismisses notification
 let _notifyToastTimer = null;
 
 const NOTIFY_COOLDOWN = 8000;     // min ms between same-type notifications
@@ -165,11 +164,12 @@ if (notifyToast) {
   notifyToast.addEventListener('click', dismissNotifyToast);
 }
 
-// Only acknowledge (stop repeating) when user activates the window
-window.addEventListener('focus', () => {
-  if (_notifyAcknowledged) return;
-  _notifyAcknowledged = true;
-  dismissNotifyToast();
+// When page becomes visible, stop any ongoing voice and dismiss toast
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    dismissNotifyToast();
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
 });
 
 function speakNotify(text, type) {
@@ -177,8 +177,8 @@ function speakNotify(text, type) {
   const now = Date.now();
   // Skip within first 5s of connection (replay buffer)
   if (now - _notifyConnectedAt < 5000) return;
-  // If user already acknowledged this cycle (focused window), don't repeat
-  if (_notifyAcknowledged) return;
+  // Page is in foreground — user can see the terminal, no need to notify
+  if (document.visibilityState === 'visible') return;
 
   if (type === 'completed') {
     if (now - _notifyLastCompleted < NOTIFY_COOLDOWN) return;
@@ -257,7 +257,6 @@ function notifyOnInput(data) {
     _notifyState = 'idle';
     _notifyOutputChars = 0;
     _notifyRecentText = '';
-    _notifyAcknowledged = false;  // new activity cycle, allow notifications again
     dismissNotifyToast();
     if (_notifyIdleTimer) {
       clearTimeout(_notifyIdleTimer);
@@ -401,6 +400,7 @@ term.onData((data) => {
 /* ── Resize handling ── */
 const resizeObs = new ResizeObserver(() => {
   fitAddon.fit();
+  term.scrollToBottom();
   sendResize();
 });
 resizeObs.observe(document.getElementById('terminal-wrap'));
@@ -752,6 +752,7 @@ if (window.visualViewport) {
       // Shrink body to visual viewport so keyboard doesn't overlap
       document.body.style.height = window.visualViewport.height + 'px';
       fitAddon.fit();
+      term.scrollToBottom();
       sendResize();
     });
   });
