@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WebCC — Session Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#161b22" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <title>WebCC — Dashboard</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -11,11 +18,15 @@
       background: #0d1117;
       color: #c9d1d9;
       font-family: 'Segoe UI', system-ui, sans-serif;
-      min-height: 100vh;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
 
     /* ── Header ── */
     #header {
+      flex-shrink: 0;
       background: #161b22;
       border-bottom: 1px solid #30363d;
       padding: 0 24px;
@@ -33,19 +44,48 @@
       text-decoration: none;
     }
     #header .logo span { color: #79c0ff; }
-
-    #header .title {
-      font-size: 13px;
-      color: #8b949e;
-    }
-
+    #header .title { font-size: 13px; color: #8b949e; }
     #header .spacer { flex: 1; }
 
-    /* ── Main content ── */
-    #main {
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 28px 24px;
+    .hdr-btn {
+      padding: 5px 12px;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .hdr-btn:hover { background: #30363d; border-color: #8b949e; }
+    .hdr-btn.active { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+
+    /* ── Content area ── */
+    #content {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar (card list) ── */
+    #sidebar {
+      flex-shrink: 0;
+      width: 100%;
+      overflow-y: auto;
+      padding: 20px 24px;
+      transition: width 0.25s;
+    }
+    #sidebar::-webkit-scrollbar { width: 5px; }
+    #sidebar::-webkit-scrollbar-track { background: transparent; }
+    #sidebar::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    /* When a session is focused, sidebar shrinks to a narrow list */
+    body.has-focus #sidebar {
+      width: 260px;
+      min-width: 260px;
+      border-right: 1px solid #30363d;
+      padding: 12px;
     }
 
     .page-title {
@@ -54,12 +94,14 @@
       color: #f0f6fc;
       margin-bottom: 6px;
     }
+    body.has-focus .page-title { font-size: 14px; margin-bottom: 4px; }
 
     .page-subtitle {
       font-size: 13px;
       color: #8b949e;
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
+    body.has-focus .page-subtitle { display: none; }
 
     /* ── Toolbar ── */
     .toolbar {
@@ -68,6 +110,7 @@
       gap: 10px;
       margin-bottom: 16px;
     }
+    body.has-focus .toolbar { margin-bottom: 10px; }
 
     .btn {
       padding: 7px 16px;
@@ -82,81 +125,242 @@
     }
     .btn:hover { background: #30363d; border-color: #8b949e; }
 
-    .btn-green {
-      background: #238636;
-      border-color: #2ea043;
-      color: #fff;
-      font-weight: 600;
-    }
+    .btn-green { background: #238636; border-color: #2ea043; color: #fff; font-weight: 600; }
     .btn-green:hover { background: #2ea043; }
 
-    .btn-danger {
-      background: transparent;
-      border-color: #f85149;
-      color: #f85149;
-    }
+    .btn-danger { background: transparent; border-color: #f85149; color: #f85149; }
     .btn-danger:hover { background: #f8514920; }
+
+    .btn-sm { padding: 5px 12px; font-size: 12px; }
 
     .refresh-info {
       font-size: 12px;
       color: #6e7681;
       margin-left: auto;
     }
+    body.has-focus .refresh-info { display: none; }
 
-    /* ── Sessions table ── */
-    .session-table {
-      width: 100%;
-      border-collapse: collapse;
-      border: 1px solid #30363d;
-      border-radius: 8px;
-      overflow: hidden;
+    /* ── Session Cards Grid ── */
+    .session-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    body.has-focus .session-grid {
+      grid-template-columns: 1fr;
+      gap: 8px;
     }
 
-    .session-table th {
+    .session-card {
       background: #161b22;
-      color: #8b949e;
-      font-size: 12px;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+      position: relative;
+    }
+    .session-card:hover {
+      border-color: #58a6ff;
+      box-shadow: 0 4px 20px #00000044;
+    }
+    .session-card.focused {
+      border-color: #58a6ff;
+      background: #1f6feb15;
+    }
+
+    .card-top {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px 10px;
+    }
+    body.has-focus .card-top { padding: 10px 12px 6px; }
+
+    .card-top .session-id {
+      font-family: monospace;
+      font-size: 15px;
+      color: #58a6ff;
       font-weight: 600;
-      text-align: left;
-      padding: 10px 14px;
-      border-bottom: 1px solid #30363d;
+    }
+    body.has-focus .card-top .session-id { font-size: 13px; }
+
+    .status-badge {
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-weight: 500;
+    }
+    .status-badge.active { background: #23863640; color: #3fb950; border: 1px solid #23863660; }
+    .status-badge.inactive { background: #30363d40; color: #8b949e; border: 1px solid #30363d; }
+
+    /* ── Notification badge on card ── */
+    .notify-badge {
+      display: none;
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+      animation: pulse-badge 1.5s infinite;
+      z-index: 1;
+    }
+    .notify-badge.waiting {
+      display: inline-block;
+      background: #d29922;
+      color: #fff;
+    }
+    .notify-badge.completed {
+      display: inline-block;
+      background: #238636;
+      color: #fff;
+    }
+    @keyframes pulse-badge {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .card-body {
+      padding: 0 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    body.has-focus .card-body { padding: 0 12px 8px; gap: 4px; }
+
+    .card-field {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .card-field .field-label { color: #6e7681; flex-shrink: 0; min-width: 50px; }
+    .card-field .field-value {
+      color: #c9d1d9;
+      font-family: monospace;
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .card-field .field-value.cwd-value { color: #79c0ff; }
 
-    .session-table td {
-      padding: 11px 14px;
-      border-bottom: 1px solid #21262d;
-      font-size: 13px;
-      vertical-align: middle;
+    .card-footer {
+      padding: 10px 16px;
+      border-top: 1px solid #21262d;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    body.has-focus .card-footer { padding: 8px 12px; }
+
+    .client-count {
+      font-size: 12px;
+      color: #8b949e;
+      margin-right: auto;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .client-count .count-num { color: #58a6ff; font-weight: 600; }
+
+    /* ── Focus panel (iframe terminal) ── */
+    #focus-panel {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      min-width: 0;
+      background: #0d1117;
+    }
+    body.has-focus #focus-panel { display: flex; }
+
+    #focus-toolbar {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+    }
+    #focus-toolbar .focus-id {
+      font-family: monospace;
+      font-size: 14px;
+      color: #58a6ff;
+      font-weight: 600;
+    }
+    #focus-toolbar .focus-cwd {
+      font-family: monospace;
+      font-size: 11px;
+      color: #8b949e;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 0;
     }
 
-    .session-table tr:last-child td { border-bottom: none; }
-    .session-table tr:hover td { background: #161b22; }
+    #focus-iframe {
+      flex: 1;
+      border: none;
+      width: 100%;
+      height: 100%;
+      background: #0d1117;
+    }
 
-    .session-id {
+    /* ── Notification log bar ── */
+    #notify-bar {
+      flex-shrink: 0;
+      max-height: 120px;
+      overflow-y: auto;
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      display: none;
+    }
+    #notify-bar.has-items { display: block; }
+    #notify-bar::-webkit-scrollbar { width: 4px; }
+    #notify-bar::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+
+    .notify-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 16px;
+      font-size: 12px;
+      border-bottom: 1px solid #21262d;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .notify-item:hover { background: #21262d; }
+    .notify-item:last-child { border-bottom: none; }
+
+    .notify-item .ni-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .ni-dot.waiting { background: #d29922; }
+    .ni-dot.completed { background: #3fb950; }
+
+    .notify-item .ni-id {
       font-family: monospace;
       color: #58a6ff;
-      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
     }
-
-    .client-badge {
-      display: inline-block;
-      background: #1f6feb30;
-      color: #58a6ff;
-      border: 1px solid #1f6feb60;
-      border-radius: 12px;
-      padding: 1px 8px;
-      font-size: 11px;
-    }
-    .client-badge.zero {
-      background: transparent;
+    .notify-item .ni-msg { color: #c9d1d9; flex: 1; }
+    .notify-item .ni-time { color: #6e7681; flex-shrink: 0; }
+    .notify-item .ni-dismiss {
       color: #6e7681;
-      border-color: #30363d;
+      cursor: pointer;
+      font-size: 14px;
+      flex-shrink: 0;
+      padding: 0 4px;
     }
-
-    .time-cell { color: #8b949e; font-size: 12px; }
-
-    .actions { display: flex; gap: 6px; }
+    .notify-item .ni-dismiss:hover { color: #f85149; }
 
     /* ── Empty state ── */
     .empty-state {
@@ -167,14 +371,38 @@
     .empty-state .empty-icon { font-size: 40px; margin-bottom: 12px; }
     .empty-state p { font-size: 14px; margin-bottom: 20px; }
 
-    /* ── Settings card ── */
+    /* ── Settings section (collapsible) ── */
+    .settings-section { margin-top: 36px; }
+    body.has-focus .settings-section { display: none; }
+
+    .settings-section summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      padding: 12px 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: #f0f6fc;
+      list-style: none;
+      user-select: none;
+    }
+    .settings-section summary::-webkit-details-marker { display: none; }
+    .settings-section summary::before {
+      content: '\25B6';
+      font-size: 10px;
+      color: #6e7681;
+      transition: transform 0.2s;
+    }
+    .settings-section[open] summary::before { transform: rotate(90deg); }
+
     .settings-card {
-      margin-top: 36px;
+      margin-top: 16px;
       border: 1px solid #30363d;
       border-radius: 8px;
       overflow: hidden;
     }
-    .settings-card .card-header {
+    .settings-card .sc-header {
       background: #161b22;
       padding: 12px 16px;
       border-bottom: 1px solid #30363d;
@@ -182,23 +410,14 @@
       font-weight: 600;
       color: #f0f6fc;
     }
-    .settings-card .card-body {
+    .settings-card .sc-body {
       padding: 18px 16px;
       display: flex;
       flex-direction: column;
       gap: 14px;
     }
-    .setting-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .setting-row label {
-      flex: 0 0 110px;
-      font-size: 13px;
-      color: #8b949e;
-      text-align: right;
-    }
+    .setting-row { display: flex; align-items: center; gap: 12px; }
+    .setting-row label { flex: 0 0 110px; font-size: 13px; color: #8b949e; text-align: right; }
     .setting-row input {
       flex: 1;
       background: #0d1117;
@@ -209,24 +428,18 @@
       font-size: 13px;
       font-family: monospace;
     }
-    .setting-row input:focus {
-      outline: none;
-      border-color: #58a6ff;
-    }
+    .setting-row input:focus { outline: none; border-color: #58a6ff; }
     .setting-row input::placeholder { color: #484f58; }
-    .card-footer {
+    .sc-footer {
       padding: 12px 16px;
       border-top: 1px solid #21262d;
       display: flex;
       align-items: center;
       gap: 12px;
     }
-    .card-footer .status-text {
-      font-size: 12px;
-      color: #8b949e;
-    }
-    .card-footer .status-text.ok { color: #3fb950; }
-    .card-footer .status-text.err { color: #f85149; }
+    .sc-footer .status-text { font-size: 12px; color: #8b949e; }
+    .sc-footer .status-text.ok { color: #3fb950; }
+    .sc-footer .status-text.err { color: #f85149; }
 
     /* ── Toast ── */
     #toast {
@@ -241,91 +454,158 @@
       opacity: 0;
       transition: opacity 0.2s;
       pointer-events: none;
+      z-index: 20000;
     }
     #toast.show { opacity: 1; }
+
+    /* ── QR Modal ── */
+    #qr-modal {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7); z-index: 9999;
+      align-items: center; justify-content: center;
+    }
+    #qr-modal.visible { display: flex; }
+    #qr-modal .qr-box {
+      background: #fff; border-radius: 12px; padding: 24px;
+      text-align: center; max-width: 320px; width: 90%;
+    }
+    #qr-modal .qr-box canvas { display: block; margin: 0 auto 12px; }
+    #qr-modal .qr-url {
+      font-size: 12px; color: #555; word-break: break-all;
+      margin-bottom: 8px; user-select: all;
+    }
+    #qr-modal .qr-title {
+      font-size: 14px; font-weight: 600; color: #333; margin-bottom: 12px;
+    }
+    #qr-modal .qr-close {
+      background: #333; color: #fff; border: none; border-radius: 6px;
+      padding: 6px 20px; cursor: pointer; font-size: 13px;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      body.has-focus #sidebar { display: none; }
+      body.has-focus #focus-panel { width: 100%; }
+      #sidebar { padding: 16px 14px; }
+      .session-grid { grid-template-columns: 1fr; }
+      .setting-row { flex-direction: column; align-items: stretch; gap: 4px; }
+      .setting-row label { text-align: left; flex: none; }
+    }
   </style>
 </head>
 <body>
   <div id="header">
     <a class="logo" href="/">Web<span>CC</span></a>
-    <span class="title">/ Session Manager</span>
+    <span class="title">/ Dashboard</span>
     <span class="spacer"></span>
+    <button class="hdr-btn" id="qr-btn" onclick="showQR()" title="Scan QR to open on mobile">QR</button>
+    <button class="hdr-btn" id="push-toggle" onclick="togglePush()" title="Enable push notifications">Push</button>
+    <button class="hdr-btn" id="notify-toggle" title="Toggle notifications">Notifications</button>
   </div>
 
-  <div id="main">
-    <div class="page-title">Sessions</div>
-    <div class="page-subtitle">Active PTY sessions — close a tab without ending a session, reopen it by URL.</div>
+  <div id="content">
+    <!-- Sidebar: card grid / list -->
+    <div id="sidebar">
+      <div class="page-title">Dashboard</div>
+      <div class="page-subtitle">Manage all Claude Code sessions. Click a card to open inline.</div>
 
-    <div class="toolbar">
-      <button class="btn btn-green" onclick="newSession()">+ New Session</button>
-      <button class="btn" onclick="loadSessions()">Refresh</button>
-      <span class="refresh-info" id="refresh-info">Auto-refresh every 5s</span>
+      <div class="toolbar">
+        <button class="btn btn-green" onclick="newSession()">+ New Session</button>
+        <button class="btn" onclick="loadSessions()">Refresh</button>
+        <span class="refresh-info" id="refresh-info">Auto-refresh 5s</span>
+      </div>
+
+      <div id="session-list"></div>
+
+      <!-- Voice Settings (collapsible) -->
+      <details class="settings-section">
+        <summary>Voice Settings</summary>
+        <div class="settings-card">
+          <div class="sc-header">Voice Refinement — OpenRouter</div>
+          <div class="sc-body">
+            <div class="setting-row">
+              <label>API Endpoint</label>
+              <input id="vs-base-url" type="text" placeholder="https://openrouter.ai/api/v1" />
+            </div>
+            <div class="setting-row">
+              <label>API Key</label>
+              <input id="vs-api-key" type="password" placeholder="sk-or-v1-..." autocomplete="off" />
+            </div>
+            <div class="setting-row">
+              <label>Model</label>
+              <input id="vs-model" type="text" placeholder="google/gemini-2.0-flash-001" />
+            </div>
+          </div>
+          <div class="sc-footer">
+            <button class="btn btn-green" onclick="saveVoiceSettings()">Save</button>
+            <span class="status-text" id="vs-status"></span>
+          </div>
+        </div>
+        <div class="settings-card">
+          <div class="sc-header">Voice STT — Whisper</div>
+          <div class="sc-body">
+            <div class="setting-row">
+              <label>API Endpoint</label>
+              <input id="ws-base-url" type="text" placeholder="https://openrouter.ai/api/v1" />
+            </div>
+            <div class="setting-row">
+              <label>API Key</label>
+              <input id="ws-api-key" type="password" placeholder="gsk_... (留空则复用 OpenRouter Key)" autocomplete="off" />
+            </div>
+            <div class="setting-row">
+              <label>Model</label>
+              <input id="ws-model" type="text" placeholder="whisper-large-v3-turbo" />
+            </div>
+            <div class="setting-row">
+              <label>Language</label>
+              <input id="ws-language" type="text" placeholder="zh" style="max-width:120px" />
+              <span style="font-size:12px;color:#6e7681">ISO-639-1 code (zh/en/ja/...)</span>
+            </div>
+            <div class="setting-row">
+              <label>Prompt</label>
+              <input id="ws-prompt" type="text" placeholder="React, useState, TypeScript, Claude Code, WebCC, SSE" />
+            </div>
+            <div style="padding:0 0 0 122px;font-size:12px;color:#6e7681;line-height:1.5">
+              Whisper prompt guides vocabulary recognition.<br>
+              Terms from voice_examples.json are also auto-appended at runtime.
+            </div>
+          </div>
+          <div class="sc-footer">
+            <button class="btn btn-green" onclick="saveVoiceSettings()">Save</button>
+            <span class="status-text" id="ws-status"></span>
+          </div>
+        </div>
+      </details>
     </div>
 
-    <div id="session-list"></div>
-
-    <!-- Voice Refinement Settings -->
-    <div class="settings-card">
-      <div class="card-header">Voice Refinement — OpenRouter</div>
-      <div class="card-body">
-        <div class="setting-row">
-          <label>API Endpoint</label>
-          <input id="vs-base-url" type="text" placeholder="https://openrouter.ai/api/v1" />
-        </div>
-        <div class="setting-row">
-          <label>API Key</label>
-          <input id="vs-api-key" type="password" placeholder="sk-or-v1-..." autocomplete="off" />
-        </div>
-        <div class="setting-row">
-          <label>Model</label>
-          <input id="vs-model" type="text" placeholder="google/gemini-2.0-flash-001" />
-        </div>
+    <!-- Focus panel: embedded terminal -->
+    <div id="focus-panel">
+      <div id="focus-toolbar">
+        <span class="focus-id" id="focus-id"></span>
+        <span class="focus-cwd" id="focus-cwd"></span>
+        <button class="btn btn-sm" id="focus-newtab" title="Open in new tab">New Tab</button>
+        <button class="btn btn-sm" id="focus-close" title="Close panel">Close</button>
       </div>
-      <div class="card-footer">
-        <button class="btn btn-green" onclick="saveVoiceSettings()">Save</button>
-        <span class="status-text" id="vs-status"></span>
-      </div>
-    </div>
-
-    <!-- Whisper STT Settings -->
-    <div class="settings-card">
-      <div class="card-header">Voice STT — Whisper</div>
-      <div class="card-body">
-        <div class="setting-row">
-          <label>API Endpoint</label>
-          <input id="ws-base-url" type="text" placeholder="https://openrouter.ai/api/v1" />
-        </div>
-        <div class="setting-row">
-          <label>API Key</label>
-          <input id="ws-api-key" type="password" placeholder="gsk_... (留空则复用 OpenRouter Key)" autocomplete="off" />
-        </div>
-        <div class="setting-row">
-          <label>Model</label>
-          <input id="ws-model" type="text" placeholder="whisper-large-v3-turbo" />
-        </div>
-        <div class="setting-row">
-          <label>Language</label>
-          <input id="ws-language" type="text" placeholder="zh" style="max-width:120px" />
-          <span style="font-size:12px;color:#6e7681">ISO-639-1 code (zh/en/ja/...)</span>
-        </div>
-        <div class="setting-row">
-          <label>Prompt</label>
-          <input id="ws-prompt" type="text" placeholder="React, useState, TypeScript, Claude Code, WebCC, SSE" />
-        </div>
-        <div style="padding:0 0 0 122px;font-size:12px;color:#6e7681;line-height:1.5">
-          Whisper prompt guides vocabulary recognition. Add your frequently used technical terms here.<br>
-          Terms from voice_examples.json are also auto-appended at runtime.
-        </div>
-      </div>
-      <div class="card-footer">
-        <button class="btn btn-green" onclick="saveVoiceSettings()">Save</button>
-        <span class="status-text" id="ws-status"></span>
-      </div>
+      <iframe id="focus-iframe" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
     </div>
   </div>
+
+  <!-- Notification bar at bottom -->
+  <div id="notify-bar"></div>
 
   <div id="toast"></div>
 
+  <div id="qr-modal" onclick="hideQR(event)">
+    <div class="qr-box" onclick="event.stopPropagation()">
+      <div class="qr-title">Scan to open on mobile</div>
+      <canvas id="qr-canvas"></canvas>
+      <div class="qr-url" id="qr-url-text"></div>
+      <button class="qr-close" onclick="hideQR()">Close</button>
+    </div>
+  </div>
+
+  <script src="qrcode.min.js"></script>
+  <script src="pwa.js"></script>
   <script src="manage.js"></script>
 </body>
 </html>

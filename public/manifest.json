@@ -1,0 +1,18 @@
+{
+  "name": "WebCC — Claude Code",
+  "short_name": "WebCC",
+  "description": "Web interface for Claude Code CLI with push notifications",
+  "start_url": "/manage",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1117",
+  "theme_color": "#161b22",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -6,6 +6,10 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#161b22" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
   <title>WebCC — Claude Code in Browser</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <style>
@@ -85,7 +89,6 @@
     }
 
     #reconnect-btn {
-      margin-left: auto;
       padding: 5px 14px;
       background: #21262d;
       color: #c9d1d9;
@@ -97,6 +100,26 @@
       transition: background 0.15s;
     }
     #reconnect-btn:hover { background: #30363d; }
+
+    #header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .hdr-btn {
+      padding: 5px 10px;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      text-decoration: none;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .hdr-btn:hover { background: #30363d; }
 
     /* ── Input Toolbar ── */
     #input-toolbar {
@@ -196,11 +219,51 @@
     }
     .chip-remove:hover { color: #f85149; }
 
+    /* ── Notification Toast ── */
+    #notify-toast {
+      display: none;
+      position: absolute;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9000;
+      background: #1f6feb;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 36px 8px 14px;
+      border-radius: 8px;
+      box-shadow: 0 4px 16px #00000066;
+      cursor: pointer;
+      animation: toastSlide 0.3s ease;
+      white-space: nowrap;
+      max-width: 90%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #notify-toast.waiting { background: #d29922; }
+    #notify-toast.completed { background: #238636; }
+    #notify-toast .toast-close {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 16px;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+    #notify-toast .toast-close:hover { opacity: 1; }
+    @keyframes toastSlide {
+      from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+
     /* ── Terminal ── */
     #terminal-wrap {
       flex: 1;
       min-height: 0;
       padding: 6px 8px 8px;
+      position: relative;
     }
 
     #terminal {
@@ -525,8 +588,15 @@
         min-height: 56px;
       }
       #header {
-        height: 48px;
-        padding: 0 12px;
+        height: auto;
+        padding: 6px 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      #header-actions {
+        margin-left: 0;
+        width: 100%;
+        justify-content: flex-end;
       }
       #reconnect-btn {
         padding: 6px 12px;
@@ -543,21 +613,25 @@
     <div id="status-dot" class="connecting"></div>
     <span id="status-label">Connecting…</span>
     <span id="session-label"></span>
-    <button id="save-cwd-btn" title="更改工作目录" style="margin-left:auto; padding:5px 10px; background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; cursor:pointer; font-size:14px; transition:background 0.15s;" onmouseover="this.style.background='#30363d'" onmouseout="this.style.background='#21262d'">📂</button>
-    <button id="files-btn" title="文件浏览器" style="padding:5px 10px; background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; cursor:pointer; font-size:14px; transition:background 0.15s;" onmouseover="this.style.background='#30363d'" onmouseout="this.style.background='#21262d'">📁</button>
-    <button id="notify-btn" title="语音通知 (点击开启/关闭)" style="padding:5px 10px; background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; cursor:pointer; font-size:14px; transition:background 0.15s, border-color 0.15s;">🔔</button>
-    <button id="reconnect-btn" onclick="connect()">Reconnect</button>
+    <div id="header-actions">
+      <button id="save-cwd-btn" class="hdr-btn" title="更改工作目录">📂</button>
+      <button id="files-btn" class="hdr-btn" title="文件浏览器">📁</button>
+      <button id="notify-btn" class="hdr-btn" title="语音通知 (点击开启/关闭)">🔔</button>
+      <a href="/wechat" class="hdr-btn" title="WeChat Bridge">💬</a>
+      <button id="reconnect-btn" onclick="connect()">Reconnect</button>
+    </div>
   </div>
 
   <div id="input-toolbar">
     <button id="mic-btn" class="toolbar-btn" title="语音输入 (点击开始/停止)">🎤</button>
     <span id="mic-status"></span>
-    <button id="attach-btn" class="toolbar-btn" title="附加图片">📎</button>
-    <input id="file-input" type="file" accept="image/*" style="display:none">
+    <button id="attach-btn" class="toolbar-btn" title="附加文件">📎</button>
+    <input id="file-input" type="file" style="display:none">
     <div id="attachments"></div>
   </div>
 
   <div id="terminal-wrap">
+    <div id="notify-toast"><span class="toast-close">✕</span></div>
     <div id="terminal"></div>
   </div>
 
@@ -581,6 +655,30 @@
         autocomplete="off" autocorrect="off"
         autocapitalize="off" spellcheck="false" />
       <button id="mobile-send">发送</button>
+    </div>
+  </div>
+
+  <!-- Initial directory picker modal (shown for new sessions) -->
+  <div id="init-cwd-modal" style="display:none; position:fixed; inset:0; background:#000000cc; z-index:15000; align-items:center; justify-content:center;">
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:24px; width:540px; max-width:92vw; box-shadow:0 16px 48px #00000099;">
+      <div style="font-size:16px; font-weight:700; color:#f0f6fc; margin-bottom:6px;">选择工作目录</div>
+      <div style="font-size:12px; color:#8b949e; margin-bottom:16px;">Claude Code 将在此目录中启动，请选择项目所在的目录</div>
+      <div style="font-size:12px; color:#8b949e; margin-bottom:6px;">目录路径</div>
+      <input id="init-cwd-input" type="text"
+        style="width:100%; background:#0d1117; border:1px solid #30363d; border-radius:6px; color:#c9d1d9; font-size:13px; font-family:monospace; padding:8px 12px; outline:none; margin-bottom:8px; box-sizing:border-box;"
+        placeholder="输入目录路径，支持 ~ 和绝对路径…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      <div id="init-cwd-browser" style="max-height:240px; overflow-y:auto; border:1px solid #21262d; border-radius:6px; background:#0d1117; margin-bottom:12px;"></div>
+      <div style="font-size:12px; color:#8b949e; margin-bottom:6px;">Session ID（留空自动生成）</div>
+      <input id="init-session-id" type="text"
+        style="width:100%; background:#0d1117; border:1px solid #30363d; border-radius:6px; color:#c9d1d9; font-size:13px; font-family:monospace; padding:8px 12px; outline:none; margin-bottom:12px; box-sizing:border-box;"
+        placeholder="例如 my-project、gps-edm…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      <div id="init-cwd-error" style="font-size:12px; color:#f85149; margin-bottom:12px; display:none;"></div>
+      <div style="display:flex; justify-content:flex-end; gap:10px;">
+        <button id="init-cwd-skip" style="padding:7px 16px; border-radius:6px; border:1px solid #30363d; background:#21262d; color:#c9d1d9; font-size:13px; cursor:pointer;">使用默认 (Home)</button>
+        <button id="init-cwd-confirm" style="padding:7px 16px; border-radius:6px; border:1px solid #2ea043; background:#238636; color:#fff; font-size:13px; font-weight:600; cursor:pointer;">启动</button>
+      </div>
     </div>
   </div>
 
@@ -635,6 +733,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+  <script src="pwa.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

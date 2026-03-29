@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebCC — WeChat Bridge</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    #header {
+      flex-shrink: 0;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 0 24px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    #header .logo { font-size: 15px; font-weight: 700; color: #f78166; letter-spacing: 0.5px; text-decoration: none; }
+    #header .logo span { color: #79c0ff; }
+    #header .title { font-size: 13px; color: #8b949e; }
+    #header .spacer { flex: 1; }
+    .hdr-status {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+    }
+    .hdr-status.on  { background: #23863620; color: #3fb950; border: 1px solid #23863660; }
+    .hdr-status.off { background: #21262d; color: #6e7681; border: 1px solid #30363d; }
+
+    /* ── Layout ── */
+    #main {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    /* ── Config Panel (left) ── */
+    #config-panel {
+      flex: 0 0 320px;
+      background: #161b22;
+      border-right: 1px solid #30363d;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+    .cfg-section {
+      padding: 16px;
+      border-bottom: 1px solid #21262d;
+    }
+    .cfg-section:last-child { border-bottom: none; }
+    .cfg-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: #f0f6fc;
+      margin-bottom: 12px;
+    }
+    .cfg-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .cfg-row:last-child { margin-bottom: 0; }
+    .cfg-label {
+      font-size: 11px;
+      color: #8b949e;
+    }
+    .cfg-input {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 7px 10px;
+      color: #c9d1d9;
+      font-size: 13px;
+      font-family: monospace;
+      outline: none;
+      width: 100%;
+    }
+    .cfg-input:focus { border-color: #58a6ff; }
+    .cfg-input::placeholder { color: #484f58; }
+    select.cfg-input {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      cursor: pointer;
+      appearance: auto;
+    }
+
+    .cfg-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #c9d1d9;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: #30363d; border-color: #8b949e; }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn-green { background: #238636; border-color: #2ea043; color: #fff; font-weight: 600; }
+    .btn-green:hover { background: #2ea043; }
+    .btn-danger { background: transparent; border-color: #f85149; color: #f85149; }
+    .btn-danger:hover { background: #f8514920; }
+
+    .cfg-hint {
+      font-size: 11px;
+      color: #6e7681;
+      line-height: 1.5;
+      margin-top: 4px;
+    }
+
+    .cfg-status {
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .cfg-status.ok  { color: #3fb950; }
+    .cfg-status.err { color: #f85149; }
+
+    /* ── Chat Log (center) ── */
+    #chat-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    #chat-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #chat-log::-webkit-scrollbar { width: 6px; }
+    #chat-log::-webkit-scrollbar-track { background: transparent; }
+    #chat-log::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    .log-entry {
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 4px 8px;
+      border-radius: 4px;
+      word-break: break-word;
+      max-width: 100%;
+    }
+    .log-entry .log-time {
+      font-size: 10px;
+      color: #484f58;
+      margin-right: 6px;
+      font-family: monospace;
+    }
+    .log-entry.type-in {
+      background: #1f6feb15;
+      border-left: 3px solid #58a6ff;
+    }
+    .log-entry.type-in .log-prefix { color: #58a6ff; }
+    .log-entry.type-out {
+      background: #23863612;
+      border-left: 3px solid #3fb950;
+    }
+    .log-entry.type-out .log-prefix { color: #3fb950; }
+    .log-entry.type-system {
+      background: #d2992212;
+      border-left: 3px solid #d29922;
+      color: #d29922;
+    }
+    .log-entry.type-error {
+      background: #f8514912;
+      border-left: 3px solid #f85149;
+      color: #f85149;
+    }
+
+    .log-empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #484f58;
+      font-size: 14px;
+    }
+
+    /* ── Input Bar ── */
+    #input-bar {
+      flex-shrink: 0;
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      align-items: center;
+    }
+    #msg-input {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #c9d1d9;
+      font-size: 13px;
+      outline: none;
+    }
+    #msg-input:focus { border-color: #58a6ff; }
+    #msg-input::placeholder { color: #484f58; }
+
+    .send-target {
+      font-size: 11px;
+      color: #8b949e;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .send-target select {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      color: #c9d1d9;
+      font-size: 11px;
+      padding: 2px 4px;
+      outline: none;
+    }
+
+    /* ── Mobile ── */
+    @media (max-width: 768px) {
+      #config-panel { flex: 0 0 100%; display: none; }
+      #config-panel.open { display: flex; position: fixed; inset: 48px 0 0 0; z-index: 100; }
+      .cfg-toggle { display: block !important; }
+    }
+    .cfg-toggle { display: none; font-size: 14px; cursor: pointer; background: none; border: none; color: #c9d1d9; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <a class="logo" href="/">Web<span>CC</span></a>
+    <span class="title">/ WeChat Bridge</span>
+    <button class="cfg-toggle" id="cfg-toggle" onclick="toggleConfig()">&#9776;</button>
+    <span class="spacer"></span>
+    <span class="hdr-status off" id="hdr-status">Stopped</span>
+  </div>
+
+  <div id="main">
+    <div id="config-panel">
+      <div class="cfg-section">
+        <div class="cfg-title">WeChat-MCP 连接</div>
+        <div class="cfg-row">
+          <span class="cfg-label">MCP Server URL</span>
+          <input class="cfg-input" id="cfg-mcp-url" placeholder="http://localhost:8000/mcp" />
+        </div>
+        <div class="cfg-row">
+          <span class="cfg-label">聊天对象 (微信联系人/群名)</span>
+          <input class="cfg-input" id="cfg-chat-name" placeholder="文件传输助手" />
+        </div>
+        <div class="cfg-hint">
+          WeChat-MCP 需以 streamable-http 模式运行:<br>
+          <code>wechat-mcp --transport streamable-http</code>
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-title">Claude Code 会话</div>
+        <div class="cfg-row">
+          <span class="cfg-label">绑定会话</span>
+          <select class="cfg-input" id="cfg-session">
+            <option value="">-- 选择会话 --</option>
+          </select>
+        </div>
+        <div class="cfg-row">
+          <button class="btn" onclick="loadSessions()" style="font-size:12px;padding:4px 10px;">刷新会话列表</button>
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-title">高级设置</div>
+        <div class="cfg-row">
+          <span class="cfg-label">轮询间隔 (ms)</span>
+          <input class="cfg-input" id="cfg-poll" type="number" value="3000" min="1000" step="500" />
+        </div>
+        <div class="cfg-row">
+          <span class="cfg-label">输出缓冲超时 (ms)</span>
+          <input class="cfg-input" id="cfg-idle" type="number" value="5000" min="2000" step="500" />
+        </div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-actions">
+          <button class="btn btn-green" id="btn-start" onclick="startBridge()">启动桥接</button>
+          <button class="btn btn-danger" id="btn-stop" onclick="stopBridge()" disabled>停止</button>
+          <button class="btn" onclick="saveConfig()">保存配置</button>
+        </div>
+        <div class="cfg-status" id="cfg-status"></div>
+      </div>
+
+      <div class="cfg-section">
+        <div class="cfg-hint">
+          <b>微信命令:</b> 在微信中发送<br>
+          <code>/help</code> — 显示帮助<br>
+          <code>/status</code> — 查看状态<br>
+          <code>/sessions</code> — 列出会话<br>
+          <code>/bind &lt;id&gt;</code> — 切换会话
+        </div>
+      </div>
+    </div>
+
+    <div id="chat-area">
+      <div id="chat-log">
+        <div class="log-empty">桥接未启动。配置左侧面板后点击「启动桥接」。</div>
+      </div>
+      <div id="input-bar">
+        <input id="msg-input" type="text" placeholder="输入消息..." autocomplete="off" />
+        <span class="send-target">
+          发送到
+          <select id="send-target">
+            <option value="pty">Claude Code</option>
+            <option value="wechat">微信</option>
+          </select>
+        </span>
+        <button class="btn btn-green" onclick="sendMsg()" style="padding:7px 12px;">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="wechat.js"></script>
+</body>
+</html>

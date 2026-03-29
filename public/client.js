@@ -65,6 +65,7 @@ if (sessionLabel) {
 
 /* ── Voice Notifications (task complete / waiting for action) ── */
 const notifyBtn = document.getElementById('notify-btn');
+const notifyToast = document.getElementById('notify-toast');
 let _notifyEnabled = localStorage.getItem('webcc_notify') !== 'off';
 let _notifyState = 'idle';       // idle | active | waiting
 let _notifyOutputChars = 0;
@@ -72,21 +73,38 @@ let _notifyIdleTimer = null;
 let _notifyLastCompleted = 0;
 let _notifyLastAction = 0;
 let _notifyConnectedAt = 0;
+let _notifyRecentText = '';
+let _notifyAcknowledged = false; // true after user sees/dismisses notification
+let _notifyToastTimer = null;
 
 const NOTIFY_COOLDOWN = 8000;     // min ms between same-type notifications
-const NOTIFY_IDLE_MS = 4000;      // idle duration to trigger "completed"
+const NOTIFY_IDLE_MS = 6000;      // idle duration to trigger "completed"
 const NOTIFY_MIN_CHARS = 80;      // min output chars before idle = "completed"
 
+// "等待操作" — Claude 需要用户做选择或确认（选 1/2/3、Y/n、Allow/Deny）
 const NOTIFY_WAITING_PATTERNS = [
+  // Y/n confirmation
   /\[Y\/n\]/,
   /\[y\/N\]/,
   /\(y\/n\)/i,
   /\(yes\/no\)/i,
-  /Do you want to/i,
-  /Allow\b/,
-  /Approve\?/i,
-  /Press Enter/i,
   /Yes\s*\/\s*No/i,
+  // Claude Code tool approval
+  /Allow\s*(once|always)/i,
+  /Approve\??/i,
+  /Deny/i,
+  /Do you want to proceed/i,
+  /Do you want to/i,
+  /Press Enter/i,
+  // Numbered choices (e.g. "1. xxx  2. xxx" or "1) xxx")
+  /^\s*[1-9]\.\s+\S/m,
+  /^\s*[1-9]\)\s+\S/m,
+];
+
+// "任务已完成" — Claude 输出停止，回到空闲提示符
+const NOTIFY_COMPLETED_PATTERNS = [
+  /[❯>]\s*$/,        // idle prompt
+  /\$\s*$/,           // shell prompt
 ];
 
 const NOTIFY_ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*(?:\x07|\x1b\\)|[()][AB012]|.)/g;
@@ -119,11 +137,48 @@ if (notifyBtn) {
   });
 }
 
+function showNotifyToast(text, type) {
+  if (!notifyToast) return;
+  // Set toast text (keep close button)
+  notifyToast.childNodes[0].nodeType === 3
+    ? (notifyToast.firstChild.textContent = text)
+    : notifyToast.insertBefore(document.createTextNode(text), notifyToast.firstChild);
+  // Update: set text content before the close button
+  const closeBtn = notifyToast.querySelector('.toast-close');
+  notifyToast.textContent = '';
+  notifyToast.appendChild(document.createTextNode(text + ' '));
+  notifyToast.appendChild(closeBtn);
+  notifyToast.className = type;
+  notifyToast.style.display = 'block';
+  // Auto-hide after 15s
+  if (_notifyToastTimer) clearTimeout(_notifyToastTimer);
+  _notifyToastTimer = setTimeout(dismissNotifyToast, 15000);
+}
+
+function dismissNotifyToast() {
+  if (notifyToast) notifyToast.style.display = 'none';
+  if (_notifyToastTimer) { clearTimeout(_notifyToastTimer); _notifyToastTimer = null; }
+  // Dismissing toast does NOT stop voice repeating
+}
+
+if (notifyToast) {
+  notifyToast.addEventListener('click', dismissNotifyToast);
+}
+
+// Only acknowledge (stop repeating) when user activates the window
+window.addEventListener('focus', () => {
+  if (_notifyAcknowledged) return;
+  _notifyAcknowledged = true;
+  dismissNotifyToast();
+});
+
 function speakNotify(text, type) {
-  if (!_notifyEnabled || !window.speechSynthesis) return;
+  if (!_notifyEnabled) return;
   const now = Date.now();
   // Skip within first 5s of connection (replay buffer)
   if (now - _notifyConnectedAt < 5000) return;
+  // If user already acknowledged this cycle (focused window), don't repeat
+  if (_notifyAcknowledged) return;
 
   if (type === 'completed') {
     if (now - _notifyLastCompleted < NOTIFY_COOLDOWN) return;
@@ -133,11 +188,16 @@ function speakNotify(text, type) {
     _notifyLastAction = now;
   }
 
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = 'zh-CN';
-  utterance.rate = 1.1;
-  utterance.volume = 0.8;
-  window.speechSynthesis.speak(utterance);
+  // Show visual toast + play voice
+  showNotifyToast(text, type);
+
+  if (window.speechSynthesis) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-CN';
+    utterance.rate = 1.1;
+    utterance.volume = 0.8;
+    window.speechSynthesis.speak(utterance);
+  }
 }
 
 function notifyOnOutput(rawData) {
@@ -146,12 +206,18 @@ function notifyOnOutput(rawData) {
   const text = notifyStripAnsi(rawData);
   const printable = text.replace(/\s+/g, '');
 
+  // Accumulate stripped text for final idle check
+  _notifyRecentText += text;
+  if (_notifyRecentText.length > 3000) {
+    _notifyRecentText = _notifyRecentText.slice(-2000);
+  }
+
   if (printable.length > 0) {
     _notifyOutputChars += printable.length;
     if (_notifyState === 'idle') _notifyState = 'active';
   }
 
-  // Check for waiting-for-action patterns
+  // Check for waiting-for-action patterns (needs user selection mid-task)
   if (_notifyState === 'active') {
     for (const pat of NOTIFY_WAITING_PATTERNS) {
       if (pat.test(text)) {
@@ -162,14 +228,26 @@ function notifyOnOutput(rawData) {
     }
   }
 
-  // Reset idle timer — if output stops for NOTIFY_IDLE_MS, consider task done
+  // Reset idle timer — if output stops for NOTIFY_IDLE_MS, classify the notification
   if (_notifyIdleTimer) clearTimeout(_notifyIdleTimer);
   _notifyIdleTimer = setTimeout(() => {
     if (_notifyState === 'active' && _notifyOutputChars >= NOTIFY_MIN_CHARS) {
-      speakNotify('任务已完成', 'completed');
+      const tail = _notifyRecentText.slice(-2000);
+      // Check if it's a waiting-for-action (selection/confirmation prompt)
+      let isWaiting = false;
+      for (const pat of NOTIFY_WAITING_PATTERNS) {
+        if (pat.test(tail)) { isWaiting = true; break; }
+      }
+      if (isWaiting) {
+        speakNotify('正在等待您的操作', 'action');
+      } else {
+        // Output stopped — task completed (idle prompt or just no more output)
+        speakNotify('任务已完成', 'completed');
+      }
     }
     _notifyState = 'idle';
     _notifyOutputChars = 0;
+    _notifyRecentText = '';
   }, NOTIFY_IDLE_MS);
 }
 
@@ -178,6 +256,9 @@ function notifyOnInput(data) {
   if (data.includes('\r') || data.includes('\n')) {
     _notifyState = 'idle';
     _notifyOutputChars = 0;
+    _notifyRecentText = '';
+    _notifyAcknowledged = false;  // new activity cycle, allow notifications again
+    dismissNotifyToast();
     if (_notifyIdleTimer) {
       clearTimeout(_notifyIdleTimer);
       _notifyIdleTimer = null;
@@ -203,6 +284,9 @@ function scheduleReconnect() {
   }, delay);
 }
 
+let _initialCwd = '';   // set by directory picker for new sessions
+let _initialId  = '';   // custom session ID from directory picker
+
 function connect() {
   // Cancel any pending reconnect
   if (_reconnectTimer) {
@@ -220,9 +304,13 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const urlToken = new URLSearchParams(location.search).get('token');
   const tokenParam = urlToken ? `&token=${urlToken}` : '';
+  const cwdParam = _initialCwd ? `&cwd=${encodeURIComponent(_initialCwd)}` : '';
+  const idParam  = _initialId  ? `&newid=${encodeURIComponent(_initialId)}` : '';
   const wsUrl = currentSessionId
     ? `${proto}//${location.host}/?id=${currentSessionId}${tokenParam}`
-    : `${proto}//${location.host}/?_=1${tokenParam}`;
+    : `${proto}//${location.host}/?_=1${tokenParam}${cwdParam}${idParam}`;
+  _initialCwd = '';  // only used once
+  _initialId  = '';
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
@@ -238,8 +326,10 @@ function connect() {
       if (msg.type === 'session_id') {
         currentSessionId = msg.id;
         updateSessionLabel(msg.id);
-        const newUrl = `${location.pathname}?id=${msg.id}`;
-        if (location.search !== `?id=${msg.id}`) {
+        const _urlParams = new URLSearchParams(location.search);
+        _urlParams.set('id', msg.id);
+        const newUrl = `${location.pathname}?${_urlParams.toString()}`;
+        if (location.search !== `?${_urlParams.toString()}`) {
           history.replaceState(null, '', newUrl);
         }
       } else if (msg.type === 'output' || msg.type === 'error') {
@@ -317,8 +407,8 @@ resizeObs.observe(document.getElementById('terminal-wrap'));
 
 term.onResize(() => sendResize());
 
-/* ── Start ── */
-connect();
+/* ── Start (moved to end of file, after all const declarations) ── */
+// see bottom of file
 
 /* ── Voice Input (Whisper STT via MediaRecorder) ── */
 const micBtn    = document.getElementById('mic-btn');
@@ -348,7 +438,8 @@ function sendVoiceText(text, raw, refined) {
     ws.send(JSON.stringify({ type: 'input', data: text }));
   }
   // Save feedback (server ignores if userFinal === refined)
-  fetch('/api/voice/feedback', {
+  const _fbToken = new URLSearchParams(location.search).get('token');
+  fetch(`/api/voice/feedback${_fbToken ? '?token=' + encodeURIComponent(_fbToken) : ''}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ raw, refined, userFinal: text }),
@@ -373,7 +464,8 @@ async function fetchRefined(raw) {
   try {
     const fetchStart = Date.now();
     console.log('[voice-client] Sending POST /api/voice/refine ...');
-    const res = await fetch('/api/voice/refine', {
+    const _rfToken = new URLSearchParams(location.search).get('token');
+    const res = await fetch(`/api/voice/refine${_rfToken ? '?token=' + encodeURIComponent(_rfToken) : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw }),
@@ -547,7 +639,8 @@ async function uploadAudioForSTT(blob) {
   try {
     const formData = new FormData();
     formData.append('file', blob, 'recording.webm');
-    const res = await fetch('/api/voice/stt', { method: 'POST', body: formData });
+    const _sttToken = new URLSearchParams(location.search).get('token');
+    const res = await fetch(`/api/voice/stt${_sttToken ? '?token=' + encodeURIComponent(_sttToken) : ''}`, { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     micStatus.textContent = '';
@@ -579,7 +672,7 @@ if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices) {
   };
 }
 
-/* ── Image Attachment ── */
+/* ── File Attachment ── */
 const attachBtn  = document.getElementById('attach-btn');
 const fileInput  = document.getElementById('file-input');
 const attachArea = document.getElementById('attachments');
@@ -593,22 +686,7 @@ fileInput.onchange = () => {
   const file = fileInput.files[0];
   if (!file) return;
   fileInput.value = '';
-
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const dataUrl = e.target.result;
-    const base64  = dataUrl.split(',')[1];
-    const tempId  = `up_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-    const chip = createChip(file.name, dataUrl, null);
-    chip.classList.add('pending');
-    pendingChips.set(tempId, chip);
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'upload', tempId, name: file.name, mime: file.type, data: base64 }));
-    }
-  };
-  reader.readAsDataURL(file);
+  uploadFile(file);
 };
 
 function onFileSaved({ tempId, path: filePath, name }) {
@@ -621,13 +699,21 @@ function onFileSaved({ tempId, path: filePath, name }) {
   }
 }
 
-function createChip(name, dataUrl, filePath) {
+function createChip(name, thumbUrl, filePath) {
   const chip = document.createElement('div');
   chip.className = 'attach-chip';
   if (filePath) { chip.dataset.path = filePath; chip.title = `点击插入路径：${filePath}`; }
 
-  const img  = document.createElement('img');
-  img.src    = dataUrl;
+  if (thumbUrl) {
+    const img = document.createElement('img');
+    img.src = thumbUrl;
+    chip.appendChild(img);
+  } else {
+    const icon = document.createElement('span');
+    icon.style.cssText = 'font-size:16px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0;';
+    icon.textContent = getFileIcon(name);
+    chip.appendChild(icon);
+  }
 
   const span = document.createElement('span');
   span.className   = 'chip-name';
@@ -639,7 +725,7 @@ function createChip(name, dataUrl, filePath) {
   rm.title       = '移除';
   rm.onclick = (e) => { e.stopPropagation(); chip.remove(); };
 
-  chip.append(img, span, rm);
+  chip.append(span, rm);
 
   // Click body → type path into terminal
   chip.onclick = (e) => {
@@ -959,7 +1045,7 @@ filesBtn.addEventListener('click', () => {
 filesRefreshBtn.addEventListener('click', () => loadFiles(filesBrowsePath));
 filesCloseBtn.addEventListener('click', closeFilesPanel);
 
-/* ── Drag-and-drop images onto the toolbar ── */
+/* ── Drag-and-drop files onto the toolbar ── */
 document.getElementById('input-toolbar').addEventListener('dragover', (e) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'copy';
@@ -967,20 +1053,166 @@ document.getElementById('input-toolbar').addEventListener('dragover', (e) => {
 
 document.getElementById('input-toolbar').addEventListener('drop', (e) => {
   e.preventDefault();
-  const file = [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
-  if (!file) return;
+  for (const file of e.dataTransfer.files) {
+    uploadFile(file);
+  }
+});
 
+/* ── Paste from clipboard (images + files) ── */
+document.addEventListener('paste', (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (file) uploadFile(file);
+      return;
+    }
+  }
+});
+
+/* ── Shared file upload helper ── */
+const MAX_UPLOAD_SIZE = 25 * 1024 * 1024; // 25 MB
+
+function uploadFile(file) {
+  if (file.size > MAX_UPLOAD_SIZE) {
+    alert(`文件过大：${(file.size / 1024 / 1024).toFixed(1)} MB，上限 25 MB`);
+    return;
+  }
   const reader = new FileReader();
+  const isImage = file.type.startsWith('image/');
   reader.onload = (ev) => {
     const dataUrl = ev.target.result;
     const base64  = dataUrl.split(',')[1];
     const tempId  = `up_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const chip = createChip(file.name, dataUrl, null);
+    const name    = file.name || `upload_${Date.now()}`;
+    const chip = createChip(name, isImage ? dataUrl : null, null);
     chip.classList.add('pending');
     pendingChips.set(tempId, chip);
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'upload', tempId, name: file.name, mime: file.type, data: base64 }));
+      ws.send(JSON.stringify({ type: 'upload', tempId, name, mime: file.type, data: base64 }));
     }
   };
   reader.readAsDataURL(file);
+}
+
+/* ── Initial Directory Picker (for new sessions) ── */
+const initCwdModal   = document.getElementById('init-cwd-modal');
+const initCwdInput   = document.getElementById('init-cwd-input');
+const initCwdBrowser = document.getElementById('init-cwd-browser');
+const initCwdError   = document.getElementById('init-cwd-error');
+const initCwdConfirm = document.getElementById('init-cwd-confirm');
+const initCwdSkip    = document.getElementById('init-cwd-skip');
+
+const initSessionId  = document.getElementById('init-session-id');
+let _initBrowsePath  = '';  // current browse path in the picker
+let _initAllDirs     = []; // full directory list for filtering
+let _initParent      = ''; // parent path for ".." entry
+
+function showInitCwdPicker() {
+  setStatus('disconnected', '请选择工作目录');
+  if (!initCwdModal) { console.error('[webcc] init-cwd-modal not found'); connect(); return; }
+  // Show modal FIRST, before anything that might throw
+  initCwdModal.style.display = 'flex';
+  try {
+    if (initCwdInput) { initCwdInput.value = '~'; initCwdInput.focus(); initCwdInput.select(); }
+    if (initCwdError) initCwdError.style.display = 'none';
+    loadInitDirs('~');
+  } catch (e) {
+    console.error('[webcc] showInitCwdPicker error:', e);
+  }
+}
+
+async function loadInitDirs(dirPath, updateInput = true) {
+  try {
+    const urlToken = new URLSearchParams(location.search).get('token');
+    const tokenParam = urlToken ? `&token=${urlToken}` : '';
+    const res = await fetch(`/api/files?path=${encodeURIComponent(dirPath)}${tokenParam}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    _initBrowsePath = data.path;
+    _initParent = data.parent || '';
+    _initAllDirs = data.files.filter(f => f.isDir);
+    if (updateInput) initCwdInput.value = data.path;
+    renderInitDirs(_initAllDirs);
+  } catch (e) {
+    initCwdBrowser.innerHTML = `<div style="padding:12px;font-size:12px;color:#f85149;">${e.message}</div>`;
+  }
+}
+
+function renderInitDirs(dirs) {
+  let html = '';
+  if (_initParent) {
+    html += `<div class="file-item is-up" data-path="${_initParent}" style="cursor:pointer;padding:5px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #21262d;">
+      <span style="font-size:14px;width:18px;text-align:center;">📁</span>
+      <span style="font-size:12px;color:#8b949e;flex:1;">..</span>
+    </div>`;
+  }
+  for (const d of dirs) {
+    html += `<div class="file-item" data-path="${d.path}" style="cursor:pointer;padding:5px 12px;display:flex;align-items:center;gap:8px;">
+      <span style="font-size:14px;width:18px;text-align:center;">📁</span>
+      <span style="font-size:12px;color:#79c0ff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${d.name}</span>
+    </div>`;
+  }
+  if (!dirs.length && !_initParent) html = '<div style="padding:12px;font-size:12px;color:#8b949e;">无匹配目录</div>';
+  initCwdBrowser.innerHTML = html;
+  initCwdBrowser.querySelectorAll('.file-item').forEach(el => {
+    el.addEventListener('click', () => loadInitDirs(el.dataset.path));
+    el.addEventListener('mouseenter', () => { el.style.background = '#21262d'; });
+    el.addEventListener('mouseleave', () => { el.style.background = ''; });
+  });
+}
+
+initCwdInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const val = initCwdInput.value.trim();
+    if (val) loadInitDirs(val);
+  }
 });
+
+initCwdInput.addEventListener('input', () => {
+  const val = initCwdInput.value;
+  // If user typed a path separator at the end, navigate into that directory
+  if (val.endsWith('/')) {
+    loadInitDirs(val, false);
+    return;
+  }
+  // Extract the typed portion after the last /
+  const lastSlash = val.lastIndexOf('/');
+  const basePath = val.slice(0, lastSlash + 1);
+  const filter = val.slice(lastSlash + 1).toLowerCase();
+
+  // If user changed the base path (not just filtering), load that directory
+  if (basePath && basePath !== _initBrowsePath && basePath !== _initBrowsePath + '/') {
+    loadInitDirs(basePath, false);
+    return;
+  }
+  // Filter current directory listing by typed text
+  if (!filter) {
+    renderInitDirs(_initAllDirs);
+  } else {
+    renderInitDirs(_initAllDirs.filter(d => d.name.toLowerCase().includes(filter)));
+  }
+});
+
+initCwdConfirm.addEventListener('click', () => {
+  const cwd = initCwdInput.value.trim() || '~';
+  _initialCwd = cwd;
+  _initialId = (initSessionId && initSessionId.value.trim()) || '';
+  initCwdModal.style.display = 'none';
+  connect();
+});
+
+initCwdSkip.addEventListener('click', () => {
+  initCwdModal.style.display = 'none';
+  connect();
+});
+
+/* ── Start ── */
+// If this is a new session (no id in URL), show directory picker first
+if (currentSessionId) {
+  connect();
+} else {
+  showInitCwdPicker();
+}
