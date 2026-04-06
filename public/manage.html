@@ -193,6 +193,10 @@
     }
     .status-badge.active { background: #23863640; color: #3fb950; border: 1px solid #23863660; }
     .status-badge.inactive { background: #30363d40; color: #8b949e; border: 1px solid #30363d; }
+    .status-badge.running { background: #1f6feb40; color: #58a6ff; border: 1px solid #1f6feb60; }
+    .status-badge.waiting { background: #d2992240; color: #d29922; border: 1px solid #d2992260; }
+    .status-badge.completed { background: #23863640; color: #3fb950; border: 1px solid #23863660; }
+    .status-badge.idle { background: #30363d40; color: #8b949e; border: 1px solid #30363d; }
 
     /* ── Notification badge on card ── */
     .notify-badge {
@@ -446,8 +450,10 @@
     <a class="logo" href="/">Web<span>CC</span></a>
     <span class="title">/ Dashboard</span>
     <span class="spacer"></span>
+    <a class="hdr-btn" href="/webcc.apk" id="apk-btn" title="Download Android App">APK</a>
     <button class="hdr-btn" id="qr-btn" onclick="showQR()" title="Scan QR to open on mobile">QR</button>
     <button class="hdr-btn" id="push-toggle" onclick="togglePush()" title="Enable push notifications">Push</button>
+    <a class="hdr-btn" href="/logout" title="退出登录">Logout</a>
   </div>
 
   <div id="content">
@@ -524,6 +530,93 @@
         </div>
       </details>
 
+      <!-- Push Notifications (collapsible) -->
+      <details class="settings-section" id="push-section">
+        <summary>Push Notifications</summary>
+
+        <!-- Subscription Status -->
+        <div class="settings-card">
+          <div class="sc-header">Subscription Status</div>
+          <div class="sc-body">
+            <div class="setting-row">
+              <label>Permission</label>
+              <span id="push-d-permission" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Subscription</label>
+              <span id="push-d-sub-status" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Endpoint</label>
+              <span id="push-d-endpoint" style="font-size:11px;color:#8b949e;word-break:break-all;font-family:monospace;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Platform</label>
+              <span id="push-d-platform" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+          </div>
+          <div class="sc-footer">
+            <button class="btn" id="push-d-toggle" onclick="togglePush().then(loadPushDiagnostics)">Push</button>
+            <button class="btn" onclick="sendTestPush()">Test Push</button>
+            <span class="status-text" id="push-d-test-status"></span>
+          </div>
+        </div>
+
+        <!-- Push Health -->
+        <div class="settings-card">
+          <div class="sc-header">Push Health</div>
+          <div class="sc-body">
+            <div class="setting-row">
+              <label>Last Push</label>
+              <span id="push-d-last-push" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Success Rate</label>
+              <span id="push-d-rate" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Total Sent</label>
+              <span id="push-d-total" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Last Error</label>
+              <span id="push-d-last-error" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+            <div class="setting-row">
+              <label>Subscriptions</label>
+              <span id="push-d-sub-count" style="font-size:13px;color:#c9d1d9;">—</span>
+            </div>
+          </div>
+          <div class="sc-footer">
+            <button class="btn" onclick="loadPushDiagnostics()">Refresh</button>
+          </div>
+        </div>
+
+        <!-- Backup Channels -->
+        <div class="settings-card">
+          <div class="sc-header">Backup Channels</div>
+          <div class="sc-body">
+            <div class="setting-row">
+              <label>Bark URL</label>
+              <input id="push-d-bark" type="text" placeholder="https://api.day.app/YOUR_KEY" />
+            </div>
+            <div style="font-size:11px;color:#6e7681;line-height:1.5;padding-left:122px;margin-top:-8px;">
+              iOS: Install <a href="https://apps.apple.com/app/bark-push/id1403753865" target="_blank" style="color:#58a6ff;">Bark</a> app, copy URL from app settings.
+            </div>
+            <div class="setting-row">
+              <label>Webhook URL</label>
+              <input id="push-d-webhook" type="text" placeholder="https://your-webhook-endpoint/path" />
+            </div>
+          </div>
+          <div class="sc-footer">
+            <button class="btn btn-green" onclick="saveNotifySettings()">Save</button>
+            <button class="btn" onclick="testBark()">Test Bark</button>
+            <button class="btn" onclick="testWebhook()">Test Webhook</button>
+            <span class="status-text" id="push-d-backup-status"></span>
+          </div>
+        </div>
+      </details>
+
       <!-- WeChat Bridge (collapsible) -->
       <details class="settings-section" id="wechat-section">
         <summary>WeChat Bridge (iLink)</summary>
@@ -585,7 +678,7 @@
         <button class="btn btn-sm" id="focus-newtab" title="Open in new tab">New Tab</button>
         <button class="btn btn-sm" id="focus-close" title="Close panel">Close</button>
       </div>
-      <iframe id="focus-iframe" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+      <iframe id="focus-iframe" sandbox="allow-same-origin allow-scripts allow-forms allow-popups" style="display:none"></iframe>
     </div>
   </div>
 

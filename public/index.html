@@ -14,12 +14,13 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { height: 100%; }
 
     body {
       background: #0d1117;
       color: #c9d1d9;
       font-family: 'Segoe UI', system-ui, sans-serif;
-      height: 100dvh;
+      height: 100%;
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -577,6 +578,12 @@
     @media (max-width: 768px) {
       #mobile-bar { display: flex; }
 
+      /* Terminal height set via JS (1/3 of initial screen px) — see client.js fixMobileLayout */
+      #terminal-wrap {
+        flex: none;
+        /* height set by JS */
+      }
+
       /* larger touch targets for toolbar */
       .toolbar-btn {
         width: 44px;
@@ -618,6 +625,7 @@
       <button id="files-btn" class="hdr-btn" title="文件浏览器">📁</button>
       <button id="notify-btn" class="hdr-btn" title="语音通知 (点击开启/关闭)">🔔</button>
       <a href="/wechat" class="hdr-btn" title="WeChat Bridge">💬</a>
+      <button id="restart-btn" class="hdr-btn" title="重启 Claude 命令">🔄</button>
       <button id="reconnect-btn" onclick="connect()">Reconnect</button>
     </div>
   </div>

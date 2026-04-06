@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">WebCC</string>
+    <string name="title_activity_main">WebCC</string>
+    <string name="package_name">com.webcc.app</string>
+    <string name="custom_url_scheme">com.webcc.app</string>
+</resources>

@@ -35,14 +35,40 @@ function shortenPath(p, maxLen) {
 /* ── Notification monitoring via WebSocket ── */
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*(?:\x07|\x1b\\)|[()][AB012]|.)/g;
 const WAITING_PATTERNS = [
+  // Claude Code TUI: selection list hints
+  /Enter to select/i, /to navigate/i, /Esc to cancel/i,
+  // Claude Code TUI: common interactive prompts
+  /Would you like to proceed/i,
+  /auto-accept edits/i,
+  /manually approve edits/i,
+  /shift\+tab to approve/i,
+  /Tell Claude what to change/i,
+  // Claude Code TUI: numbered options with ❯ marker
+  /[❯›]\s*\d\.\s/,
+  // General numbered option lists
+  /^\s*[1-9][.)]\s*.+\n\s*[2-9][.)]\s*/m,
+  // Yes/No prompts
   /\[Y\/n\]/, /\[y\/N\]/, /\(y\/n\)/i, /\(yes\/no\)/i,
-  /Do you want to/i, /Press Enter/i, /Yes\s*\/\s*No/i,
-  /Allow\s*(once|always)/i, /Allow\b/, /Approve\??/i, /Deny/i,
-  /Run\s+command\??/i, /Do you want to proceed/i,
-  /\bpermission\b/i, /\bconfirm\b/i,
-  /[❯>]\s*$/, /\?\s*$/,
+  /Do you want to/i, /Yes\s*\/\s*No/i,
+  // Permission / approval prompts
+  /Allow\s*(once|always)/i, /Approve\??/i,
+  /Run\s+command\??/i,
 ];
-const NOTIFY_IDLE_MS = 6000;
+// Claude Code "thinking" spinner patterns — task is still in progress
+const IN_PROGRESS_PATTERNS = [
+  /[✽✻✶✳✢·⠙⠹⠸⠼⠴⠦⠧⠇⠏⠋⠹]\s*\w+ing/i,  // ✽ Flummoxing… / · Fermenting…
+  /\w+ing…/,                                     // Sprouting…, Brewing…
+  /Envisioning|Thinking|Generating|Processing/i,
+  /tokens?\s*·/,                                  // "↓ 1.0k tokens ·" streaming indicator
+  /Running\s+in\s+the\s+background/i,
+];
+function isInProgress(text) {
+  for (const pat of IN_PROGRESS_PATTERNS) {
+    if (pat.test(text)) return true;
+  }
+  return false;
+}
+const NOTIFY_IDLE_MS = 8000;
 const NOTIFY_MIN_CHARS = 80;
 
 // Per-session monitor state: { ws, state, chars, recentText, idleTimer, connectedAt }
@@ -99,29 +125,26 @@ function startMonitor(sessionId) {
         mon.chars += printable.length;
         if (mon.state === 'idle') {
           mon.state = 'active';
-          // New activity cycle — allow notifications again
-          _acknowledgedSessions.delete(sessionId);
+          // New activity: clear old status and reset alert so next event can fire
+          clearSessionStatus(sessionId);
+          _alertedSessions.delete(sessionId);
         }
       }
 
-      // Immediate pattern check
-      if (mon.state === 'active' && matchesWaiting(text)) {
-        mon.state = 'waiting';
-        setCardNotify(sessionId, 'waiting');
-        addNotification(sessionId, 'waiting', '等待操作');
-      }
-
-      // Idle timer
+      // Only judge status AFTER output stops for NOTIFY_IDLE_MS
       if (mon.idleTimer) clearTimeout(mon.idleTimer);
       mon.idleTimer = setTimeout(() => {
         if (mon.state === 'active' && mon.chars >= NOTIFY_MIN_CHARS) {
           const tail = mon.recentText.slice(-2000);
+          // Still working (spinner/thinking) — don't judge yet, wait longer
+          if (isInProgress(tail)) {
+            mon.idleTimer = setTimeout(() => mon.idleTimer && (mon.state = 'idle', mon.chars = 0, mon.recentText = ''), NOTIFY_IDLE_MS);
+            return;
+          }
           if (matchesWaiting(tail)) {
-            setCardNotify(sessionId, 'waiting');
-            addNotification(sessionId, 'waiting', '等待操作');
+            alertSession(sessionId, 'waiting', '等待操作');
           } else {
-            setCardNotify(sessionId, 'completed');
-            addNotification(sessionId, 'completed', '任务已完成');
+            alertSession(sessionId, 'completed', '任务已完成');
           }
         }
         mon.state = 'idle';
@@ -158,27 +181,30 @@ function syncMonitors(sessions) {
   }
 }
 
-/* ── Card notification badges ── */
-function setCardNotify(sessionId, type) {
-  const badge = document.querySelector(`.session-card[data-id="${sessionId}"] .notify-badge`);
-  if (!badge) return;
-  badge.className = 'notify-badge ' + type;
-  badge.textContent = type === 'waiting' ? '等待操作' : '已完成';
+/* ── Session status (persistent badge on card) ── */
+// Tracks each session's display status: 'waiting' | 'completed' | null
+const _sessionStatus = new Map();
+
+function setSessionStatus(sessionId, type) {
+  if (_sessionStatus.get(sessionId) === type) return; // no change
+  _sessionStatus.set(sessionId, type);
+  renderSessions(_cachedSessions);
 }
 
-function clearCardNotify(sessionId) {
-  const badge = document.querySelector(`.session-card[data-id="${sessionId}"] .notify-badge`);
-  if (badge) badge.className = 'notify-badge';
+function clearSessionStatus(sessionId) {
+  if (!_sessionStatus.has(sessionId)) return; // already clear
+  _sessionStatus.delete(sessionId);
+  renderSessions(_cachedSessions);
 }
 
-/* ── Notifications: card badge only, voice once per event ── */
-const _acknowledgedSessions = new Set(); // sessions user has interacted with
+/* ── Alerts (one-shot voice, silenced once user views the session) ── */
+const _alertedSessions = new Set(); // sessions whose current alert has been read
 
-function addNotification(sessionId, type, message) {
-  // If user already acknowledged this session, skip
-  if (_acknowledgedSessions.has(sessionId)) return;
-  setCardNotify(sessionId, type);
-  // One-shot voice notification
+function alertSession(sessionId, type, message) {
+  // Always update the persistent status badge
+  setSessionStatus(sessionId, type);
+  // Voice: only if this alert hasn't been read yet
+  if (_alertedSessions.has(sessionId)) return;
   if (window.speechSynthesis) {
     const text = `Session ${sessionId}: ${message}`;
     const utterance = new SpeechSynthesisUtterance(text);
@@ -190,8 +216,8 @@ function addNotification(sessionId, type, message) {
 }
 
 function acknowledgeSession(sessionId) {
-  _acknowledgedSessions.add(sessionId);
-  clearCardNotify(sessionId);
+  // Mark alert as read — stop voice, but do NOT clear the status badge
+  _alertedSessions.add(sessionId);
   window.speechSynthesis && window.speechSynthesis.cancel();
 }
 
@@ -237,15 +263,26 @@ function renderSessions(sessions) {
 
   const cards = sessions.map(s => {
     const shortCwd = shortenPath(s.cwd, maxCwd);
-    const statusClass = s.active ? 'active' : 'inactive';
-    const statusText = s.active ? 'Running' : 'Stopped';
+    const monStatus = _sessionStatus.get(s.id);
+    const mon = monitors.get(s.id);
+    let statusClass, statusText;
+    if (!s.active) {
+      statusClass = 'inactive'; statusText = 'Stopped';
+    } else if (monStatus === 'waiting') {
+      statusClass = 'waiting'; statusText = '等待操作';
+    } else if (monStatus === 'completed') {
+      statusClass = 'completed'; statusText = '任务完成';
+    } else if (mon && mon.state === 'active') {
+      statusClass = 'running'; statusText = '运行中';
+    } else {
+      statusClass = 'idle'; statusText = '空闲';
+    }
     const lastAct = s.lastActivity ? formatRelative(s.lastActivity) : 'N/A';
     const created = formatTime(s.createdAt);
     const focusedClass = s.id === _focusedSessionId ? ' focused' : '';
 
     return `
       <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="focusSession('${escapeHtml(s.id)}')">
-        <span class="notify-badge"></span>
         <div class="card-top">
           <span class="session-id">#${escapeHtml(s.id)}</span>
           <span class="status-badge ${statusClass}">${statusText}</span>
@@ -266,13 +303,15 @@ function renderSessions(sessions) {
         </div>
         <div class="card-footer">
           <span class="client-count"><span class="count-num">${s.clients}</span> conn</span>
-          <button class="btn btn-sm" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">New Tab</button>
+          <button class="btn btn-sm" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">Terminal</button>
+          <button class="btn btn-sm" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}', '${escapeHtml(s.cwd || '')}')">Chat</button>
           <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
         </div>
       </div>`;
   }).join('');
 
   el.innerHTML = `<div class="session-grid">${cards}</div>`;
+  // Re-apply persistent status badges (DOM was rebuilt)
 }
 
 /* ── Focus panel: embed terminal iframe ── */
@@ -283,14 +322,32 @@ const focusCwd     = document.getElementById('focus-cwd');
 const focusNewtab  = document.getElementById('focus-newtab');
 const focusCloseBtn = document.getElementById('focus-close');
 
+// Iframe pool: cache loaded session iframes to avoid re-loading on switch
+const _iframeCache = new Map(); // sessionId → iframe element
+const focusContainer = focusIframe.parentElement;
+
+function getOrCreateIframe(id) {
+  if (_iframeCache.has(id)) return _iframeCache.get(id);
+  const urlToken = new URLSearchParams(location.search).get('token');
+  const tokenParam = urlToken ? `&token=${urlToken}` : '';
+  const iframe = document.createElement('iframe');
+  iframe.className = focusIframe.className;
+  iframe.id = '';
+  iframe.sandbox = focusIframe.sandbox.toString();
+  iframe.style.cssText = 'flex:1;border:none;width:100%;height:100%;background:#0d1117;display:none;';
+  iframe.src = `/?id=${id}${tokenParam}`;
+  focusContainer.appendChild(iframe);
+  _iframeCache.set(id, iframe);
+  return iframe;
+}
+
 function focusSession(id) {
   const s = _cachedSessions.find(s => s.id === id);
   if (!s) return;
 
-  // Mark as acknowledged — stops voice and clears badge
   acknowledgeSession(id);
 
-  if (_focusedSessionId === id) return; // already focused
+  if (_focusedSessionId === id) return;
   _focusedSessionId = id;
 
   document.body.classList.add('has-focus');
@@ -298,20 +355,22 @@ function focusSession(id) {
   focusCwd.textContent = s.cwd || '';
   focusCwd.title = s.cwd || '';
 
-  // Build iframe URL
-  const urlToken = new URLSearchParams(location.search).get('token');
-  const tokenParam = urlToken ? `&token=${urlToken}` : '';
-  const iframeUrl = `/?id=${id}${tokenParam}`;
-  focusIframe.src = iframeUrl;
+  // Hide all cached iframes + the original placeholder
+  focusIframe.style.display = 'none';
+  for (const [, frame] of _iframeCache) frame.style.display = 'none';
 
-  // Re-render cards to show focused state
+  // Show (or create) the iframe for this session
+  const frame = getOrCreateIframe(id);
+  frame.style.display = '';
+
   renderSessions(_cachedSessions);
 }
 
 function closeFocusPanel() {
   _focusedSessionId = null;
   document.body.classList.remove('has-focus');
-  focusIframe.src = 'about:blank';
+  // Just hide, don't destroy
+  for (const [, frame] of _iframeCache) frame.style.display = 'none';
   renderSessions(_cachedSessions);
 }
 
@@ -327,6 +386,15 @@ function openSessionNewTab(id) {
   acknowledgeSession(id);
 }
 
+function openSessionChat(id, cwd) {
+  const urlToken = new URLSearchParams(location.search).get('token');
+  const params = new URLSearchParams();
+  if (urlToken) params.set('token', urlToken);
+  if (cwd) params.set('cwd', cwd);
+  params.set('session', id);
+  window.open(`/chat.html?${params.toString()}`, '_blank');
+}
+
 async function deleteSession(id) {
   if (!confirm(`Delete session ${id}?\nThe PTY process will be terminated.`)) return;
   try {
@@ -337,6 +405,9 @@ async function deleteSession(id) {
       return;
     }
     showToast(`Session ${id} deleted`);
+    // Clean up cached iframe
+    const cachedFrame = _iframeCache.get(id);
+    if (cachedFrame) { cachedFrame.remove(); _iframeCache.delete(id); }
     if (_focusedSessionId === id) closeFocusPanel();
     loadSessions();
   } catch (err) {
@@ -698,9 +769,213 @@ async function wechatCheckStatus() {
   } catch (_) {}
 }
 
+/* ── Push Notification Diagnostics ── */
+
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  const diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 5) return 'just now';
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
+}
+
+async function loadPushDiagnostics() {
+  // Client-side info
+  if (typeof getPushInfo === 'function') {
+    const info = getPushInfo();
+    const permEl = document.getElementById('push-d-permission');
+    const subEl = document.getElementById('push-d-sub-status');
+    const epEl = document.getElementById('push-d-endpoint');
+    const platEl = document.getElementById('push-d-platform');
+    const toggleEl = document.getElementById('push-d-toggle');
+
+    if (permEl) {
+      permEl.textContent = info.permission;
+      permEl.style.color = info.permission === 'granted' ? '#3fb950' : info.permission === 'denied' ? '#f85149' : '#d29922';
+    }
+    if (subEl) {
+      if (info.subscribed) {
+        subEl.textContent = 'Active';
+        subEl.style.color = '#3fb950';
+      } else {
+        subEl.textContent = 'None';
+        subEl.style.color = '#8b949e';
+      }
+    }
+    if (epEl) {
+      if (info.endpoint) {
+        const ep = info.endpoint;
+        epEl.textContent = ep.length > 60 ? ep.slice(0, 40) + '...' + ep.slice(-15) : ep;
+      } else {
+        epEl.textContent = '—';
+      }
+    }
+    if (platEl) platEl.textContent = info.platform;
+    if (toggleEl) {
+      toggleEl.textContent = info.subscribed ? 'Push ON' : 'Push';
+      toggleEl.className = info.subscribed ? 'btn btn-green' : 'btn';
+    }
+  }
+
+  // Server-side health
+  try {
+    const res = await fetch('/api/push/health' + tokenQS('?'));
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const g = data.global;
+    document.getElementById('push-d-last-push').textContent = g.lastPushTime
+      ? `${formatTimestamp(g.lastPushTime)} (${g.lastPushType})`
+      : 'Never';
+
+    const total = g.totalSuccess + g.totalFail;
+    const rateEl = document.getElementById('push-d-rate');
+    if (total > 0) {
+      const pct = Math.round(g.totalSuccess / total * 100);
+      rateEl.textContent = `${pct}% (${g.totalSuccess}/${total})`;
+      rateEl.style.color = pct >= 90 ? '#3fb950' : pct >= 70 ? '#d29922' : '#f85149';
+    } else {
+      rateEl.textContent = 'No data';
+      rateEl.style.color = '#8b949e';
+    }
+
+    document.getElementById('push-d-total').textContent = g.totalSent || '0';
+    document.getElementById('push-d-sub-count').textContent = data.subscriptionCount || '0';
+
+    // Last error from any subscription
+    let lastErr = null;
+    for (const s of data.subscriptions || []) {
+      if (s.lastFailTime && (!lastErr || s.lastFailTime > lastErr.time)) {
+        lastErr = { time: s.lastFailTime, reason: s.lastFailReason };
+      }
+    }
+    const errEl = document.getElementById('push-d-last-error');
+    if (lastErr) {
+      errEl.textContent = `${lastErr.reason} (${formatTimestamp(lastErr.time)})`;
+      errEl.style.color = '#f85149';
+    } else {
+      errEl.textContent = 'None';
+      errEl.style.color = '#3fb950';
+    }
+  } catch (e) {
+    console.error('[manage] Failed to load push health:', e);
+  }
+}
+
+async function sendTestPush() {
+  const statusEl = document.getElementById('push-d-test-status');
+  statusEl.textContent = 'Sending...';
+  statusEl.className = 'status-text';
+  try {
+    const res = await fetch('/api/push/test' + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    statusEl.textContent = `Sent to ${data.subscribers} subscriber(s)`;
+    statusEl.className = 'status-text ok';
+    setTimeout(() => loadPushDiagnostics(), 2000);
+  } catch (e) {
+    statusEl.textContent = 'Failed: ' + e.message;
+    statusEl.className = 'status-text err';
+  }
+}
+
+async function loadNotifySettings() {
+  try {
+    const res = await fetch('/api/settings/notify' + tokenQS('?'));
+    const cfg = await res.json();
+    const barkInput = document.getElementById('push-d-bark');
+    const webhookInput = document.getElementById('push-d-webhook');
+    // Show full URL only if user has set one (server masks it for GET)
+    if (barkInput && cfg.hasBark) barkInput.placeholder = cfg.barkUrl || 'Configured';
+    if (webhookInput && cfg.webhookUrl) webhookInput.value = cfg.webhookUrl;
+  } catch (_) {}
+}
+
+async function saveNotifySettings() {
+  const statusEl = document.getElementById('push-d-backup-status');
+  const barkVal = document.getElementById('push-d-bark').value.trim();
+  const webhookVal = document.getElementById('push-d-webhook').value.trim();
+  const body = {};
+  if (barkVal) body.barkUrl = barkVal;
+  if (webhookVal !== undefined) body.webhookUrl = webhookVal;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (_urlToken) headers['X-Access-Token'] = _urlToken;
+    const res = await fetch('/api/settings/notify', { method: 'POST', headers, body: JSON.stringify(body) });
+    if (res.ok) {
+      statusEl.textContent = 'Saved';
+      statusEl.className = 'status-text ok';
+      showToast('Notification settings saved');
+    } else {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-text err';
+  }
+}
+
+async function testBark() {
+  const statusEl = document.getElementById('push-d-backup-status');
+  statusEl.textContent = 'Testing Bark...';
+  statusEl.className = 'status-text';
+  try {
+    const res = await fetch('/api/push/test-bark' + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    statusEl.textContent = 'Bark test sent';
+    statusEl.className = 'status-text ok';
+  } catch (e) {
+    statusEl.textContent = 'Bark: ' + e.message;
+    statusEl.className = 'status-text err';
+  }
+}
+
+async function testWebhook() {
+  const statusEl = document.getElementById('push-d-backup-status');
+  statusEl.textContent = 'Testing Webhook...';
+  statusEl.className = 'status-text';
+  try {
+    const res = await fetch('/api/push/test-webhook' + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    statusEl.textContent = 'Webhook test sent';
+    statusEl.className = 'status-text ok';
+  } catch (e) {
+    statusEl.textContent = 'Webhook: ' + e.message;
+    statusEl.className = 'status-text err';
+  }
+}
+
+/* ── APK info ── */
+async function loadApkInfo() {
+  const btn = document.getElementById('apk-btn');
+  if (!btn) return;
+  try {
+    const resp = await fetch('/api/apk-info' + tokenQS('?'));
+    const info = await resp.json();
+    if (info.exists) {
+      const d = new Date(info.mtime);
+      const time = `${d.getMonth()+1}-${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+      const sizeMB = (info.size / 1048576).toFixed(1);
+      btn.textContent = `APK (${time})`;
+      btn.title = `Download Android App — ${sizeMB}MB — Updated ${time}`;
+    }
+  } catch {}
+}
+
 /* ── Init ── */
 loadSessions();
 loadVoiceSettings();
+loadPushDiagnostics();
+loadNotifySettings();
+loadApkInfo();
 wechatLoadConfig();
 wechatCheckStatus();
 autoRefreshTimer = setInterval(loadSessions, 5000);
+// Refresh push diagnostics periodically and on visibility change
+setInterval(loadPushDiagnostics, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') loadPushDiagnostics();
+});

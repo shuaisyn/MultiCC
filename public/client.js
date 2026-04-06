@@ -1,10 +1,34 @@
 'use strict';
 
 /* ── Terminal setup ── */
+const _isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) || window.innerWidth <= 768;
+
+/* ── Mobile layout fix: use fixed px instead of vh, track visualViewport ── */
+const _initialHeight = window.innerHeight;  // capture once, before keyboard
+
+function fixMobileLayout() {
+  if (!_isMobile) return;
+  // Terminal = 1/3 of the initial screen height (fixed px, immune to keyboard)
+  const termWrap = document.getElementById('terminal-wrap');
+  if (termWrap) termWrap.style.height = Math.floor(_initialHeight / 3) + 'px';
+
+  // Body height = visual viewport (shrinks when keyboard opens → no black gap)
+  const vh = window.visualViewport?.height ?? window.innerHeight;
+  document.body.style.height = vh + 'px';
+}
+
+fixMobileLayout();
+if (_isMobile && window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    const vh = window.visualViewport.height;
+    document.body.style.height = vh + 'px';
+  });
+}
+
 const term = new Terminal({
   cursorBlink: true,
   allowProposedApi: true,
-  scrollback: 5000,
+  scrollback: _isMobile ? 1000 : 5000,
   fontFamily: '"Cascadia Code", "Fira Code", "Jetbrains Mono", Consolas, "Courier New", monospace',
   fontSize: 14,
   lineHeight: 1.25,
@@ -42,8 +66,21 @@ function setStatus(state, text) {
   reconnBtn.style.display = state === 'disconnected' ? 'block' : 'none';
 }
 
+/** Check if terminal is scrolled to (near) bottom */
+function isAtBottom() {
+  const buf = term.buffer.active;
+  return buf.viewportY >= buf.baseY - 2;
+}
+
 /* ── Session ID ── */
 let currentSessionId = new URLSearchParams(location.search).get('id') || '';
+const _urlToken = new URLSearchParams(location.search).get('token') || '';
+
+/** Append token param to a URL string (handles both ? and & correctly) */
+function withToken(url) {
+  if (!_urlToken) return url;
+  return url + (url.includes('?') ? '&' : '?') + `token=${encodeURIComponent(_urlToken)}`;
+}
 
 function updateSessionLabel(id) {
   if (!sessionLabel) return;
@@ -312,9 +349,57 @@ function connect() {
   _initialId  = '';
   ws = new WebSocket(wsUrl);
 
+  // ── Write batching: merge rapid output into single rAF-paced term.write() calls ──
+  let _writeBuf = '';
+  let _writeRaf = null;
+
+  // ── Redraw blanking: hide terminal during TUI redraw, show when stable ──
+  let _redrawTimer = null;
+  let _redrawing = false;
+  const _termWrap = document.getElementById('terminal-wrap');
+
+  function startRedrawBlank() {
+    _redrawing = true;
+    _termWrap.style.visibility = 'hidden';
+    // Show a simple loading indicator
+    if (!document.getElementById('__redraw-mask')) {
+      const mask = document.createElement('div');
+      mask.id = '__redraw-mask';
+      mask.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+        'background:#0d1117;color:#8b949e;font-size:14px;z-index:100;';
+      mask.textContent = '正在恢复会话…';
+      _termWrap.parentElement.style.position = 'relative';
+      _termWrap.parentElement.appendChild(mask);
+    }
+  }
+
+  function endRedrawBlank() {
+    _redrawing = false;
+    _termWrap.style.visibility = '';
+    const mask = document.getElementById('__redraw-mask');
+    if (mask) mask.remove();
+    term.scrollToBottom();
+    // Auto-focus mobile input to bring up keyboard
+    if (_isMobile) {
+      const mi = document.getElementById('mobile-input');
+      if (mi) mi.focus();
+    }
+  }
+
+  function resetRedrawTimer() {
+    clearTimeout(_redrawTimer);
+    // Wait for output to be quiet for 500ms before showing terminal
+    _redrawTimer = setTimeout(() => { if (_redrawing) endRedrawBlank(); }, 500);
+  }
+
   ws.onopen = () => {
     setStatus('connected', 'Connected');
+    // Clear stale content before resize — the TUI redraw will repaint correctly
+    term.clear();
+    startRedrawBlank();
     sendResize();
+    // Safety: show terminal after 8s max even if output hasn't stopped
+    setTimeout(() => { if (_redrawing) endRedrawBlank(); }, 8000);
     _notifyConnectedAt = Date.now();
     _reconnectAttempt = 0;
   };
@@ -332,12 +417,30 @@ function connect() {
           history.replaceState(null, '', newUrl);
         }
       } else if (msg.type === 'output' || msg.type === 'error') {
-        term.write(msg.data);
+        if (_redrawing) resetRedrawTimer();
+        // Batch writes: accumulate data and flush via rAF to avoid flooding xterm.js
+        _writeBuf += msg.data;
+        if (!_writeRaf) {
+          _writeRaf = requestAnimationFrame(() => {
+            _writeRaf = null;
+            const chunk = _writeBuf;
+            _writeBuf = '';
+            const wasAtBottom = isAtBottom();
+            term.write(chunk, () => { if (wasAtBottom) term.scrollToBottom(); });
+          });
+        }
         notifyOnOutput(msg.data);
       } else if (msg.type === 'exit') {
         term.write(msg.data);
         _sessionExited = true;
         setStatus('disconnected', 'Session ended');
+      } else if (msg.type === 'restart') {
+        term.clear();
+        term.write(`\x1b[33m[正在重启 Claude 命令…]\x1b[0m\r\n`);
+        _wsGen++;          // invalidate onclose so it won't auto-reconnect
+        _reconnectAttempt = 0;
+        ws.close();
+        setTimeout(() => connect(), 300);  // new session already ready on server
       } else if (msg.type === 'relocate') {
         term.clear();
         term.write(`\x1b[33m[正在切换到: ${msg.cwd}]\x1b[0m\r\n`);
@@ -383,6 +486,28 @@ document.addEventListener('visibilitychange', () => {
   connect();
 });
 
+/* ── Restart session ── */
+const restartBtn = document.getElementById('restart-btn');
+if (restartBtn) {
+  restartBtn.addEventListener('click', () => {
+    if (!currentSessionId) return;
+    // Double-click guard: disable button during restart
+    restartBtn.disabled = true;
+    setTimeout(() => { restartBtn.disabled = false; }, 3000);
+    fetch(withToken(`/api/sessions/${currentSessionId}/restart`), { method: 'POST' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          term.write(`\r\n\x1b[31m[Restart failed: ${data.error}]\x1b[0m\r\n`);
+        }
+        // Server sends 'restart' message via WebSocket, handled below
+      })
+      .catch(err => {
+        term.write(`\r\n\x1b[31m[Restart failed: ${err.message}]\x1b[0m\r\n`);
+      });
+  });
+}
+
 function sendResize() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -397,15 +522,62 @@ term.onData((data) => {
   notifyOnInput(data);
 });
 
-/* ── Resize handling ── */
-const resizeObs = new ResizeObserver(() => {
+/* ── Resize handling (mobile-aware) ── */
+// Track last sent cols/rows to avoid no-op resizes
+let _lastSentCols = 0;
+let _lastSentRows = 0;
+let _resizeTimer = null;
+
+// On mobile, detect keyboard open/close via height change.
+// Only send resize to server when width changes (orientation) or height changes significantly.
+let _lastViewportWidth = window.innerWidth;
+let _lastViewportHeight = window.innerHeight;
+
+function handleResize() {
   fitAddon.fit();
-  term.scrollToBottom();
+
+  const cols = term.cols;
+  const rows = term.rows;
+
+  // Skip if dimensions haven't actually changed
+  if (cols === _lastSentCols && rows === _lastSentRows) return;
+
+  if (_isMobile) {
+    const widthChanged = Math.abs(window.innerWidth - _lastViewportWidth) > 10;
+    const heightDelta = window.innerHeight - _lastViewportHeight;
+
+    // Keyboard open/close: width stays same, height shrinks/grows significantly
+    // In this case, do NOT resize the tmux pane — just refit the local terminal
+    if (!widthChanged && Math.abs(heightDelta) > 100) {
+      // Keyboard event — skip tmux resize to avoid TUI redraw / jump
+      _lastViewportHeight = window.innerHeight;
+      return;
+    }
+
+    _lastViewportWidth = window.innerWidth;
+    _lastViewportHeight = window.innerHeight;
+  }
+
+  _lastSentCols = cols;
+  _lastSentRows = rows;
   sendResize();
+}
+
+const resizeObs = new ResizeObserver(() => {
+  if (_resizeTimer) clearTimeout(_resizeTimer);
+  // Debounce: 80ms on desktop, 300ms on mobile
+  _resizeTimer = setTimeout(handleResize, _isMobile ? 300 : 80);
 });
 resizeObs.observe(document.getElementById('terminal-wrap'));
 
-term.onResize(() => sendResize());
+term.onResize(() => {
+  // Only forward if dimensions genuinely changed (fitAddon already called)
+  if (term.cols !== _lastSentCols || term.rows !== _lastSentRows) {
+    _lastSentCols = term.cols;
+    _lastSentRows = term.rows;
+    sendResize();
+  }
+});
 
 /* ── Start (moved to end of file, after all const declarations) ── */
 // see bottom of file
@@ -438,8 +610,7 @@ function sendVoiceText(text, raw, refined) {
     ws.send(JSON.stringify({ type: 'input', data: text }));
   }
   // Save feedback (server ignores if userFinal === refined)
-  const _fbToken = new URLSearchParams(location.search).get('token');
-  fetch(`/api/voice/feedback${_fbToken ? '?token=' + encodeURIComponent(_fbToken) : ''}`, {
+  fetch(withToken(`/api/voice/feedback`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ raw, refined, userFinal: text }),
@@ -464,8 +635,7 @@ async function fetchRefined(raw) {
   try {
     const fetchStart = Date.now();
     console.log('[voice-client] Sending POST /api/voice/refine ...');
-    const _rfToken = new URLSearchParams(location.search).get('token');
-    const res = await fetch(`/api/voice/refine${_rfToken ? '?token=' + encodeURIComponent(_rfToken) : ''}`, {
+    const res = await fetch(withToken(`/api/voice/refine`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw }),
@@ -584,9 +754,58 @@ voicePanel.addEventListener('click', (e) => {
   if (e.target === voicePanel) closeVoicePanel();
 });
 
+// ── Native bridge callbacks (Android WebView) ──
+const _hasNativeBridge = !!(window.WebCCBridge && window.WebCCBridge.isAvailable());
+
+let _bridgeRecTimeout = null;
+
+// Called when Java confirms recording started
+window.__webccRecStarted = () => {
+  console.log('[voice-bridge] recording started on native side');
+};
+
+// Called when recording file is ready — fetch it via localhost URL
+window.__webccRecReady = async () => {
+  clearTimeout(_bridgeRecTimeout);
+  isRecording = false;
+  micBtn.classList.remove('active');
+  micStatus.textContent = '识别中…';
+  try {
+    const resp = await fetch('http://localhost/__recording');
+    const blob = await resp.blob();
+    if (blob.size > 0) {
+      uploadAudioForSTT(blob);
+    } else {
+      micStatus.textContent = '录音为空';
+      setTimeout(() => { micStatus.textContent = ''; }, 3000);
+    }
+  } catch (e) {
+    console.error('[voice-bridge] fetch recording error:', e);
+    micStatus.textContent = `获取录音失败: ${e.message}`;
+    setTimeout(() => { micStatus.textContent = ''; }, 4000);
+  }
+};
+
+window.__webccRecError = (msg) => {
+  clearTimeout(_bridgeRecTimeout);
+  isRecording = false;
+  micBtn.classList.remove('active');
+  micStatus.textContent = `录音错误: ${msg}`;
+  console.error('[voice-bridge] error:', msg);
+  setTimeout(() => { micStatus.textContent = ''; }, 4000);
+};
+
 function startRecording() {
+  if (_hasNativeBridge) {
+    window.WebCCBridge.startRecording();
+    isRecording = true;
+    micBtn.classList.add('active');
+    micStatus.textContent = '正在录音…';
+    return;
+  }
+
+  // Browser recording via getUserMedia
   audioChunks = [];
-  // Prefer webm/opus, fallback to whatever the browser supports
   const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
     ? 'audio/webm;codecs=opus'
     : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
@@ -601,7 +820,6 @@ function startRecording() {
     };
 
     mediaRecorder.onstop = () => {
-      // Release microphone
       if (recordingStream) {
         recordingStream.getTracks().forEach(t => t.stop());
         recordingStream = null;
@@ -625,6 +843,26 @@ function startRecording() {
 }
 
 function stopRecording() {
+  if (_hasNativeBridge && isRecording) {
+    micStatus.textContent = '处理中…';
+    // Timeout: if Java callback never fires, reset state
+    _bridgeRecTimeout = setTimeout(() => {
+      if (isRecording) {
+        isRecording = false;
+        micBtn.classList.remove('active');
+        micStatus.textContent = '录音超时，请重试';
+        setTimeout(() => { micStatus.textContent = ''; }, 3000);
+      }
+    }, 15000);
+    try { window.WebCCBridge.stopRecording(); } catch (e) {
+      clearTimeout(_bridgeRecTimeout);
+      isRecording = false;
+      micBtn.classList.remove('active');
+      micStatus.textContent = `停止失败: ${e.message}`;
+      setTimeout(() => { micStatus.textContent = ''; }, 3000);
+    }
+    return;
+  }
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
@@ -639,8 +877,7 @@ async function uploadAudioForSTT(blob) {
   try {
     const formData = new FormData();
     formData.append('file', blob, 'recording.webm');
-    const _sttToken = new URLSearchParams(location.search).get('token');
-    const res = await fetch(`/api/voice/stt${_sttToken ? '?token=' + encodeURIComponent(_sttToken) : ''}`, { method: 'POST', body: formData });
+    const res = await fetch(withToken(`/api/voice/stt`), { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     micStatus.textContent = '';
@@ -659,7 +896,7 @@ async function uploadAudioForSTT(blob) {
   }
 }
 
-if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices) {
+if (!_hasNativeBridge && (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices)) {
   micBtn.disabled = true;
   micBtn.title = '此浏览器不支持录音（需要 HTTPS 或 localhost）';
 } else {
@@ -696,6 +933,14 @@ function onFileSaved({ tempId, path: filePath, name }) {
     chip.classList.remove('pending');
     chip.title = `点击插入路径：${filePath}`;
     pendingChips.delete(tempId);
+  }
+  // On mobile, also insert path into the input field so it's visible and ready to send
+  if (_isMobile && filePath) {
+    const mi = document.getElementById('mobile-input');
+    if (mi) {
+      mi.value = (mi.value ? mi.value + ' ' : '') + filePath;
+      mi.focus();
+    }
   }
 }
 
@@ -741,22 +986,7 @@ function createChip(name, thumbUrl, filePath) {
   return chip;
 }
 
-/* ── Mobile: visualViewport resize (keyboard show/hide) ── */
-if (window.visualViewport) {
-  let rafPending = false;
-  window.visualViewport.addEventListener('resize', () => {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      // Shrink body to visual viewport so keyboard doesn't overlap
-      document.body.style.height = window.visualViewport.height + 'px';
-      fitAddon.fit();
-      term.scrollToBottom();
-      sendResize();
-    });
-  });
-}
+/* visualViewport handler at top of file (fixMobileLayout) */
 
 /* ── Mobile: tap terminal area to focus input bar ── */
 document.getElementById('terminal-wrap').addEventListener('click', () => {
@@ -784,20 +1014,37 @@ document.getElementById('mobile-keys').addEventListener('click', (e) => {
   // Brief visual feedback without stealing keyboard focus from input
 });
 
-// Send button
-mobileSend.addEventListener('click', () => {
-  const text = mobileInput.value;
+// Collect attached file paths and clear chips
+function collectAttachments() {
+  const chips = attachArea.querySelectorAll('.attach-chip[data-path]');
+  const paths = [];
+  chips.forEach(chip => {
+    if (chip.dataset.path) paths.push(chip.dataset.path);
+    chip.remove();
+  });
+  return paths;
+}
+
+function mobileSendAll() {
+  let text = mobileInput.value;
+  const paths = collectAttachments();
+  if (paths.length) {
+    text = (text ? text + ' ' : '') + paths.join(' ');
+  }
+  // Always send — empty text = bare Enter (confirms selections, default options, etc.)
   mobileInput.value = '';
   sendToTerminal(text + '\r');
-});
+  mobileInput.focus();
+}
+
+// Send button
+mobileSend.addEventListener('click', mobileSendAll);
 
 // Enter key on mobile input → send
 mobileInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
-    const text = mobileInput.value;
-    mobileInput.value = '';
-    sendToTerminal(text + '\r');
+    mobileSendAll();
   }
 });
 
@@ -817,7 +1064,7 @@ async function openRelocateDialog() {
   relocateInput.value = '';
   relocateModal.style.display = 'flex';
   try {
-    const res = await fetch(`/api/sessions/${currentSessionId}`);
+    const res = await fetch(withToken(`/api/sessions/${currentSessionId}`));
     const s = await res.json();
     const cwd = s.cwd || '';
     relocateCurrent.textContent = cwd || '(未知)';
@@ -855,7 +1102,7 @@ relocateConfirm.addEventListener('click', async () => {
   relocateConfirm.textContent = '切换中…';
   relocateError.style.display = 'none';
   try {
-    const res = await fetch(`/api/sessions/${currentSessionId}/relocate`, {
+    const res = await fetch(withToken(`/api/sessions/${currentSessionId}/relocate`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cwd: newCwd }),
@@ -921,7 +1168,7 @@ async function loadFiles(dirPath) {
   }
 
   try {
-    const res  = await fetch(`/api/files?${params}`);
+    const res  = await fetch(withToken(`/api/files?${params}`));
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '加载失败');
 
@@ -983,7 +1230,7 @@ function makeFileItem(name, isDir, fullPath, size, onDirClick) {
     downloadBtn.className = 'fi-action-btn';
     downloadBtn.title = '下载';
     downloadBtn.textContent = '↓';
-    downloadBtn.href = `/api/download?path=${encodeURIComponent(fullPath)}`;
+    downloadBtn.href = withToken(`/api/download?path=${encodeURIComponent(fullPath)}`);
     downloadBtn.download = name;
 
     actions.appendChild(downloadBtn);
@@ -993,7 +1240,7 @@ function makeFileItem(name, isDir, fullPath, size, onDirClick) {
       viewBtn.className = 'fi-action-btn';
       viewBtn.title = '在浏览器中打开';
       viewBtn.textContent = '👁';
-      viewBtn.href = `/api/download?path=${encodeURIComponent(fullPath)}&inline=1`;
+      viewBtn.href = withToken(`/api/download?path=${encodeURIComponent(fullPath)}&inline=1`);
       viewBtn.target = '_blank';
       viewBtn.rel = 'noopener';
       actions.appendChild(viewBtn);
@@ -1127,9 +1374,7 @@ function showInitCwdPicker() {
 
 async function loadInitDirs(dirPath, updateInput = true) {
   try {
-    const urlToken = new URLSearchParams(location.search).get('token');
-    const tokenParam = urlToken ? `&token=${urlToken}` : '';
-    const res = await fetch(`/api/files?path=${encodeURIComponent(dirPath)}${tokenParam}`);
+    const res = await fetch(withToken(`/api/files?path=${encodeURIComponent(dirPath)}`));
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '加载失败');
     _initBrowsePath = data.path;

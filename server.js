@@ -24,113 +24,128 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 const wechatBridge = require('./wechat-ilink');
 const webpush = require('web-push');
 
+const crypto = require('crypto');
 const app = express();
 
-// ── Access token authentication ──
+// ── Access token authentication (cookie-based login) ──
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+
+// Signed cookie: no server-side storage needed, survives restarts
+function signToken(data) {
+  return crypto.createHmac('sha256', ACCESS_TOKEN).update(data).digest('hex');
+}
+
+function generateAuthCookie() {
+  const payload = Date.now().toString(36);
+  return payload + '.' + signToken(payload);
+}
+
+function verifyAuthCookie(cookie) {
+  if (!cookie || !cookie.includes('.')) return false;
+  const [payload, sig] = cookie.split('.');
+  return sig === signToken(payload);
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  for (const pair of header.split(';')) {
+    const [k, ...v] = pair.trim().split('=');
+    if (k) cookies[k.trim()] = v.join('=').trim();
+  }
+  return cookies;
+}
+
+function isExternalProxy(req) {
+  // Reverse proxy (Tailscale, ngrok, etc.) connects from localhost but serves external users
+  const host = (req.headers.host || '').split(':')[0];
+  return host.endsWith('.ts.net') || host.endsWith('.ngrok.io') || host.endsWith('.ngrok-free.app');
+}
+
+function isAuthenticated(req) {
+  if (!ACCESS_TOKEN) return true;
+  // Localhost allowed — unless it's a reverse proxy forwarding external traffic
+  const ip = req.ip || req.connection.remoteAddress;
+  if ((ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req)) return true;
+  // Cookie auth (HMAC-signed, survives server restart)
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies.webcc_auth && verifyAuthCookie(cookies.webcc_auth)) return true;
+  // Query param / header (backwards compat for API / WebSocket)
+  const token = req.query.token || req.headers['x-access-token'];
+  if (token === ACCESS_TOKEN) return true;
+  return false;
+}
+
 if (ACCESS_TOKEN) {
-  app.use((req, res, next) => {
-    // Allow localhost without token
-    const ip = req.ip || req.connection.remoteAddress;
-    if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
-    // Allow static assets without token (JS, CSS, images, fonts, manifest, icons)
-    if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|json)$/i.test(req.path)) return next();
-    const token = req.query.token || req.headers['x-access-token'];
-    if (token === ACCESS_TOKEN) return next();
-    res.status(403).send('Forbidden: invalid or missing token');
+  // Login page & handler
+  app.get('/login', (req, res) => {
+    const error = req.query.error ? '<p style="color:#f85149;margin-bottom:16px;">密码错误</p>' : '';
+    const redirect = req.query.redirect || '/';
+    res.type('html').send(`<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebCC — Login</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;
+    display:flex;align-items:center;justify-content:center;height:100vh}
+  .box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;
+    width:340px;text-align:center}
+  .box h1{font-size:20px;margin-bottom:8px;color:#f0f6fc}
+  .box .logo{font-size:24px;font-weight:700;color:#f78166;margin-bottom:24px}
+  .box .logo span{color:#79c0ff}
+  input[type=password]{width:100%;padding:10px 14px;border-radius:6px;border:1px solid #30363d;
+    background:#0d1117;color:#c9d1d9;font-size:14px;margin-bottom:16px;outline:none}
+  input[type=password]:focus{border-color:#58a6ff}
+  button{width:100%;padding:10px;border-radius:6px;border:none;background:#238636;
+    color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+  button:hover{background:#2ea043}
+</style></head><body>
+<div class="box">
+  <div class="logo">Web<span>CC</span></div>
+  ${error}
+  <form method="POST" action="/login">
+    <input type="hidden" name="redirect" value="${redirect.replace(/"/g, '&quot;')}">
+    <input type="password" name="password" placeholder="输入访问密码" autofocus>
+    <button type="submit">登录</button>
+  </form>
+</div></body></html>`);
   });
-}
 
-// ── Auto-generate / refresh self-signed certificate ──
-const certPath = path.join(__dirname, 'cert.pem');
-const keyPath = path.join(__dirname, 'key.pem');
-
-function getLocalIPs() {
-  const ips = new Set(['127.0.0.1']);
-  const ifaces = os.networkInterfaces();
-  for (const name of Object.keys(ifaces)) {
-    for (const iface of ifaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) ips.add(iface.address);
-    }
-  }
-  return [...ips].sort();
-}
-
-function getCertSANIPs(certFile) {
-  try {
-    const out = execSync(`openssl x509 -in "${certFile}" -noout -ext subjectAltName 2>/dev/null`, { encoding: 'utf8' });
-    const ips = [];
-    for (const m of out.matchAll(/IP Address:([0-9.]+)/g)) ips.push(m[1]);
-    return ips.sort();
-  } catch { return []; }
-}
-
-function ensureCert() {
-  const currentIPs = getLocalIPs();
-  const certExists = fs.existsSync(certPath) && fs.existsSync(keyPath);
-
-  if (certExists) {
-    const certIPs = getCertSANIPs(certPath);
-    const match = currentIPs.length === certIPs.length && currentIPs.every((ip, i) => ip === certIPs[i]);
-    if (match) return; // cert is up to date
-    console.log(`[webcc] IP change detected. Cert SANs: [${certIPs}] → Current: [${currentIPs}]. Regenerating...`);
-    // Back up old certs
-    try { fs.copyFileSync(certPath, certPath + '.bak'); } catch {}
-    try { fs.copyFileSync(keyPath, keyPath + '.bak'); } catch {}
-  } else {
-    console.log('[webcc] No certificate found. Generating self-signed cert...');
-  }
-
-  // Build SAN string:  IP:127.0.0.1,IP:192.168.x.x,...,DNS:localhost
-  const san = currentIPs.map(ip => `IP:${ip}`).concat('DNS:localhost').join(',');
-  try {
-    execSync(
-      `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" ` +
-      `-days 365 -nodes -subj "/CN=webcc" -addext "subjectAltName=${san}" 2>/dev/null`,
-      { stdio: 'pipe' }
-    );
-    fs.chmodSync(keyPath, 0o600);
-    console.log(`[webcc] Certificate generated with SANs: ${san}`);
-  } catch (e) {
-    console.error('[webcc] Failed to generate certificate:', e.message);
-    console.error('[webcc] Falling back to HTTP mode.');
-  }
-}
-
-ensureCert();
-
-const useHttps = fs.existsSync(certPath) && fs.existsSync(keyPath);
-const PORT = process.env.PORT || (useHttps ? 3443 : 3000);
-
-let server;
-if (useHttps) {
-  const sslOptions = {
-    cert: fs.readFileSync(certPath),
-    key: fs.readFileSync(keyPath),
-  };
-  server = https.createServer(sslOptions, app);
-  // HTTP server: serve app behind reverse proxy (ngrok), redirect otherwise
-  const httpServer = http.createServer((req, res) => {
-    if (req.headers['x-forwarded-proto'] || req.headers['x-forwarded-for']) {
-      app(req, res);
+  app.post('/login', express.urlencoded({ extended: false }), (req, res) => {
+    const redirect = req.body.redirect || '/';
+    if (req.body.password === ACCESS_TOKEN) {
+      const authCookie = generateAuthCookie();
+      res.setHeader('Set-Cookie',
+        `webcc_auth=${authCookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}`);
+      res.redirect(redirect);
     } else {
-      const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
-      res.writeHead(301, { Location: `https://${host}:${PORT}${req.url}` });
-      res.end();
+      res.redirect(`/login?error=1&redirect=${encodeURIComponent(redirect)}`);
     }
   });
-  // Forward WebSocket upgrades from HTTP server to main WSS (for ngrok)
-  httpServer.on('upgrade', (req, socket, head) => {
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
-    });
+
+  app.get('/logout', (req, res) => {
+    res.setHeader('Set-Cookie', 'webcc_auth=; Path=/; HttpOnly; Max-Age=0');
+    res.redirect('/login');
   });
-  httpServer.listen(3000, () => {
-    console.log(`  HTTP (+ reverse proxy support) running on http://localhost:3000\n`);
+
+  // Auth middleware
+  app.use((req, res, next) => {
+    // Allow login page, static assets
+    if (req.path === '/login' || req.path === '/logout') return next();
+    if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|json)$/i.test(req.path)) return next();
+    if (isAuthenticated(req)) return next();
+    // Redirect HTML requests to login, reject API calls with 403
+    if (req.headers.accept?.includes('text/html') || (!req.path.startsWith('/api/') && req.method === 'GET')) {
+      res.redirect(`/login?redirect=${encodeURIComponent(req.originalUrl)}`);
+    } else {
+      res.status(403).json({ error: 'Forbidden: not authenticated' });
+    }
   });
-} else {
-  server = http.createServer(app);
 }
+
+const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
 
 const wss = new WebSocket.Server({ server });
 const isWindows = process.platform === 'win32';
@@ -221,9 +236,11 @@ function tmuxHasSession(id) {
   } catch { return false; }
 }
 
-function tmuxCreateSession(id, cwd, cols, rows) {
+function tmuxCreateSession(id, cwd, cols, rows, claudeSessionId) {
   const name = tmuxSessionName(id);
-  const cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
+  let cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
+  // Bind to a stable Claude session UUID so chat mode can --resume the same conversation
+  if (claudeSessionId) cmd += ` --session-id ${claudeSessionId}`;
   // set-option remain-on-exit off so the session disappears when claude exits
   execSync(
     `tmux new-session -d -s "${name}" -x ${cols} -y ${rows} -c "${cwd}" "${cmd}"`,
@@ -276,8 +293,8 @@ function startOutputCapture(id) {
   try { fs.unlinkSync(fifoPath); } catch (_) {}
   execSync(`mkfifo "${fifoPath}"`);
 
-  // Tell tmux to pipe pane output into our FIFO
-  execSync(`tmux pipe-pane -t "${tmuxSessionName(id)}" -o "cat > '${fifoPath}'"`);
+  // Tell tmux to pipe pane output into our FIFO (no -o: always replace existing pipe)
+  execSync(`tmux pipe-pane -t "${tmuxSessionName(id)}" "cat > '${fifoPath}'"`);
 
   // Open FIFO with O_RDWR | O_NONBLOCK, wrap in net.Socket:
   // - O_RDWR prevents spurious EOF (always has a potential writer)
@@ -341,7 +358,7 @@ function loadPersistedSessions() {
 }
 
 function savePersistedSessions() {
-  const data = [...persistedSessions.values()].map(({ id, cwd, createdAt }) => ({ id, cwd, createdAt }));
+  const data = [...persistedSessions.values()].map(({ id, cwd, createdAt, claudeSessionId }) => ({ id, cwd, createdAt, claudeSessionId }));
   try {
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
@@ -374,12 +391,18 @@ function createSession(id, cwd) {
     cwd = os.homedir();
   }
 
+  // Get or create a stable Claude session UUID for this webcc session
+  const persisted = persistedSessions.get(id);
+  const claudeSessionId = persisted?.claudeSessionId || crypto.randomUUID();
+
   // Create tmux session if it doesn't already exist (it may survive server restarts)
+  let isRecovery = false;
   if (!tmuxHasSession(id)) {
-    console.log(`[webcc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd}`);
-    tmuxCreateSession(id, cwd, 80, 24);
+    console.log(`[webcc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd} (claude session: ${claudeSessionId})`);
+    tmuxCreateSession(id, cwd, 80, 24, claudeSessionId);
   } else {
     console.log(`[webcc] Attaching to existing tmux session: ${tmuxSessionName(id)}`);
+    isRecovery = true;
   }
 
   // Get the tty device path for direct input writes
@@ -388,23 +411,32 @@ function createSession(id, cwd) {
   // Start output capture via pipe-pane → FIFO
   const { stream, fifoPath } = startOutputCapture(id);
 
-  const persisted = persistedSessions.get(id);
+  // Pre-fill buffer with current terminal content for recovered sessions
+  const initialBuffer = [];
+  if (isRecovery) {
+    const captured = tmuxCapturePane(id);
+    if (captured) initialBuffer.push(captured);
+  }
+
   const session = {
     id,
+    claudeSessionId,
     tmuxName: tmuxSessionName(id),
     ttyPath,
     outputStream: stream,
     fifoPath,
-    buffer: [],
+    buffer: initialBuffer,
     clients: new Set(),
+    primaryClient: null,   // the client that controls resize (first to resize)
+    resizeOwner: null,     // locked resize ownership — only this ws can resize tmux
     createdAt: persisted ? new Date(persisted.createdAt) : new Date(),
     lastActivity: new Date(),
     cwd,
     exitCheckTimer: null,
   };
 
-  // Save to persistence
-  persistedSessions.set(id, { id, cwd, createdAt: session.createdAt });
+  // Save to persistence (includes claudeSessionId for chat mode --resume)
+  persistedSessions.set(id, { id, cwd, createdAt: session.createdAt, claudeSessionId });
   savePersistedSessions();
 
   // Output stream → broadcast to all WebSocket clients
@@ -566,7 +598,7 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
   if (p) {
     p.cwd = resolvedCwd;
   } else {
-    persistedSessions.set(id, { id, cwd: resolvedCwd, createdAt: new Date() });
+    persistedSessions.set(id, { id, cwd: resolvedCwd, createdAt: new Date(), claudeSessionId: crypto.randomUUID() });
   }
   savePersistedSessions();
 
@@ -577,6 +609,47 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
     res.json({ ok: true, cwd: resolvedCwd });
   } catch (err) {
     console.error('[webcc] Relocate failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Restart session (kill tmux + respawn claude in same cwd) ──
+app.post('/api/sessions/:id/restart', (req, res) => {
+  const id = req.params.id;
+  const oldSession = sessions.get(id);
+  const persisted = persistedSessions.get(id);
+  if (!oldSession && !persisted) return res.status(404).json({ error: 'Session not found' });
+
+  const cwd = oldSession?.cwd || persisted?.cwd || os.homedir();
+
+  // Collect clients before teardown (they'll reconnect to the new session)
+  const oldClients = oldSession ? [...oldSession.clients] : [];
+
+  // Tear down old session
+  sessions.delete(id);
+  if (oldSession) {
+    stopOutputCapture(oldSession);
+    if (oldSession.exitCheckTimer) clearInterval(oldSession.exitCheckTimer);
+    cleanupPushMonitor(id);
+    oldSession.clients.clear();
+  }
+  tmuxKillSession(id);
+
+  // Start fresh claude in the same directory
+  try {
+    createSession(id, cwd);
+    console.log(`[webcc] Session ${id} restarted in ${cwd}`);
+
+    // NOW notify old clients to reconnect (new session is ready)
+    for (const client of oldClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: 'restart' }));
+      }
+    }
+
+    res.json({ ok: true, cwd });
+  } catch (err) {
+    console.error('[webcc] Restart failed:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -895,6 +968,17 @@ async function callVoiceAPI(prompt, { reqId, onStart, onFirstToken, onChunk, onD
 }
 
 console.log(`[webcc/voice] Voice API initialized (OpenRouter, model: ${OPENROUTER_MODEL})`);
+
+// ── File upload for chat mode ──
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  const ext = path.extname(req.file.originalname).replace(/[^a-z0-9.]/gi, '').slice(0, 12) || 'bin';
+  const safeName = `webcc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}${ext.startsWith('.') ? ext : '.' + ext}`;
+  const tmpPath = path.join(os.tmpdir(), safeName);
+  fs.writeFileSync(tmpPath, req.file.buffer);
+  console.log(`[webcc] Uploaded: ${tmpPath} (${req.file.originalname})`);
+  res.json({ path: tmpPath, name: req.file.originalname });
+});
 
 app.post('/api/voice/refine', (req, res) => {
   const reqId = `vr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -1234,6 +1318,23 @@ webpush.setVapidDetails('mailto:webcc@localhost', vapidKeys.pubKey, vapidKeys.pr
 // Push subscription store
 let pushSubscriptions = new Map(); // endpoint -> PushSubscription JSON
 
+// Push health tracking
+const pushHealthStats = new Map(); // endpoint -> { successCount, failCount, lastSuccessTime, lastFailTime, lastFailReason, consecutiveFails }
+const pushGlobalStats = { totalSent: 0, totalSuccess: 0, totalFail: 0, lastPushTime: 0, lastPushType: '', lastPushSessionId: '' };
+
+function getPushHealthEntry(endpoint) {
+  if (!pushHealthStats.has(endpoint)) {
+    pushHealthStats.set(endpoint, { successCount: 0, failCount: 0, lastSuccessTime: 0, lastFailTime: 0, lastFailReason: '', consecutiveFails: 0 });
+  }
+  return pushHealthStats.get(endpoint);
+}
+
+// Bark / Webhook backup notification channels
+let BARK_URL = process.env.BARK_URL || '';
+let WEBHOOK_URL = process.env.WEBHOOK_URL || '';
+const barkHealth = { lastSendTime: 0, lastSuccess: true, lastError: '' };
+const webhookHealth = { lastSendTime: 0, lastSuccess: true, lastError: '' };
+
 function loadPushSubscriptions() {
   try {
     if (fs.existsSync(PUSH_SUBS_FILE)) {
@@ -1267,9 +1368,8 @@ app.get('/api/server-info', (req, res) => {
     }
     if (ip !== '127.0.0.1') break;
   }
-  const proto = useHttps ? 'https' : 'http';
-  const url = `${proto}://${ip}:${PORT}`;
-  res.json({ ip, port: PORT, proto, url, token: ACCESS_TOKEN || '' });
+  const url = `http://${ip}:${PORT}`;
+  res.json({ ip, port: PORT, proto: 'http', url, token: ACCESS_TOKEN || '' });
 });
 
 // Push API endpoints
@@ -1295,23 +1395,162 @@ app.delete('/api/push/subscribe', (req, res) => {
   res.json({ ok: true });
 });
 
-// Send push notification to all subscribers
-function sendPushToAll(payload) {
-  const payloadStr = JSON.stringify(payload);
-  const stale = [];
-  for (const [endpoint, sub] of pushSubscriptions) {
-    webpush.sendNotification(sub, payloadStr).catch(err => {
-      if (err.statusCode === 404 || err.statusCode === 410) {
-        stale.push(endpoint);
-      }
-      console.error(`[webcc/push] Send failed (${err.statusCode || err.message})`);
+// Validate if a subscription is registered server-side
+app.post('/api/push/validate', (req, res) => {
+  const { endpoint } = req.body || {};
+  if (!endpoint) return res.status(400).json({ error: 'Missing endpoint' });
+  res.json({ known: pushSubscriptions.has(endpoint) });
+});
+
+// Push health status
+app.get('/api/push/health', (req, res) => {
+  const subs = [];
+  for (const [endpoint] of pushSubscriptions) {
+    const h = pushHealthStats.get(endpoint) || { successCount: 0, failCount: 0, lastSuccessTime: 0, lastFailTime: 0, lastFailReason: '', consecutiveFails: 0 };
+    subs.push({
+      endpointShort: endpoint.length > 50 ? endpoint.slice(0, 35) + '...' + endpoint.slice(-12) : endpoint,
+      ...h,
     });
   }
-  // Clean up expired subscriptions
-  if (stale.length > 0) {
-    for (const ep of stale) pushSubscriptions.delete(ep);
-    savePushSubscriptions();
+  res.json({
+    subscriptions: subs,
+    subscriptionCount: pushSubscriptions.size,
+    global: pushGlobalStats,
+    bark: { configured: !!BARK_URL, ...barkHealth },
+    webhook: { configured: !!WEBHOOK_URL, ...webhookHealth },
+  });
+});
+
+// Test push notification
+app.post('/api/push/test', async (req, res) => {
+  const payload = {
+    title: 'WebCC Test',
+    body: `Push test at ${new Date().toLocaleTimeString()}`,
+    type: 'test',
+    tag: 'webcc-test',
+    url: '/manage',
+  };
+  await sendPushToAll(payload);
+  sendBarkNotification(payload.title, payload.body, payload.url);
+  sendWebhookNotification(payload);
+  res.json({ ok: true, subscribers: pushSubscriptions.size });
+});
+
+// Test Bark only
+app.post('/api/push/test-bark', (req, res) => {
+  if (!BARK_URL) return res.status(400).json({ error: 'Bark URL not configured' });
+  sendBarkNotification('WebCC Test', `Bark test at ${new Date().toLocaleTimeString()}`, '/manage');
+  res.json({ ok: true });
+});
+
+// Test Webhook only
+app.post('/api/push/test-webhook', (req, res) => {
+  if (!WEBHOOK_URL) return res.status(400).json({ error: 'Webhook URL not configured' });
+  sendWebhookNotification({ title: 'WebCC Test', body: `Webhook test at ${new Date().toLocaleTimeString()}`, type: 'test' });
+  res.json({ ok: true });
+});
+
+// Notification settings (Bark / Webhook)
+app.get('/api/settings/notify', (req, res) => {
+  res.json({
+    barkUrl: BARK_URL ? BARK_URL.replace(/\/[^/]{8,}$/, '/****') : '',
+    hasBark: !!BARK_URL,
+    webhookUrl: WEBHOOK_URL || '',
+    hasWebhook: !!WEBHOOK_URL,
+  });
+});
+
+app.post('/api/settings/notify', (req, res) => {
+  const { barkUrl, webhookUrl } = req.body || {};
+  const updates = {};
+  if (typeof barkUrl === 'string') { BARK_URL = barkUrl; updates.BARK_URL = barkUrl; }
+  if (typeof webhookUrl === 'string') { WEBHOOK_URL = webhookUrl; updates.WEBHOOK_URL = webhookUrl; }
+  if (Object.keys(updates).length > 0) writeEnvFile(updates);
+  res.json({ ok: true });
+});
+
+// Send push notification to all subscribers (async, properly handles stale cleanup)
+async function sendPushToAll(payload) {
+  if (pushSubscriptions.size === 0) return;
+  const payloadStr = JSON.stringify(payload);
+  const entries = [...pushSubscriptions.entries()];
+  const results = await Promise.allSettled(
+    entries.map(([endpoint, sub]) =>
+      webpush.sendNotification(sub, payloadStr).then(
+        () => ({ endpoint, ok: true }),
+        err => ({ endpoint, ok: false, statusCode: err.statusCode, message: err.message })
+      )
+    )
+  );
+
+  const stale = [];
+  for (const r of results) {
+    const v = r.status === 'fulfilled' ? r.value : { endpoint: '', ok: false, message: 'settled-rejected' };
+    const h = getPushHealthEntry(v.endpoint);
+    pushGlobalStats.totalSent++;
+    if (v.ok) {
+      h.successCount++;
+      h.lastSuccessTime = Date.now();
+      h.consecutiveFails = 0;
+      pushGlobalStats.totalSuccess++;
+    } else {
+      h.failCount++;
+      h.lastFailTime = Date.now();
+      h.lastFailReason = v.message || `HTTP ${v.statusCode}`;
+      h.consecutiveFails++;
+      pushGlobalStats.totalFail++;
+      if (v.statusCode === 404 || v.statusCode === 410) stale.push(v.endpoint);
+      console.error(`[webcc/push] Send failed for ${v.endpoint.slice(0, 40)}... (${v.statusCode || v.message})`);
+    }
   }
+
+  if (stale.length > 0) {
+    for (const ep of stale) {
+      pushSubscriptions.delete(ep);
+      pushHealthStats.delete(ep);
+    }
+    savePushSubscriptions();
+    console.log(`[webcc/push] Cleaned ${stale.length} expired subscription(s)`);
+  }
+}
+
+// Bark push notification (iOS backup)
+function sendBarkNotification(title, body, url) {
+  if (!BARK_URL) return;
+  const barkUrl = `${BARK_URL.replace(/\/$/, '')}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?url=${encodeURIComponent(url || '')}&group=webcc`;
+  barkHealth.lastSendTime = Date.now();
+  const mod = barkUrl.startsWith('https') ? https : http;
+  mod.get(barkUrl, res => {
+    barkHealth.lastSuccess = res.statusCode >= 200 && res.statusCode < 300;
+    if (!barkHealth.lastSuccess) barkHealth.lastError = `HTTP ${res.statusCode}`;
+    else barkHealth.lastError = '';
+    res.resume();
+  }).on('error', err => {
+    barkHealth.lastSuccess = false;
+    barkHealth.lastError = err.message;
+    console.error('[webcc/push] Bark send failed:', err.message);
+  });
+}
+
+// Generic webhook notification
+function sendWebhookNotification(payload) {
+  if (!WEBHOOK_URL) return;
+  webhookHealth.lastSendTime = Date.now();
+  const data = JSON.stringify(payload);
+  const parsed = new URL(WEBHOOK_URL);
+  const mod = parsed.protocol === 'https:' ? https : http;
+  const req = mod.request(parsed, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, res => {
+    webhookHealth.lastSuccess = res.statusCode >= 200 && res.statusCode < 300;
+    if (!webhookHealth.lastSuccess) webhookHealth.lastError = `HTTP ${res.statusCode}`;
+    else webhookHealth.lastError = '';
+    res.resume();
+  });
+  req.on('error', err => {
+    webhookHealth.lastSuccess = false;
+    webhookHealth.lastError = err.message;
+    console.error('[webcc/push] Webhook send failed:', err.message);
+  });
+  req.end(data);
 }
 
 // ── Server-side notification detection (for push notifications) ──
@@ -1368,7 +1607,7 @@ function cleanupPushMonitor(sessionId) {
  * Triggers web push when a session completes or waits for user action.
  */
 function pushOnOutput(sessionId, rawData) {
-  if (pushSubscriptions.size === 0) return; // no subscribers
+  if (pushSubscriptions.size === 0 && !BARK_URL && !WEBHOOK_URL) return; // no channels configured
 
   const mon = initPushMonitor(sessionId);
   const text = pushStripAnsi(rawData);
@@ -1429,14 +1668,23 @@ function triggerPush(sessionId, type, message) {
   const cwd = session ? session.cwd : '';
   const shortCwd = cwd.length > 30 ? '...' + cwd.slice(-27) : cwd;
 
-  sendPushToAll({
+  const payload = {
     title: type === 'waiting' ? `WebCC #${sessionId}: 等待操作` : `WebCC #${sessionId}: 完成`,
     body: `${message}\n${shortCwd}`,
     sessionId,
     type,
     tag: `webcc-${sessionId}`,
     url: `/manage`,
-  });
+  };
+
+  pushGlobalStats.lastPushTime = now;
+  pushGlobalStats.lastPushType = type;
+  pushGlobalStats.lastPushSessionId = sessionId;
+
+  // Send to all channels in parallel
+  sendPushToAll(payload);
+  sendBarkNotification(payload.title, `${message} ${shortCwd}`, payload.url);
+  sendWebhookNotification(payload);
 
   console.log(`[webcc/push] Sent ${type} notification for session ${sessionId}`);
 }
@@ -1445,20 +1693,363 @@ function triggerPush(sessionId, type, message) {
 wechatBridge.init(sessions, persistedSessions, tmuxWriteInput);
 app.use('/api/wechat', wechatBridge.router);
 
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
+// Root → manage page (unless ?id= is specified, which means a terminal session)
+app.get('/', (req, res, next) => {
+  if (req.query.id || req.query.newid || req.query.cwd) return next(); // terminal session
+  res.redirect('/manage');
+});
+
+// APK info endpoint — returns file modification time
+app.get('/api/apk-info', (req, res) => {
+  const apkPath = path.join(__dirname, 'public', 'webcc.apk');
+  try {
+    const stat = fs.statSync(apkPath);
+    res.json({ exists: true, mtime: stat.mtime.toISOString(), size: stat.size });
+  } catch {
+    res.json({ exists: false });
+  }
+});
+
+app.use(express.static(path.join(__dirname, 'public'), {
+  extensions: ['html'],
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.apk')) {
+      res.set('Content-Type', 'application/vnd.android.package-archive');
+      res.set('Content-Disposition', 'attachment; filename="webcc.apk"');
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+    }
+  },
+}));
+
+// ── Chat mode: message history ──
+const CHAT_HISTORY_DIR = path.join(__dirname, 'chat_history');
+try { fs.mkdirSync(CHAT_HISTORY_DIR, { recursive: true }); } catch (_) {}
+const MAX_CHAT_MESSAGES = 50;  // keep last N messages per session
+
+// In-memory cache: sessionName → [ { role, content, ts, cost?, tools? } ]
+const chatHistories = new Map();
+
+function chatHistoryPath(sessionName) {
+  const safe = sessionName.replace(/[^a-zA-Z0-9_-]/g, '_') || '_default';
+  return path.join(CHAT_HISTORY_DIR, `${safe}.json`);
+}
+
+function loadChatHistory(sessionName) {
+  if (chatHistories.has(sessionName)) return chatHistories.get(sessionName);
+  try {
+    const data = JSON.parse(fs.readFileSync(chatHistoryPath(sessionName), 'utf8'));
+    chatHistories.set(sessionName, data);
+    return data;
+  } catch (_) {
+    const arr = [];
+    chatHistories.set(sessionName, arr);
+    return arr;
+  }
+}
+
+function saveChatHistory(sessionName) {
+  const history = chatHistories.get(sessionName);
+  if (!history) return;
+  try {
+    fs.writeFileSync(chatHistoryPath(sessionName), JSON.stringify(history, null, 2));
+  } catch (e) {
+    console.error(`[webcc/chat] Failed to save history for ${sessionName}:`, e.message);
+  }
+}
+
+function appendChatMessage(sessionName, msg) {
+  const history = loadChatHistory(sessionName);
+  history.push(msg);
+  while (history.length > MAX_CHAT_MESSAGES) history.shift();
+  saveChatHistory(sessionName);
+}
+
+// ── Chat mode: stream-json WebSocket ──
+function handleChatWs(ws, req, urlObj) {
+  const sessionName = urlObj.searchParams.get('session') || '_default';
+  const sessionData = sessions.get(sessionName) || persistedSessions.get(sessionName);
+  let cwd = urlObj.searchParams.get('cwd') || '';
+  if (!cwd && sessionData?.cwd) cwd = sessionData.cwd;
+  if (!cwd) cwd = os.homedir();
+
+  // Get or create a stable Claude session UUID for chat resume
+  let chatClaudeSessionId = sessionData?.claudeSessionId;
+  if (!chatClaudeSessionId) {
+    chatClaudeSessionId = crypto.randomUUID();
+    // Persist it so it survives server restarts
+    const existing = persistedSessions.get(sessionName);
+    if (existing) {
+      existing.claudeSessionId = chatClaudeSessionId;
+    } else {
+      persistedSessions.set(sessionName, { id: sessionName, cwd, createdAt: new Date(), claudeSessionId: chatClaudeSessionId });
+    }
+    savePersistedSessions();
+  }
+
+  // Track whether we've already started a Claude session (first turn uses --session-id, subsequent use --resume)
+  const history = loadChatHistory(sessionName);
+  let chatTurnCount = history.filter(m => m.role === 'assistant').length;
+
+  ws.send(JSON.stringify({
+    type: 'system', subtype: 'init',
+    cwd, session: sessionName, session_id: sessionName,
+  }));
+
+  // Replay saved messages
+  if (history.length > 0) {
+    ws.send(JSON.stringify({ type: 'chat_history', messages: history }));
+  }
+
+  let claudeProc = null;
+  let lineBuf = '';
+
+  // Accumulate assistant response for this turn
+  let currentAssistantText = '';
+  let currentToolCalls = [];   // [{ name, input, result, is_error }]
+  let currentCost = null;
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'cancel') {
+        if (claudeProc) {
+          console.log('[webcc/chat] Cancel requested, killing claude process');
+          try { claudeProc.kill('SIGTERM'); } catch (_) {}
+          claudeProc = null;
+          lineBuf = '';
+        }
+        // Save partial response if any
+        if (currentAssistantText || currentToolCalls.length) {
+          appendChatMessage(sessionName, {
+            role: 'assistant', content: currentAssistantText,
+            tools: currentToolCalls.length ? currentToolCalls : undefined,
+            ts: Date.now(), cancelled: true,
+          });
+          currentAssistantText = '';
+          currentToolCalls = [];
+        }
+        return;
+      }
+
+      if (msg.type === 'clear_history') {
+        const history = chatHistories.get(sessionName);
+        if (history) history.length = 0;
+        saveChatHistory(sessionName);
+        // Reset Claude session so next turn starts fresh
+        chatClaudeSessionId = crypto.randomUUID();
+        chatTurnCount = 0;
+        const existing = persistedSessions.get(sessionName);
+        if (existing) existing.claudeSessionId = chatClaudeSessionId;
+        savePersistedSessions();
+        console.log(`[webcc/chat] Cleared history and reset Claude session for ${sessionName}`);
+        return;
+      }
+
+      if (msg.type === 'user_message' && msg.text) {
+        // Kill previous process if still running
+        if (claudeProc) {
+          try { claudeProc.kill('SIGTERM'); } catch (_) {}
+          claudeProc = null;
+          lineBuf = '';
+          // Save partial assistant response before starting new turn
+          if (currentAssistantText || currentToolCalls.length) {
+            appendChatMessage(sessionName, {
+              role: 'assistant', content: currentAssistantText,
+              tools: currentToolCalls.length ? currentToolCalls : undefined,
+              ts: Date.now(), cancelled: true,
+            });
+            chatTurnCount++;
+          }
+        }
+
+        // Save user message to history
+        appendChatMessage(sessionName, {
+          role: 'user', content: msg.text, ts: Date.now(),
+        });
+
+        // Reset accumulators
+        currentAssistantText = '';
+        currentToolCalls = [];
+        currentCost = null;
+
+        const args = [
+          '-p',
+          '--output-format', 'stream-json',
+          '--verbose',
+          '--include-partial-messages',
+          '--dangerously-skip-permissions',
+        ];
+
+        // Resume strategy: first turn starts a named session, subsequent turns resume it
+        if (chatTurnCount > 0) {
+          args.push('--resume', chatClaudeSessionId);
+        } else {
+          args.push('--session-id', chatClaudeSessionId);
+        }
+
+        args.push(msg.text);
+
+        console.log(`[webcc/chat] Spawning (turn ${chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
+
+        const spawnChat = (spawnArgs, isRetry) => {
+          const proc = spawn(CLAUDE_CMD, spawnArgs, {
+            cwd,
+            env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+
+          let stderrBuf = '';
+
+          proc.stdout.on('data', (chunk) => {
+            lineBuf += chunk.toString();
+            const lines = lineBuf.split('\n');
+            lineBuf = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const evt = JSON.parse(line);
+
+                // Accumulate for history
+                if (evt.type === 'assistant' && evt.message?.content) {
+                  for (const block of evt.message.content) {
+                    if (block.type === 'text') currentAssistantText += block.text;
+                    if (block.type === 'tool_use') {
+                      currentToolCalls.push({
+                        name: block.name,
+                        input: block.input,
+                        id: block.id,
+                      });
+                    }
+                  }
+                }
+                if (evt.type === 'user' && evt.message?.content) {
+                  // Tool results — attach to matching tool call
+                  for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
+                    if (r.type === 'tool_result') {
+                      const tc = currentToolCalls.find(t => t.id === r.tool_use_id);
+                      if (tc) {
+                        tc.result = typeof r.content === 'string' ? r.content :
+                          Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
+                          JSON.stringify(r.content);
+                        tc.is_error = r.is_error || false;
+                        // Truncate large results for storage
+                        if (tc.result && tc.result.length > 1000) {
+                          tc.result = tc.result.slice(0, 1000) + '...';
+                        }
+                      }
+                    }
+                  }
+                }
+                if (evt.type === 'result') {
+                  currentCost = evt.total_cost_usd || null;
+                }
+
+                // Forward to client
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify(evt));
+                }
+              } catch (_) {}
+            }
+          });
+
+          proc.stderr.on('data', (chunk) => {
+            stderrBuf += chunk.toString();
+            console.error(`[webcc/chat] stderr: ${chunk.toString().slice(0, 200)}`);
+          });
+
+          proc.on('close', (code) => {
+            if (lineBuf.trim()) {
+              try {
+                const evt = JSON.parse(lineBuf);
+                if (evt.type === 'result') currentCost = evt.total_cost_usd || null;
+                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(evt));
+              } catch (_) {}
+            }
+            lineBuf = '';
+
+            // If resume failed (non-zero exit, no assistant output), retry without resume
+            if (code !== 0 && !isRetry && !currentAssistantText && chatTurnCount > 0) {
+              console.warn(`[webcc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
+              // Reset session: new UUID, start fresh
+              chatClaudeSessionId = crypto.randomUUID();
+              chatTurnCount = 0;
+              const existing = persistedSessions.get(sessionName);
+              if (existing) existing.claudeSessionId = chatClaudeSessionId;
+              savePersistedSessions();
+
+              const fallbackArgs = [
+                '-p', '--output-format', 'stream-json', '--verbose',
+                '--include-partial-messages', '--dangerously-skip-permissions',
+                '--session-id', chatClaudeSessionId,
+                msg.text,
+              ];
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'system', subtype: 'warning', message: 'Resume failed, starting fresh session' }));
+              }
+              claudeProc = spawnChat(fallbackArgs, true);
+              return;
+            }
+
+            claudeProc = null;
+
+            // Save assistant response to history
+            if (currentAssistantText || currentToolCalls.length) {
+              appendChatMessage(sessionName, {
+                role: 'assistant', content: currentAssistantText,
+                tools: currentToolCalls.length ? currentToolCalls : undefined,
+                cost: currentCost, ts: Date.now(),
+              });
+              chatTurnCount++;
+              currentAssistantText = '';
+              currentToolCalls = [];
+            }
+
+            console.log(`[webcc/chat] claude exited with code ${code}`);
+          });
+
+          return proc;
+        };
+
+        claudeProc = spawnChat(args, false);
+      }
+    } catch (e) {
+      console.error('[webcc/chat] Bad message:', e.message);
+    }
+  });
+
+  ws.on('close', () => {
+    if (claudeProc) {
+      claudeProc.kill('SIGTERM');
+      claudeProc = null;
+    }
+  });
+}
 
 // ── WebSocket connections ──
 wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, 'http://localhost');
 
-  // Token check for WebSocket
+  // Auth check for WebSocket (cookie, token param, or localhost)
   if (ACCESS_TOKEN) {
     const ip = req.socket.remoteAddress;
-    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-    if (!isLocal && urlObj.searchParams.get('token') !== ACCESS_TOKEN) {
+    const isLocal = (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req);
+    const cookies = parseCookies(req.headers.cookie);
+    const hasCookie = cookies.webcc_auth && verifyAuthCookie(cookies.webcc_auth);
+    const hasToken = urlObj.searchParams.get('token') === ACCESS_TOKEN;
+    if (!isLocal && !hasCookie && !hasToken) {
       ws.close(4003, 'Forbidden');
       return;
     }
+  }
+
+  // Route to chat handler if path matches
+  if (urlObj.pathname === '/ws/chat') {
+    return handleChatWs(ws, req, urlObj);
   }
 
   let sessionId = urlObj.searchParams.get('id') || '';
@@ -1501,14 +2092,14 @@ wss.on('connection', (ws, req) => {
   // Tell client its session ID
   ws.send(JSON.stringify({ type: 'session_id', id: sessionId }));
 
-  // Replay buffered output to reconnecting client
-  if (session.buffer.length > 0) {
-    ws.send(JSON.stringify({ type: 'output', data: session.buffer.join('') }));
-  }
+  // Don't replay buffered output — the toggle-resize trick below forces a full TUI
+  // redraw at the client's actual dimensions, which is the only way to get correct layout.
 
   // WebSocket messages → PTY input / resize
+  // Resize ownership: only the "primary" client (most recent input sender) controls resize.
+  // This prevents multi-window resize wars (e.g. desktop + mobile).
   let inputBuf = '';
-  let firstResize = true;  // toggle-resize on first resize to trigger full TUI redraw
+  let firstResize = true;
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
@@ -1541,6 +2132,8 @@ wss.on('connection', (ws, req) => {
             inputBuf += ch;
           }
         }
+        // Mark this client as primary (it's actively typing → it controls resize)
+        session.primaryClient = ws;
         tmuxWriteInput(session.id, msg.data);
         session.lastActivity = new Date();
         // Reset push monitor on user input (Enter key)
@@ -1550,12 +2143,22 @@ wss.on('connection', (ws, req) => {
       } else if (msg.type === 'resize') {
         const cols = Math.max(1, msg.cols);
         const rows = Math.max(1, msg.rows);
-        if (firstResize) {
-          // Toggle size on first resize to force TUI redraw for reconnecting clients
-          firstResize = false;
-          tmuxResize(session.id, cols + 1, rows);
+
+        // Resize ownership: first client to resize "owns" the terminal dimensions.
+        // Other clients are ignored until the owner disconnects.
+        // This prevents two windows (e.g. desktop + mobile) from fighting over size.
+        if (!session.resizeOwner || session.resizeOwner === ws) {
+          session.resizeOwner = ws;
+
+          if (firstResize) {
+            firstResize = false;
+            if (session.clients.size <= 1) {
+              tmuxResize(session.id, cols + 1, rows);
+            }
+          }
+          tmuxResize(session.id, cols, rows);
         }
-        tmuxResize(session.id, cols, rows);
+        // else: non-owner client — silently ignore resize
       } else if (msg.type === 'upload') {
         const { tempId, name, mime, data } = msg;
         const origExt = (name && path.extname(name).replace(/^\./, '')) || '';
@@ -1574,12 +2177,16 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     session.clients.delete(ws);
+    if (session.primaryClient === ws) session.primaryClient = null;
+    if (session.resizeOwner === ws) session.resizeOwner = null;
     console.log(`[webcc] Client left session ${sessionId} (${session.clients.size} remaining)`);
   });
 
   ws.on('error', (err) => {
     console.error('[webcc] WebSocket error:', err.message);
     session.clients.delete(ws);
+    if (session.primaryClient === ws) session.primaryClient = null;
+    if (session.resizeOwner === ws) session.resizeOwner = null;
   });
 });
 
@@ -1598,18 +2205,7 @@ wss.on('close', () => clearInterval(wsPingInterval));
 recoverTmuxSessions();
 
 server.listen(PORT, () => {
-  const proto = useHttps ? 'https' : 'http';
-  console.log(`\n  WebCC is running at ${proto}://localhost:${PORT}\n`);
-  console.log(`  Sessions persist until manually closed or server restarts.\n`);
-  console.log(`  Manage sessions at ${proto}://localhost:${PORT}/manage\n`);
-  if (useHttps) {
-    const localIPs = getLocalIPs().filter(ip => ip !== '127.0.0.1');
-    if (localIPs.length) {
-      console.log(`  Other devices can access via:`);
-      localIPs.forEach(ip => console.log(`    ${proto}://${ip}:${PORT}`));
-      console.log();
-    }
-    console.log(`  Note: First visit will show a security warning (self-signed cert).`);
-    console.log(`  Click "Advanced" → "Proceed" / "Continue" to accept.\n`);
-  }
+  console.log(`\n  WebCC is running at http://localhost:${PORT}\n`);
+  console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
+  console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
 });
