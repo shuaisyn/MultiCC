@@ -397,6 +397,11 @@ function connect() {
     // Clear stale content before resize — the TUI redraw will repaint correctly
     term.clear();
     startRedrawBlank();
+    // Reset last-sent dimensions so reconnect always triggers a resize message,
+    // even if the terminal size hasn't changed since the previous connection.
+    // This is required for the server's toggle-resize trick to force a TUI redraw.
+    _lastSentCols = 0;
+    _lastSentRows = 0;
     sendResize();
     // Safety: show terminal after 8s max even if output hasn't stopped
     setTimeout(() => { if (_redrawing) endRedrawBlank(); }, 8000);
@@ -476,7 +481,14 @@ function connect() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (_sessionExited) return;
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    // Connection is alive — force a resize to trigger tmux TUI redraw so the
+    // user can see the current process state (waiting for input, completed, etc.)
+    _lastSentCols = 0;
+    _lastSentRows = 0;
+    sendResize();
+    return;
+  }
   // Page came back to foreground with a dead connection — reconnect immediately
   if (_reconnectTimer) {
     clearTimeout(_reconnectTimer);

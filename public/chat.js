@@ -1,5 +1,8 @@
 'use strict';
 
+// Disable browser scroll restoration — we always want to scroll to latest message
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
 /* ── Config ── */
 const _params = new URLSearchParams(location.search);
 const _token = _params.get('token') || '';
@@ -15,7 +18,7 @@ function withToken(url) {
 /* ── Markdown setup ── */
 marked.setOptions({
   highlight(code, lang) {
-    if (lang && hljs.getLanguage(lang)) {
+    if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
       try { return hljs.highlight(code, { language: lang }).value; } catch (_) {}
     }
     return code;
@@ -64,7 +67,7 @@ updateCwdDisplay(_cwd);
 /* ── WebSocket with auto-reconnect ── */
 let _reconnectAttempt = 0;
 let _reconnectTimer = null;
-let _historyLoaded = false;  // only replay history on first connect
+let _historyLoaded = false;  // prevent duplicate history render across reconnects
 
 function connect() {
   if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
@@ -86,6 +89,8 @@ function connect() {
     statusEl.textContent = 'Connected';
     statusEl.className = 'connected';
     _reconnectAttempt = 0;
+    // Show thinking while we wait for server's init message (which tells us real streaming state)
+    if (isStreaming) showThinking();
     updateUI();
   };
 
@@ -98,7 +103,8 @@ function connect() {
   };
 
   ws.onclose = () => {
-    isStreaming = false;
+    // Don't reset isStreaming here — server may still be running.
+    // UI stays in streaming state so user sees "reconnecting" rather than a broken state.
     updateUI();
     // Auto-reconnect with exponential backoff (1s, 2s, 4s, 8s, max 15s)
     const delay = Math.min(1000 * Math.pow(2, _reconnectAttempt), 15000);
@@ -123,6 +129,19 @@ function handleEvent(msg) {
         if (sessionId) parts.push(`Session: ${sessionId.slice(0, 8)}...`);
         if (msg.model) parts.push(msg.model);
         if (parts.length) addSystemMsg(parts.join(' | '));
+        // Sync streaming state with server on (re)connect
+        if (msg.is_streaming && !isStreaming) {
+          isStreaming = true;
+          showThinking();
+          updateUI();
+        } else if (!msg.is_streaming && isStreaming) {
+          // Task finished while we were disconnected
+          isStreaming = false;
+          hideThinking();
+          finishStreaming();
+          addSystemMsg('⚠️ Response completed while disconnected. Check history above.');
+          updateUI();
+        }
       } else if (msg.message) {
         addSystemMsg(msg.message);
       }
@@ -180,7 +199,13 @@ function handleStreamEvent(evt) {
       hideThinking();
       currentTextContent = '';
       currentToolCards = new Map();
-      currentMsgEl = createAssistantBubble();
+      if (currentMsgEl) {
+        // Reconnecting mid-stream: reset bubble so replay rebuilds it cleanly
+        const ce = currentMsgEl.querySelector('.msg-content');
+        if (ce) { ce.textContent = ''; ce.classList.add('streaming-dot'); }
+      } else {
+        currentMsgEl = createAssistantBubble();
+      }
       updateUI();
       break;
 
@@ -362,7 +387,9 @@ function addSystemMsg(text) {
 /* ── Replay saved history ── */
 function replayHistory(messages) {
   if (!messages || !messages.length) return;
-  for (const m of messages) {
+  for (let mi = 0; mi < messages.length; mi++) {
+    const m = messages[mi];
+    try {
     if (m.role === 'user') {
       addUserMsg(m.content);
     } else if (m.role === 'assistant') {
@@ -374,7 +401,11 @@ function replayHistory(messages) {
       // Render text as markdown
       if (m.content?.trim()) {
         contentEl.innerHTML = marked.parse(m.content);
-        contentEl.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+        if (typeof hljs !== 'undefined') {
+          contentEl.querySelectorAll('pre code').forEach(block => {
+            try { hljs.highlightElement(block); } catch (_) {}
+          });
+        }
       }
 
       // Render tool calls as collapsed cards
@@ -415,8 +446,12 @@ function replayHistory(messages) {
       div.appendChild(contentEl);
       messagesEl.appendChild(div);
     }
+    } catch (err) {
+      console.warn('[webcc] replayHistory: skipped message', mi, err.message);
+    }
   }
   scrollToBottom();
+  setTimeout(scrollToBottom, 300);
 }
 
 /* ── Thinking bubble ── */
@@ -581,6 +616,16 @@ sendBtn.addEventListener('touchend', (e) => { e.preventDefault(); send(); });
 // Cancel button
 cancelBtn.addEventListener('click', cancelStreaming);
 cancelBtn.addEventListener('touchend', (e) => { e.preventDefault(); cancelStreaming(); });
+
+/* ── Clear context button ── */
+document.getElementById('clear-ctx-btn').addEventListener('click', () => {
+  if (isStreaming) cancelStreaming();
+  messagesEl.innerHTML = '';
+  addSystemMsg('Chat cleared');
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'clear_history' }));
+  }
+});
 
 /* ── File Attachment ── */
 attachBtn.addEventListener('click', () => fileInput.click());
@@ -864,6 +909,18 @@ if (_isMobile && window.visualViewport) {
   window.visualViewport.addEventListener('resize', fixH);
   fixH();
 }
+
+/* ── Reconnect when tab becomes visible again ── */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+    if (dead) {
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+      _reconnectAttempt = 0;
+      connect();
+    }
+  }
+});
 
 /* ── Start ── */
 connect();

@@ -635,6 +635,13 @@ app.post('/api/sessions/:id/restart', (req, res) => {
   }
   tmuxKillSession(id);
 
+  // Clear old claudeSessionId so createSession generates a fresh one (new conversation)
+  if (persisted) {
+    delete persisted.claudeSessionId;
+    persistedSessions.set(id, persisted);
+    savePersistedSessions();
+  }
+
   // Start fresh claude in the same directory
   try {
     createSession(id, cwd);
@@ -1766,6 +1773,23 @@ function appendChatMessage(sessionName, msg) {
   saveChatHistory(sessionName);
 }
 
+// ── Chat sessions: session-level state for multi-client broadcast ──
+// Keyed by sessionName, holds { claudeProc, lineBuf, clients, chatTurnCount,
+//   chatClaudeSessionId, cwd, currentAssistantText, currentToolCalls, currentCost,
+//   streamEvents }
+const chatSessions = new Map();
+
+function chatBroadcast(sessionName, payload) {
+  const cs = chatSessions.get(sessionName);
+  if (!cs) return;
+  const json = JSON.stringify(payload);
+  for (const client of cs.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(json); } catch (_) {}
+    }
+  }
+}
+
 // ── Chat mode: stream-json WebSocket ──
 function handleChatWs(ws, req, urlObj) {
   const sessionName = urlObj.searchParams.get('session') || '_default';
@@ -1774,41 +1798,72 @@ function handleChatWs(ws, req, urlObj) {
   if (!cwd && sessionData?.cwd) cwd = sessionData.cwd;
   if (!cwd) cwd = os.homedir();
 
-  // Get or create a stable Claude session UUID for chat resume
-  let chatClaudeSessionId = sessionData?.claudeSessionId;
-  if (!chatClaudeSessionId) {
-    chatClaudeSessionId = crypto.randomUUID();
-    // Persist it so it survives server restarts
+  // Get or create session-level state
+  let cs = chatSessions.get(sessionName);
+  if (!cs) {
+    // Get or create a stable Claude session UUID for chat resume
+    // Use a SEPARATE field (chatClaudeSessionId) so terminal restarts don't nuke chat context
     const existing = persistedSessions.get(sessionName);
-    if (existing) {
-      existing.claudeSessionId = chatClaudeSessionId;
-    } else {
-      persistedSessions.set(sessionName, { id: sessionName, cwd, createdAt: new Date(), claudeSessionId: chatClaudeSessionId });
+    let chatClaudeSessionId = existing?.chatClaudeSessionId;
+    if (!chatClaudeSessionId) {
+      chatClaudeSessionId = crypto.randomUUID();
+      if (existing) {
+        existing.chatClaudeSessionId = chatClaudeSessionId;
+      } else {
+        persistedSessions.set(sessionName, { id: sessionName, cwd, createdAt: new Date(), chatClaudeSessionId });
+      }
+      savePersistedSessions();
     }
-    savePersistedSessions();
+
+    const history = loadChatHistory(sessionName);
+    cs = {
+      clients: new Set(),
+      claudeProc: null,
+      lineBuf: '',
+      chatClaudeSessionId,
+      chatTurnCount: history.filter(m => m.role === 'assistant').length,
+      cwd,
+      currentAssistantText: '',
+      currentToolCalls: [],
+      currentCost: null,
+      isStreaming: false,
+      // Replay buffer: stream events from current turn, for reconnecting clients
+      streamReplay: [],
+    };
+    chatSessions.set(sessionName, cs);
   }
 
-  // Track whether we've already started a Claude session (first turn uses --session-id, subsequent use --resume)
-  const history = loadChatHistory(sessionName);
-  let chatTurnCount = history.filter(m => m.role === 'assistant').length;
+  cs.clients.add(ws);
 
   ws.send(JSON.stringify({
     type: 'system', subtype: 'init',
-    cwd, session: sessionName, session_id: sessionName,
+    cwd: cs.cwd, session: sessionName, session_id: sessionName,
+    is_streaming: cs.isStreaming,
   }));
 
-  // Replay saved messages
-  if (history.length > 0) {
-    ws.send(JSON.stringify({ type: 'chat_history', messages: history }));
+  // Replay saved history + in-progress assistant response (if any)
+  const history = loadChatHistory(sessionName);
+  const replayMessages = [...history];
+  // Append unsaved in-progress response so reconnecting clients see current state
+  if (cs.currentAssistantText || cs.currentToolCalls.length) {
+    replayMessages.push({
+      role: 'assistant',
+      content: cs.currentAssistantText,
+      tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+      ts: Date.now(),
+      streaming: cs.isStreaming || false,
+    });
+  }
+  if (replayMessages.length > 0) {
+    ws.send(JSON.stringify({ type: 'chat_history', messages: replayMessages }));
   }
 
-  let claudeProc = null;
-  let lineBuf = '';
-
-  // Accumulate assistant response for this turn
-  let currentAssistantText = '';
-  let currentToolCalls = [];   // [{ name, input, result, is_error }]
-  let currentCost = null;
+  // If a stream is in progress, replay buffered events so reconnected client catches up
+  if (cs.isStreaming && cs.streamReplay.length > 0) {
+    for (const evt of cs.streamReplay) {
+      try { ws.send(JSON.stringify(evt)); } catch (_) {}
+    }
+  }
 
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -1817,34 +1872,36 @@ function handleChatWs(ws, req, urlObj) {
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'cancel') {
-        if (claudeProc) {
+        if (cs.claudeProc) {
           console.log('[webcc/chat] Cancel requested, killing claude process');
-          try { claudeProc.kill('SIGTERM'); } catch (_) {}
-          claudeProc = null;
-          lineBuf = '';
+          try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
+          cs.claudeProc = null;
+          cs.lineBuf = '';
+          cs.isStreaming = false;
+          cs.streamReplay = [];
         }
         // Save partial response if any
-        if (currentAssistantText || currentToolCalls.length) {
+        if (cs.currentAssistantText || cs.currentToolCalls.length) {
           appendChatMessage(sessionName, {
-            role: 'assistant', content: currentAssistantText,
-            tools: currentToolCalls.length ? currentToolCalls : undefined,
+            role: 'assistant', content: cs.currentAssistantText,
+            tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
             ts: Date.now(), cancelled: true,
           });
-          currentAssistantText = '';
-          currentToolCalls = [];
+          cs.currentAssistantText = '';
+          cs.currentToolCalls = [];
         }
         return;
       }
 
       if (msg.type === 'clear_history') {
-        const history = chatHistories.get(sessionName);
-        if (history) history.length = 0;
+        const h = chatHistories.get(sessionName);
+        if (h) h.length = 0;
         saveChatHistory(sessionName);
         // Reset Claude session so next turn starts fresh
-        chatClaudeSessionId = crypto.randomUUID();
-        chatTurnCount = 0;
+        cs.chatClaudeSessionId = crypto.randomUUID();
+        cs.chatTurnCount = 0;
         const existing = persistedSessions.get(sessionName);
-        if (existing) existing.claudeSessionId = chatClaudeSessionId;
+        if (existing) existing.chatClaudeSessionId = cs.chatClaudeSessionId;
         savePersistedSessions();
         console.log(`[webcc/chat] Cleared history and reset Claude session for ${sessionName}`);
         return;
@@ -1852,18 +1909,20 @@ function handleChatWs(ws, req, urlObj) {
 
       if (msg.type === 'user_message' && msg.text) {
         // Kill previous process if still running
-        if (claudeProc) {
-          try { claudeProc.kill('SIGTERM'); } catch (_) {}
-          claudeProc = null;
-          lineBuf = '';
+        if (cs.claudeProc) {
+          try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
+          cs.claudeProc = null;
+          cs.lineBuf = '';
+          cs.isStreaming = false;
+          cs.streamReplay = [];
           // Save partial assistant response before starting new turn
-          if (currentAssistantText || currentToolCalls.length) {
+          if (cs.currentAssistantText || cs.currentToolCalls.length) {
             appendChatMessage(sessionName, {
-              role: 'assistant', content: currentAssistantText,
-              tools: currentToolCalls.length ? currentToolCalls : undefined,
+              role: 'assistant', content: cs.currentAssistantText,
+              tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
               ts: Date.now(), cancelled: true,
             });
-            chatTurnCount++;
+            cs.chatTurnCount++;
           }
         }
 
@@ -1873,9 +1932,12 @@ function handleChatWs(ws, req, urlObj) {
         });
 
         // Reset accumulators
-        currentAssistantText = '';
-        currentToolCalls = [];
-        currentCost = null;
+        cs.currentAssistantText = '';
+        cs.currentToolCalls = [];
+        cs.currentCost = null;
+        cs.isStreaming = true;
+        cs.streamReplay = [];
+        cs._resultSaved = false;
 
         const args = [
           '-p',
@@ -1886,19 +1948,19 @@ function handleChatWs(ws, req, urlObj) {
         ];
 
         // Resume strategy: first turn starts a named session, subsequent turns resume it
-        if (chatTurnCount > 0) {
-          args.push('--resume', chatClaudeSessionId);
+        if (cs.chatTurnCount > 0) {
+          args.push('--resume', cs.chatClaudeSessionId);
         } else {
-          args.push('--session-id', chatClaudeSessionId);
+          args.push('--session-id', cs.chatClaudeSessionId);
         }
 
         args.push(msg.text);
 
-        console.log(`[webcc/chat] Spawning (turn ${chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
+        console.log(`[webcc/chat] Spawning (turn ${cs.chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
 
         const spawnChat = (spawnArgs, isRetry) => {
           const proc = spawn(CLAUDE_CMD, spawnArgs, {
-            cwd,
+            cwd: cs.cwd,
             env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
             stdio: ['ignore', 'pipe', 'pipe'],
           });
@@ -1906,9 +1968,9 @@ function handleChatWs(ws, req, urlObj) {
           let stderrBuf = '';
 
           proc.stdout.on('data', (chunk) => {
-            lineBuf += chunk.toString();
-            const lines = lineBuf.split('\n');
-            lineBuf = lines.pop();
+            cs.lineBuf += chunk.toString();
+            const lines = cs.lineBuf.split('\n');
+            cs.lineBuf = lines.pop();
             for (const line of lines) {
               if (!line.trim()) continue;
               try {
@@ -1917,9 +1979,9 @@ function handleChatWs(ws, req, urlObj) {
                 // Accumulate for history
                 if (evt.type === 'assistant' && evt.message?.content) {
                   for (const block of evt.message.content) {
-                    if (block.type === 'text') currentAssistantText += block.text;
+                    if (block.type === 'text') cs.currentAssistantText += block.text;
                     if (block.type === 'tool_use') {
-                      currentToolCalls.push({
+                      cs.currentToolCalls.push({
                         name: block.name,
                         input: block.input,
                         id: block.id,
@@ -1928,16 +1990,14 @@ function handleChatWs(ws, req, urlObj) {
                   }
                 }
                 if (evt.type === 'user' && evt.message?.content) {
-                  // Tool results — attach to matching tool call
                   for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
                     if (r.type === 'tool_result') {
-                      const tc = currentToolCalls.find(t => t.id === r.tool_use_id);
+                      const tc = cs.currentToolCalls.find(t => t.id === r.tool_use_id);
                       if (tc) {
                         tc.result = typeof r.content === 'string' ? r.content :
                           Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
                           JSON.stringify(r.content);
                         tc.is_error = r.is_error || false;
-                        // Truncate large results for storage
                         if (tc.result && tc.result.length > 1000) {
                           tc.result = tc.result.slice(0, 1000) + '...';
                         }
@@ -1946,13 +2006,25 @@ function handleChatWs(ws, req, urlObj) {
                   }
                 }
                 if (evt.type === 'result') {
-                  currentCost = evt.total_cost_usd || null;
+                  cs.currentCost = evt.total_cost_usd || null;
+                  // Save assistant response immediately on result (don't wait for proc close)
+                  if (cs.currentAssistantText || cs.currentToolCalls.length) {
+                    appendChatMessage(sessionName, {
+                      role: 'assistant', content: cs.currentAssistantText,
+                      tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+                      cost: cs.currentCost, ts: Date.now(),
+                    });
+                    cs.chatTurnCount++;
+                    cs._resultSaved = true;  // flag so proc.close doesn't double-save
+                  }
                 }
 
-                // Forward to client
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify(evt));
-                }
+                // Buffer for reconnect replay (keep last 500 events to avoid unbounded growth)
+                cs.streamReplay.push(evt);
+                if (cs.streamReplay.length > 500) cs.streamReplay.shift();
+
+                // Broadcast to all connected clients
+                chatBroadcast(sessionName, evt);
               } catch (_) {}
             }
           });
@@ -1963,51 +2035,54 @@ function handleChatWs(ws, req, urlObj) {
           });
 
           proc.on('close', (code) => {
-            if (lineBuf.trim()) {
+            if (cs.lineBuf.trim()) {
               try {
-                const evt = JSON.parse(lineBuf);
-                if (evt.type === 'result') currentCost = evt.total_cost_usd || null;
-                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(evt));
+                const evt = JSON.parse(cs.lineBuf);
+                if (evt.type === 'result') cs.currentCost = evt.total_cost_usd || null;
+                cs.streamReplay.push(evt);
+                chatBroadcast(sessionName, evt);
               } catch (_) {}
             }
-            lineBuf = '';
+            cs.lineBuf = '';
+            cs.isStreaming = false;
+            cs.streamReplay = [];
 
             // If resume failed (non-zero exit, no assistant output), retry without resume
-            if (code !== 0 && !isRetry && !currentAssistantText && chatTurnCount > 0) {
+            if (code !== 0 && !isRetry && !cs.currentAssistantText && cs.chatTurnCount > 0) {
               console.warn(`[webcc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
-              // Reset session: new UUID, start fresh
-              chatClaudeSessionId = crypto.randomUUID();
-              chatTurnCount = 0;
+              cs.chatClaudeSessionId = crypto.randomUUID();
+              cs.chatTurnCount = 0;
+              cs.isStreaming = true;
+              cs.streamReplay = [];
               const existing = persistedSessions.get(sessionName);
-              if (existing) existing.claudeSessionId = chatClaudeSessionId;
+              if (existing) existing.chatClaudeSessionId = cs.chatClaudeSessionId;
               savePersistedSessions();
 
               const fallbackArgs = [
                 '-p', '--output-format', 'stream-json', '--verbose',
                 '--include-partial-messages', '--dangerously-skip-permissions',
-                '--session-id', chatClaudeSessionId,
+                '--session-id', cs.chatClaudeSessionId,
                 msg.text,
               ];
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'system', subtype: 'warning', message: 'Resume failed, starting fresh session' }));
-              }
-              claudeProc = spawnChat(fallbackArgs, true);
+              chatBroadcast(sessionName, { type: 'system', subtype: 'warning', message: 'Resume failed, starting fresh session' });
+              cs.claudeProc = spawnChat(fallbackArgs, true);
               return;
             }
 
-            claudeProc = null;
+            cs.claudeProc = null;
 
-            // Save assistant response to history
-            if (currentAssistantText || currentToolCalls.length) {
+            // Save assistant response to history (skip if already saved on 'result' event)
+            if (!cs._resultSaved && (cs.currentAssistantText || cs.currentToolCalls.length)) {
               appendChatMessage(sessionName, {
-                role: 'assistant', content: currentAssistantText,
-                tools: currentToolCalls.length ? currentToolCalls : undefined,
-                cost: currentCost, ts: Date.now(),
+                role: 'assistant', content: cs.currentAssistantText,
+                tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+                cost: cs.currentCost, ts: Date.now(),
               });
-              chatTurnCount++;
-              currentAssistantText = '';
-              currentToolCalls = [];
+              cs.chatTurnCount++;
             }
+            cs.currentAssistantText = '';
+            cs.currentToolCalls = [];
+            cs._resultSaved = false;
 
             console.log(`[webcc/chat] claude exited with code ${code}`);
           });
@@ -2015,7 +2090,7 @@ function handleChatWs(ws, req, urlObj) {
           return proc;
         };
 
-        claudeProc = spawnChat(args, false);
+        cs.claudeProc = spawnChat(args, false);
       }
     } catch (e) {
       console.error('[webcc/chat] Bad message:', e.message);
@@ -2023,10 +2098,10 @@ function handleChatWs(ws, req, urlObj) {
   });
 
   ws.on('close', () => {
-    if (claudeProc) {
-      claudeProc.kill('SIGTERM');
-      claudeProc = null;
-    }
+    cs.clients.delete(ws);
+    // Do NOT kill claudeProc on disconnect — it may still be streaming to other clients
+    // or the user may reconnect (lock screen, tab switch, etc.)
+    // Process is only killed on explicit cancel or new user_message
   });
 }
 
