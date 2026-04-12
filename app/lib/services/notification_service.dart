@@ -21,9 +21,9 @@ class NotificationService {
     int id = 0,
   }) async {
     const android = AndroidNotificationDetails(
-      'webcc_tasks',
+      'multicc_tasks',
       'Task Notifications',
-      channelDescription: 'WebCC task completion and status notifications',
+      channelDescription: 'MultiCC task completion and status notifications',
       importance: Importance.high,
       priority: Priority.high,
       playSound: true,

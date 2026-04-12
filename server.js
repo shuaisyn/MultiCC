@@ -69,7 +69,7 @@ function isAuthenticated(req) {
   if ((ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req)) return true;
   // Cookie auth (HMAC-signed, survives server restart)
   const cookies = parseCookies(req.headers.cookie);
-  if (cookies.webcc_auth && verifyAuthCookie(cookies.webcc_auth)) return true;
+  if (cookies.multicc_auth && verifyAuthCookie(cookies.multicc_auth)) return true;
   // Query param / header (backwards compat for API / WebSocket)
   const token = req.query.token || req.headers['x-access-token'];
   if (token === ACCESS_TOKEN) return true;
@@ -84,7 +84,7 @@ if (ACCESS_TOKEN) {
     res.type('html').send(`<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WebCC — Login</title>
+<title>MultiCC — Login</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;
@@ -117,7 +117,7 @@ if (ACCESS_TOKEN) {
     if (req.body.password === ACCESS_TOKEN) {
       const authCookie = generateAuthCookie();
       res.setHeader('Set-Cookie',
-        `webcc_auth=${authCookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}`);
+        `multicc_auth=${authCookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 86400}`);
       res.redirect(redirect);
     } else {
       res.redirect(`/login?error=1&redirect=${encodeURIComponent(redirect)}`);
@@ -125,7 +125,7 @@ if (ACCESS_TOKEN) {
   });
 
   app.get('/logout', (req, res) => {
-    res.setHeader('Set-Cookie', 'webcc_auth=; Path=/; HttpOnly; Max-Age=0');
+    res.setHeader('Set-Cookie', 'multicc_auth=; Path=/; HttpOnly; Max-Age=0');
     res.redirect('/login');
   });
 
@@ -153,7 +153,7 @@ const isWindows = process.platform === 'win32';
 // Resolve the full path of the claude executable at startup
 function resolveClaude() {
   if (process.env.CLAUDE_CMD) {
-    console.log(`[webcc] CLAUDE_CMD override: ${process.env.CLAUDE_CMD}`);
+    console.log(`[multicc] CLAUDE_CMD override: ${process.env.CLAUDE_CMD}`);
     return process.env.CLAUDE_CMD;
   }
 
@@ -182,7 +182,7 @@ function resolveClaude() {
         });
         const found = result.trim().split(/\r?\n/)[0].trim();
         if (found && fs.existsSync(found)) {
-          console.log(`[webcc] Found claude via ${sh}: ${found}`);
+          console.log(`[multicc] Found claude via ${sh}: ${found}`);
           return found;
         }
       } catch (_) {}
@@ -200,7 +200,7 @@ function resolveClaude() {
     const exe = isWindows ? lines.find(l => l.endsWith('.exe')) || lines[0] : lines[0];
     const found = exe.trim();
     if (found) {
-      console.log(`[webcc] Found claude via which: ${found}`);
+      console.log(`[multicc] Found claude via which: ${found}`);
       return found;
     }
   } catch (_) {}
@@ -209,22 +209,22 @@ function resolveClaude() {
   for (const dir of extraPaths) {
     const candidate = path.join(dir, isWindows ? 'claude.exe' : 'claude');
     if (fs.existsSync(candidate)) {
-      console.log(`[webcc] Found claude via direct check: ${candidate}`);
+      console.log(`[multicc] Found claude via direct check: ${candidate}`);
       return candidate;
     }
   }
 
-  console.warn('[webcc] WARNING: Could not locate claude binary, falling back to "claude"');
+  console.warn('[multicc] WARNING: Could not locate claude binary, falling back to "claude"');
   return isWindows ? 'claude.exe' : 'claude';
 }
 
 const CLAUDE_CMD = resolveClaude();
 const CLAUDE_ARGS = process.env.CLAUDE_ARGS ? process.env.CLAUDE_ARGS.split(' ') : [];
-console.log(`[webcc] Using claude: ${CLAUDE_CMD}`);
+console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
 // ── tmux helpers ──
-const TMUX_PREFIX = 'webcc-';
-const TMUX_FIFO_DIR = path.join(os.tmpdir(), 'webcc-fifos');
+const TMUX_PREFIX = 'multicc-';
+const TMUX_FIFO_DIR = path.join(os.tmpdir(), 'multicc-fifos');
 try { fs.mkdirSync(TMUX_FIFO_DIR, { recursive: true }); } catch (_) {}
 
 function tmuxSessionName(id) { return `${TMUX_PREFIX}${id}`; }
@@ -279,7 +279,7 @@ function tmuxWriteInput(id, data) {
   try {
     execFileSync('tmux', ['send-keys', '-t', tmuxSessionName(id), '-l', '--', data]);
   } catch (e) {
-    console.error('[webcc] tmuxWriteInput error:', e.message);
+    console.error('[multicc] tmuxWriteInput error:', e.message);
   }
 }
 
@@ -327,11 +327,11 @@ function recoverTmuxSessions() {
       const id = name.slice(TMUX_PREFIX.length);
       if (sessions.has(id)) continue;
       const cwd = tmuxPaneCwd(id);
-      console.log(`[webcc] Recovering tmux session: ${id} (${cwd})`);
+      console.log(`[multicc] Recovering tmux session: ${id} (${cwd})`);
       try {
         createSession(id, cwd);
       } catch (err) {
-        console.error(`[webcc] Failed to recover session ${id}:`, err.message);
+        console.error(`[multicc] Failed to recover session ${id}:`, err.message);
       }
     }
   } catch (_) {
@@ -348,11 +348,11 @@ function loadPersistedSessions() {
       const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
       const map = new Map();
       for (const s of data) map.set(s.id, s);
-      console.log(`[webcc] Loaded ${map.size} persisted session(s)`);
+      console.log(`[multicc] Loaded ${map.size} persisted session(s)`);
       return map;
     }
   } catch (e) {
-    console.error('[webcc] Failed to load sessions.json:', e.message);
+    console.error('[multicc] Failed to load sessions.json:', e.message);
   }
   return new Map();
 }
@@ -362,7 +362,7 @@ function savePersistedSessions() {
   try {
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
-    console.error('[webcc] Failed to save sessions.json:', e.message);
+    console.error('[multicc] Failed to save sessions.json:', e.message);
   }
 }
 
@@ -387,21 +387,21 @@ function resolveCwd(current, arg) {
 function createSession(id, cwd) {
   // Fall back to homedir if the persisted cwd no longer exists
   if (!cwd || !fs.existsSync(cwd)) {
-    if (cwd) console.warn(`[webcc] cwd "${cwd}" not found, falling back to home dir`);
+    if (cwd) console.warn(`[multicc] cwd "${cwd}" not found, falling back to home dir`);
     cwd = os.homedir();
   }
 
-  // Get or create a stable Claude session UUID for this webcc session
+  // Get or create a stable Claude session UUID for this multicc session
   const persisted = persistedSessions.get(id);
   const claudeSessionId = persisted?.claudeSessionId || crypto.randomUUID();
 
   // Create tmux session if it doesn't already exist (it may survive server restarts)
   let isRecovery = false;
   if (!tmuxHasSession(id)) {
-    console.log(`[webcc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd} (claude session: ${claudeSessionId})`);
+    console.log(`[multicc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd} (claude session: ${claudeSessionId})`);
     tmuxCreateSession(id, cwd, 80, 24, claudeSessionId);
   } else {
-    console.log(`[webcc] Attaching to existing tmux session: ${tmuxSessionName(id)}`);
+    console.log(`[multicc] Attaching to existing tmux session: ${tmuxSessionName(id)}`);
     isRecovery = true;
   }
 
@@ -464,7 +464,7 @@ function createSession(id, cwd) {
     setTimeout(() => {
       if (sessions.get(id) !== session) return;
       if (!tmuxHasSession(id)) {
-        console.log(`[webcc] Session ${id} exited (tmux session gone)`);
+        console.log(`[multicc] Session ${id} exited (tmux session gone)`);
         cleanupPushMonitor(id);
         const exitMsg = `\r\n\x1b[33m[Claude Code process exited]\x1b[0m\r\n`;
         for (const client of session.clients) {
@@ -476,7 +476,7 @@ function createSession(id, cwd) {
         sessions.delete(id);
       } else {
         // Tmux session still alive but stream died — restart output capture
-        console.log(`[webcc] Stream died for ${id}, restarting output capture...`);
+        console.log(`[multicc] Stream died for ${id}, restarting output capture...`);
         stopOutputCapture(session);
         try {
           const { stream: newStream, fifoPath: newFifo } = startOutputCapture(id);
@@ -500,7 +500,7 @@ function createSession(id, cwd) {
           newStream.on('end', onStreamEnd);
           newStream.on('error', onStreamEnd);
         } catch (e) {
-          console.error(`[webcc] Failed to restart output capture for ${id}:`, e.message);
+          console.error(`[multicc] Failed to restart output capture for ${id}:`, e.message);
         }
       }
     }, 500);
@@ -605,10 +605,10 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
   // Start fresh claude in the new directory
   try {
     createSession(id, resolvedCwd);
-    console.log(`[webcc] Session ${id} relocated → ${resolvedCwd}`);
+    console.log(`[multicc] Session ${id} relocated → ${resolvedCwd}`);
     res.json({ ok: true, cwd: resolvedCwd });
   } catch (err) {
-    console.error('[webcc] Relocate failed:', err);
+    console.error('[multicc] Relocate failed:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -645,7 +645,7 @@ app.post('/api/sessions/:id/restart', (req, res) => {
   // Start fresh claude in the same directory
   try {
     createSession(id, cwd);
-    console.log(`[webcc] Session ${id} restarted in ${cwd}`);
+    console.log(`[multicc] Session ${id} restarted in ${cwd}`);
 
     // NOW notify old clients to reconnect (new session is ready)
     for (const client of oldClients) {
@@ -656,7 +656,7 @@ app.post('/api/sessions/:id/restart', (req, res) => {
 
     res.json({ ok: true, cwd });
   } catch (err) {
-    console.error('[webcc] Restart failed:', err);
+    console.error('[multicc] Restart failed:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -748,7 +748,7 @@ function appendVoiceExample(entry) {
   try {
     fs.writeFileSync(VOICE_EXAMPLES_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
-    console.error('[webcc] Failed to write voice_examples.json:', e.message);
+    console.error('[multicc] Failed to write voice_examples.json:', e.message);
   }
 }
 
@@ -767,7 +767,7 @@ function saveWhisperVocab(vocab) {
   try {
     fs.writeFileSync(WHISPER_VOCAB_FILE, JSON.stringify(vocab, null, 2));
   } catch (e) {
-    console.error('[webcc] Failed to write whisper_vocab.json:', e.message);
+    console.error('[multicc] Failed to write whisper_vocab.json:', e.message);
   }
 }
 
@@ -820,7 +820,7 @@ function mergeWhisperVocab(newTerms) {
   // Sort by count desc, keep top 100
   const sorted = [...termMap.values()].sort((a, b) => b.count - a.count).slice(0, 100);
   saveWhisperVocab(sorted);
-  console.log(`[webcc/stt] Whisper vocab updated: ${sorted.length} terms, added: ${newTerms.join(', ')}`);
+  console.log(`[multicc/stt] Whisper vocab updated: ${sorted.length} terms, added: ${newTerms.join(', ')}`);
 }
 
 // ── Backfill: seed whisper_vocab.json from existing voice_examples on first run ──
@@ -837,10 +837,10 @@ function mergeWhisperVocab(newTerms) {
     }
     if (allTerms.length > 0) {
       mergeWhisperVocab(allTerms);
-      console.log(`[webcc/stt] Backfilled whisper_vocab.json from ${examples.length} voice examples`);
+      console.log(`[multicc/stt] Backfilled whisper_vocab.json from ${examples.length} voice examples`);
     }
   } catch (e) {
-    console.error('[webcc/stt] Backfill error:', e.message);
+    console.error('[multicc/stt] Backfill error:', e.message);
   }
 })();
 
@@ -904,7 +904,7 @@ async function callVoiceAPI(prompt, { reqId, onStart, onFirstToken, onChunk, onD
 
   try {
     const apiStart = Date.now();
-    console.log(`[webcc/voice][${reqId}] Sending request to OpenRouter (model: ${OPENROUTER_MODEL})`);
+    console.log(`[multicc/voice][${reqId}] Sending request to OpenRouter (model: ${OPENROUTER_MODEL})`);
     const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -974,26 +974,26 @@ async function callVoiceAPI(prompt, { reqId, onStart, onFirstToken, onChunk, onD
   }
 }
 
-console.log(`[webcc/voice] Voice API initialized (OpenRouter, model: ${OPENROUTER_MODEL})`);
+console.log(`[multicc/voice] Voice API initialized (OpenRouter, model: ${OPENROUTER_MODEL})`);
 
 // ── File upload for chat mode ──
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   const ext = path.extname(req.file.originalname).replace(/[^a-z0-9.]/gi, '').slice(0, 12) || 'bin';
-  const safeName = `webcc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}${ext.startsWith('.') ? ext : '.' + ext}`;
+  const safeName = `multicc_${Date.now()}_${Math.random().toString(36).slice(2, 6)}${ext.startsWith('.') ? ext : '.' + ext}`;
   const tmpPath = path.join(os.tmpdir(), safeName);
   fs.writeFileSync(tmpPath, req.file.buffer);
-  console.log(`[webcc] Uploaded: ${tmpPath} (${req.file.originalname})`);
+  console.log(`[multicc] Uploaded: ${tmpPath} (${req.file.originalname})`);
   res.json({ path: tmpPath, name: req.file.originalname });
 });
 
 app.post('/api/voice/refine', (req, res) => {
   const reqId = `vr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const raw = (req.body.raw || '').trim();
-  console.log(`[webcc/voice][${reqId}] POST /api/voice/refine received, raw length: ${raw.length}, raw: ${JSON.stringify(raw.slice(0, 100))}`);
+  console.log(`[multicc/voice][${reqId}] POST /api/voice/refine received, raw length: ${raw.length}, raw: ${JSON.stringify(raw.slice(0, 100))}`);
 
   if (!raw) {
-    console.log(`[webcc/voice][${reqId}] Empty raw, sending immediate [DONE]`);
+    console.log(`[multicc/voice][${reqId}] Empty raw, sending immediate [DONE]`);
     res.setHeader('Content-Type', 'text/event-stream');
     res.write('data: [DONE]\n\n');
     return res.end();
@@ -1017,19 +1017,19 @@ app.post('/api/voice/refine', (req, res) => {
 原始语音：${raw}
 直接输出优化后的文本，不要任何解释或前缀。`;
 
-  console.log(`[webcc/voice][${reqId}] Prompt length: ${prompt.length} chars`);
-  console.log(`[webcc/voice][${reqId}] Setting SSE response headers...`);
+  console.log(`[multicc/voice][${reqId}] Prompt length: ${prompt.length} chars`);
+  console.log(`[multicc/voice][${reqId}] Setting SSE response headers...`);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');  // disable proxy buffering
   res.flushHeaders();
-  console.log(`[webcc/voice][${reqId}] SSE headers flushed`);
+  console.log(`[multicc/voice][${reqId}] SSE headers flushed`);
   // Disable Nagle's algorithm so small SSE chunks are sent immediately (important for TLS/HTTPS)
   if (res.socket) {
     res.socket.setNoDelay(true);
-    console.log(`[webcc/voice][${reqId}] Socket NoDelay set`);
+    console.log(`[multicc/voice][${reqId}] Socket NoDelay set`);
   }
 
   // Send SSE comment heartbeats every 5s to prevent browser/proxy idle disconnects
@@ -1043,39 +1043,39 @@ app.post('/api/voice/refine', (req, res) => {
   res.on('close', () => {
     clientDisconnected = true;
     clearInterval(heartbeat);
-    console.log(`[webcc/voice][${reqId}] Client disconnected (res close event)`);
+    console.log(`[multicc/voice][${reqId}] Client disconnected (res close event)`);
   });
 
   // Helper: write SSE event and force flush (important for TLS/HTTPS)
   function sseWrite(chunk) {
     if (clientDisconnected) {
-      console.warn(`[webcc/voice][${reqId}] sseWrite skipped (client disconnected), chunk: ${JSON.stringify(chunk.slice(0, 100))}`);
+      console.warn(`[multicc/voice][${reqId}] sseWrite skipped (client disconnected), chunk: ${JSON.stringify(chunk.slice(0, 100))}`);
       return;
     }
     try {
       const writeResult = res.write(chunk);
-      console.log(`[webcc/voice][${reqId}] res.write returned: ${writeResult}, chunk: ${JSON.stringify(chunk.slice(0, 120))}`);
+      console.log(`[multicc/voice][${reqId}] res.write returned: ${writeResult}, chunk: ${JSON.stringify(chunk.slice(0, 120))}`);
       // Force flush the underlying socket for TLS connections
       if (res.socket && typeof res.socket.uncork === 'function') {
         res.socket.cork();
         res.socket.uncork();
       }
     } catch (writeErr) {
-      console.error(`[webcc/voice][${reqId}] sseWrite error:`, writeErr.message);
+      console.error(`[multicc/voice][${reqId}] sseWrite error:`, writeErr.message);
     }
   }
 
   const t0 = Date.now();
-  console.log(`[webcc/voice][${reqId}] Calling OpenRouter API (model: ${OPENROUTER_MODEL})`);
+  console.log(`[multicc/voice][${reqId}] Calling OpenRouter API (model: ${OPENROUTER_MODEL})`);
 
   callVoiceAPI(prompt, {
     reqId,
     onStart() {
-      console.log(`[webcc/voice][${reqId}] API request started`);
+      console.log(`[multicc/voice][${reqId}] API request started`);
       sseWrite(`data: ${JSON.stringify({ timing: 'queue', ms: 0 })}\n\n`);
     },
     onFirstToken(ms) {
-      console.log(`[webcc/voice][${reqId}] First token: ${ms}ms`);
+      console.log(`[multicc/voice][${reqId}] First token: ${ms}ms`);
       sseWrite(`data: ${JSON.stringify({ timing: 'first_token', ms })}\n\n`);
     },
     onChunk(text) {
@@ -1084,7 +1084,7 @@ app.post('/api/voice/refine', (req, res) => {
     onDone() {
       clearInterval(heartbeat);
       const totalMs = Date.now() - t0;
-      console.log(`[webcc/voice][${reqId}] Done, total: ${totalMs}ms, clientDisconnected=${clientDisconnected}`);
+      console.log(`[multicc/voice][${reqId}] Done, total: ${totalMs}ms, clientDisconnected=${clientDisconnected}`);
       if (!clientDisconnected) {
         try {
           sseWrite(`data: ${JSON.stringify({ timing: 'ai_process', ms: totalMs })}\n\n`);
@@ -1092,13 +1092,13 @@ app.post('/api/voice/refine', (req, res) => {
           res.write('data: [DONE]\n\n');
           res.end();
         } catch (endErr) {
-          console.error(`[webcc/voice][${reqId}] Error ending response:`, endErr.message);
+          console.error(`[multicc/voice][${reqId}] Error ending response:`, endErr.message);
         }
       }
     },
     onError(msg) {
       clearInterval(heartbeat);
-      console.error(`[webcc/voice][${reqId}] Error: ${msg}`);
+      console.error(`[multicc/voice][${reqId}] Error: ${msg}`);
       if (!clientDisconnected) {
         try {
           res.write(`data: ${JSON.stringify({ text: `[错误: ${msg}]` })}\n\n`);
@@ -1140,7 +1140,7 @@ app.delete('/api/voice/vocab/:term', (req, res) => {
 // ── Whisper STT endpoint ──
 app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
   const reqId = `stt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  console.log(`[webcc/stt][${reqId}] POST /api/voice/stt received`);
+  console.log(`[multicc/stt][${reqId}] POST /api/voice/stt received`);
 
   if (!req.file) {
     return res.status(400).json({ error: '未收到音频文件' });
@@ -1151,8 +1151,8 @@ app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
     return res.status(500).json({ error: 'WHISPER_API_KEY 或 OPENROUTER_API_KEY 未设置' });
   }
 
-  console.log(`[webcc/stt][${reqId}] File: ${req.file.originalname}, size: ${req.file.size}, mime: ${req.file.mimetype}`);
-  console.log(`[webcc/stt][${reqId}] Forwarding to ${WHISPER_BASE_URL}/audio/transcriptions (model: ${WHISPER_MODEL})`);
+  console.log(`[multicc/stt][${reqId}] File: ${req.file.originalname}, size: ${req.file.size}, mime: ${req.file.mimetype}`);
+  console.log(`[multicc/stt][${reqId}] Forwarding to ${WHISPER_BASE_URL}/audio/transcriptions (model: ${WHISPER_MODEL})`);
 
   const t0 = Date.now();
   try {
@@ -1170,7 +1170,7 @@ app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
     const whisperPrompt = buildWhisperPrompt();
     if (whisperPrompt) {
       formData.append('prompt', whisperPrompt);
-      console.log(`[webcc/stt][${reqId}] Whisper prompt (${whisperPrompt.length} chars): ${whisperPrompt.slice(0, 120)}...`);
+      console.log(`[multicc/stt][${reqId}] Whisper prompt (${whisperPrompt.length} chars): ${whisperPrompt.slice(0, 120)}...`);
     }
 
     const response = await fetch(`${WHISPER_BASE_URL}/audio/transcriptions`, {
@@ -1183,17 +1183,17 @@ app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`[webcc/stt][${reqId}] Whisper API error ${response.status}: ${errText.slice(0, 300)}`);
+      console.error(`[multicc/stt][${reqId}] Whisper API error ${response.status}: ${errText.slice(0, 300)}`);
       return res.status(502).json({ error: `Whisper API ${response.status}: ${errText.slice(0, 200)}` });
     }
 
     const result = await response.json();
     const durationMs = Date.now() - t0;
-    console.log(`[webcc/stt][${reqId}] Success in ${durationMs}ms, text length: ${(result.text || '').length}`);
+    console.log(`[multicc/stt][${reqId}] Success in ${durationMs}ms, text length: ${(result.text || '').length}`);
     res.json({ text: result.text || '', duration_ms: durationMs });
   } catch (err) {
     const durationMs = Date.now() - t0;
-    console.error(`[webcc/stt][${reqId}] Error after ${durationMs}ms:`, err.message);
+    console.error(`[multicc/stt][${reqId}] Error after ${durationMs}ms:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1270,8 +1270,8 @@ app.post('/api/settings/voice', (req, res) => {
   if (updates.WHISPER_BASE_URL) WHISPER_BASE_URL = updates.WHISPER_BASE_URL;
   if (updates.WHISPER_LANGUAGE) WHISPER_LANGUAGE = updates.WHISPER_LANGUAGE;
   if (updates.WHISPER_PROMPT !== undefined) WHISPER_PROMPT = updates.WHISPER_PROMPT;
-  console.log(`[webcc/voice] Settings updated: model=${OPENROUTER_MODEL}, baseUrl=${OPENROUTER_BASE_URL}, key=${OPENROUTER_API_KEY ? 'set' : 'empty'}`);
-  console.log(`[webcc/stt] Settings updated: model=${WHISPER_MODEL}, baseUrl=${WHISPER_BASE_URL}, key=${WHISPER_API_KEY ? 'set' : 'empty'}`);
+  console.log(`[multicc/voice] Settings updated: model=${OPENROUTER_MODEL}, baseUrl=${OPENROUTER_BASE_URL}, key=${OPENROUTER_API_KEY ? 'set' : 'empty'}`);
+  console.log(`[multicc/stt] Settings updated: model=${WHISPER_MODEL}, baseUrl=${WHISPER_BASE_URL}, key=${WHISPER_API_KEY ? 'set' : 'empty'}`);
   res.json({ ok: true });
 });
 
@@ -1305,7 +1305,7 @@ function ensureVapidKeys() {
   let privKey = process.env.VAPID_PRIVATE_KEY;
   if (pubKey && privKey) return { pubKey, privKey };
 
-  console.log('[webcc/push] Generating VAPID keys...');
+  console.log('[multicc/push] Generating VAPID keys...');
   const keys = webpush.generateVAPIDKeys();
   pubKey = keys.publicKey;
   privKey = keys.privateKey;
@@ -1315,12 +1315,12 @@ function ensureVapidKeys() {
   writeEnvFile(updates);
   process.env.VAPID_PUBLIC_KEY = pubKey;
   process.env.VAPID_PRIVATE_KEY = privKey;
-  console.log('[webcc/push] VAPID keys generated and saved to .env');
+  console.log('[multicc/push] VAPID keys generated and saved to .env');
   return { pubKey, privKey };
 }
 
 const vapidKeys = ensureVapidKeys();
-webpush.setVapidDetails('mailto:webcc@localhost', vapidKeys.pubKey, vapidKeys.privKey);
+webpush.setVapidDetails('mailto:multicc@localhost', vapidKeys.pubKey, vapidKeys.privKey);
 
 // Push subscription store
 let pushSubscriptions = new Map(); // endpoint -> PushSubscription JSON
@@ -1347,7 +1347,7 @@ function loadPushSubscriptions() {
     if (fs.existsSync(PUSH_SUBS_FILE)) {
       const data = JSON.parse(fs.readFileSync(PUSH_SUBS_FILE, 'utf8'));
       pushSubscriptions = new Map(data.map(s => [s.endpoint, s]));
-      console.log(`[webcc/push] Loaded ${pushSubscriptions.size} push subscription(s)`);
+      console.log(`[multicc/push] Loaded ${pushSubscriptions.size} push subscription(s)`);
     }
   } catch (_) {}
 }
@@ -1356,7 +1356,7 @@ function savePushSubscriptions() {
   try {
     fs.writeFileSync(PUSH_SUBS_FILE, JSON.stringify([...pushSubscriptions.values()], null, 2));
   } catch (e) {
-    console.error('[webcc/push] Failed to save subscriptions:', e.message);
+    console.error('[multicc/push] Failed to save subscriptions:', e.message);
   }
 }
 
@@ -1389,7 +1389,7 @@ app.post('/api/push/subscribe', (req, res) => {
   if (!sub || !sub.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
   pushSubscriptions.set(sub.endpoint, sub);
   savePushSubscriptions();
-  console.log(`[webcc/push] New subscription (${pushSubscriptions.size} total)`);
+  console.log(`[multicc/push] New subscription (${pushSubscriptions.size} total)`);
   res.json({ ok: true });
 });
 
@@ -1431,10 +1431,10 @@ app.get('/api/push/health', (req, res) => {
 // Test push notification
 app.post('/api/push/test', async (req, res) => {
   const payload = {
-    title: 'WebCC Test',
+    title: 'MultiCC Test',
     body: `Push test at ${new Date().toLocaleTimeString()}`,
     type: 'test',
-    tag: 'webcc-test',
+    tag: 'multicc-test',
     url: '/manage',
   };
   await sendPushToAll(payload);
@@ -1446,14 +1446,14 @@ app.post('/api/push/test', async (req, res) => {
 // Test Bark only
 app.post('/api/push/test-bark', (req, res) => {
   if (!BARK_URL) return res.status(400).json({ error: 'Bark URL not configured' });
-  sendBarkNotification('WebCC Test', `Bark test at ${new Date().toLocaleTimeString()}`, '/manage');
+  sendBarkNotification('MultiCC Test', `Bark test at ${new Date().toLocaleTimeString()}`, '/manage');
   res.json({ ok: true });
 });
 
 // Test Webhook only
 app.post('/api/push/test-webhook', (req, res) => {
   if (!WEBHOOK_URL) return res.status(400).json({ error: 'Webhook URL not configured' });
-  sendWebhookNotification({ title: 'WebCC Test', body: `Webhook test at ${new Date().toLocaleTimeString()}`, type: 'test' });
+  sendWebhookNotification({ title: 'MultiCC Test', body: `Webhook test at ${new Date().toLocaleTimeString()}`, type: 'test' });
   res.json({ ok: true });
 });
 
@@ -1507,7 +1507,7 @@ async function sendPushToAll(payload) {
       h.consecutiveFails++;
       pushGlobalStats.totalFail++;
       if (v.statusCode === 404 || v.statusCode === 410) stale.push(v.endpoint);
-      console.error(`[webcc/push] Send failed for ${v.endpoint.slice(0, 40)}... (${v.statusCode || v.message})`);
+      console.error(`[multicc/push] Send failed for ${v.endpoint.slice(0, 40)}... (${v.statusCode || v.message})`);
     }
   }
 
@@ -1517,14 +1517,14 @@ async function sendPushToAll(payload) {
       pushHealthStats.delete(ep);
     }
     savePushSubscriptions();
-    console.log(`[webcc/push] Cleaned ${stale.length} expired subscription(s)`);
+    console.log(`[multicc/push] Cleaned ${stale.length} expired subscription(s)`);
   }
 }
 
 // Bark push notification (iOS backup)
 function sendBarkNotification(title, body, url) {
   if (!BARK_URL) return;
-  const barkUrl = `${BARK_URL.replace(/\/$/, '')}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?url=${encodeURIComponent(url || '')}&group=webcc`;
+  const barkUrl = `${BARK_URL.replace(/\/$/, '')}/${encodeURIComponent(title)}/${encodeURIComponent(body)}?url=${encodeURIComponent(url || '')}&group=multicc`;
   barkHealth.lastSendTime = Date.now();
   const mod = barkUrl.startsWith('https') ? https : http;
   mod.get(barkUrl, res => {
@@ -1535,7 +1535,7 @@ function sendBarkNotification(title, body, url) {
   }).on('error', err => {
     barkHealth.lastSuccess = false;
     barkHealth.lastError = err.message;
-    console.error('[webcc/push] Bark send failed:', err.message);
+    console.error('[multicc/push] Bark send failed:', err.message);
   });
 }
 
@@ -1555,7 +1555,7 @@ function sendWebhookNotification(payload) {
   req.on('error', err => {
     webhookHealth.lastSuccess = false;
     webhookHealth.lastError = err.message;
-    console.error('[webcc/push] Webhook send failed:', err.message);
+    console.error('[multicc/push] Webhook send failed:', err.message);
   });
   req.end(data);
 }
@@ -1676,11 +1676,11 @@ function triggerPush(sessionId, type, message) {
   const shortCwd = cwd.length > 30 ? '...' + cwd.slice(-27) : cwd;
 
   const payload = {
-    title: type === 'waiting' ? `WebCC #${sessionId}: 等待操作` : `WebCC #${sessionId}: 完成`,
+    title: type === 'waiting' ? `MultiCC #${sessionId}: 等待操作` : `MultiCC #${sessionId}: 完成`,
     body: `${message}\n${shortCwd}`,
     sessionId,
     type,
-    tag: `webcc-${sessionId}`,
+    tag: `multicc-${sessionId}`,
     url: `/manage`,
   };
 
@@ -1693,7 +1693,7 @@ function triggerPush(sessionId, type, message) {
   sendBarkNotification(payload.title, `${message} ${shortCwd}`, payload.url);
   sendWebhookNotification(payload);
 
-  console.log(`[webcc/push] Sent ${type} notification for session ${sessionId}`);
+  console.log(`[multicc/push] Sent ${type} notification for session ${sessionId}`);
 }
 
 // ── WeChat Bridge ──
@@ -1708,7 +1708,7 @@ app.get('/', (req, res, next) => {
 
 // APK info endpoint — returns file modification time
 app.get('/api/apk-info', (req, res) => {
-  const apkPath = path.join(__dirname, 'public', 'webcc.apk');
+  const apkPath = path.join(__dirname, 'public', 'multicc.apk');
   try {
     const stat = fs.statSync(apkPath);
     res.json({ exists: true, mtime: stat.mtime.toISOString(), size: stat.size });
@@ -1722,7 +1722,7 @@ app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.apk')) {
       res.set('Content-Type', 'application/vnd.android.package-archive');
-      res.set('Content-Disposition', 'attachment; filename="webcc.apk"');
+      res.set('Content-Disposition', 'attachment; filename="multicc.apk"');
       res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.set('Pragma', 'no-cache');
       res.set('Expires', '0');
@@ -1762,7 +1762,7 @@ function saveChatHistory(sessionName) {
   try {
     fs.writeFileSync(chatHistoryPath(sessionName), JSON.stringify(history, null, 2));
   } catch (e) {
-    console.error(`[webcc/chat] Failed to save history for ${sessionName}:`, e.message);
+    console.error(`[multicc/chat] Failed to save history for ${sessionName}:`, e.message);
   }
 }
 
@@ -1873,7 +1873,7 @@ function handleChatWs(ws, req, urlObj) {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'cancel') {
         if (cs.claudeProc) {
-          console.log('[webcc/chat] Cancel requested, killing claude process');
+          console.log('[multicc/chat] Cancel requested, killing claude process');
           try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
           cs.claudeProc = null;
           cs.lineBuf = '';
@@ -1903,7 +1903,7 @@ function handleChatWs(ws, req, urlObj) {
         const existing = persistedSessions.get(sessionName);
         if (existing) existing.chatClaudeSessionId = cs.chatClaudeSessionId;
         savePersistedSessions();
-        console.log(`[webcc/chat] Cleared history and reset Claude session for ${sessionName}`);
+        console.log(`[multicc/chat] Cleared history and reset Claude session for ${sessionName}`);
         return;
       }
 
@@ -1956,7 +1956,7 @@ function handleChatWs(ws, req, urlObj) {
 
         args.push(msg.text);
 
-        console.log(`[webcc/chat] Spawning (turn ${cs.chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
+        console.log(`[multicc/chat] Spawning (turn ${cs.chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
 
         const spawnChat = (spawnArgs, isRetry) => {
           const proc = spawn(CLAUDE_CMD, spawnArgs, {
@@ -2040,7 +2040,7 @@ function handleChatWs(ws, req, urlObj) {
 
           proc.stderr.on('data', (chunk) => {
             stderrBuf += chunk.toString();
-            console.error(`[webcc/chat] stderr: ${chunk.toString().slice(0, 200)}`);
+            console.error(`[multicc/chat] stderr: ${chunk.toString().slice(0, 200)}`);
           });
 
           proc.on('close', (code) => {
@@ -2058,7 +2058,7 @@ function handleChatWs(ws, req, urlObj) {
 
             // If resume failed (non-zero exit, no assistant output), retry without resume
             if (code !== 0 && !isRetry && !cs.currentAssistantText && cs.chatTurnCount > 0) {
-              console.warn(`[webcc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
+              console.warn(`[multicc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
               cs.chatClaudeSessionId = crypto.randomUUID();
               cs.chatTurnCount = 0;
               cs.isStreaming = true;
@@ -2093,7 +2093,7 @@ function handleChatWs(ws, req, urlObj) {
             cs.currentToolCalls = [];
             cs._resultSaved = false;
 
-            console.log(`[webcc/chat] claude exited with code ${code}`);
+            console.log(`[multicc/chat] claude exited with code ${code}`);
           });
 
           return proc;
@@ -2102,7 +2102,7 @@ function handleChatWs(ws, req, urlObj) {
         cs.claudeProc = spawnChat(args, false);
       }
     } catch (e) {
-      console.error('[webcc/chat] Bad message:', e.message);
+      console.error('[multicc/chat] Bad message:', e.message);
     }
   });
 
@@ -2123,7 +2123,7 @@ wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress;
     const isLocal = (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req);
     const cookies = parseCookies(req.headers.cookie);
-    const hasCookie = cookies.webcc_auth && verifyAuthCookie(cookies.webcc_auth);
+    const hasCookie = cookies.multicc_auth && verifyAuthCookie(cookies.multicc_auth);
     const hasToken = urlObj.searchParams.get('token') === ACCESS_TOKEN;
     if (!isLocal && !hasCookie && !hasToken) {
       ws.close(4003, 'Forbidden');
@@ -2141,7 +2141,7 @@ wss.on('connection', (ws, req) => {
 
   if (sessionId && sessions.has(sessionId)) {
     session = sessions.get(sessionId);
-    console.log(`[webcc] Client attached to session ${sessionId} (${session.clients.size + 1} total)`);
+    console.log(`[multicc] Client attached to session ${sessionId} (${session.clients.size + 1} total)`);
   } else {
     const customId = urlObj.searchParams.get('newid');
     if (!sessionId) sessionId = customId ? customId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) : generateId();
@@ -2151,9 +2151,9 @@ wss.on('connection', (ws, req) => {
               : persisted    ? persisted.cwd
               :                os.homedir();
     if (persisted) {
-      console.log(`[webcc] Restoring session ${sessionId} (cwd: ${cwd})`);
+      console.log(`[multicc] Restoring session ${sessionId} (cwd: ${cwd})`);
     } else {
-      console.log(`[webcc] Creating session ${sessionId}`);
+      console.log(`[multicc] Creating session ${sessionId}`);
     }
     try {
       session = createSession(sessionId, cwd);
@@ -2204,7 +2204,7 @@ wss.on('connection', (ws, req) => {
                 p.cwd = newCwd;
                 savePersistedSessions();
               }
-              console.log(`[webcc] Session ${session.id} cwd → ${newCwd}`);
+              console.log(`[multicc] Session ${session.id} cwd → ${newCwd}`);
             }
             inputBuf = '';
           } else if (ch === '\x03' || ch === '\x15') {
@@ -2248,14 +2248,14 @@ wss.on('connection', (ws, req) => {
         const origExt = (name && path.extname(name).replace(/^\./, '')) || '';
         const ext = origExt.replace(/[^a-z0-9]/gi, '').slice(0, 10)
           || (mime.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').slice(0, 8);
-        const safeName = `webcc_${Date.now()}.${ext}`;
+        const safeName = `multicc_${Date.now()}.${ext}`;
         const tmpPath = path.join(os.tmpdir(), safeName);
         fs.writeFileSync(tmpPath, Buffer.from(data, 'base64'));
-        console.log(`[webcc] Saved upload: ${tmpPath}`);
+        console.log(`[multicc] Saved upload: ${tmpPath}`);
         ws.send(JSON.stringify({ type: 'file_saved', tempId, path: tmpPath, name }));
       }
     } catch (e) {
-      console.error('[webcc] Bad message:', e.message, e.stack);
+      console.error('[multicc] Bad message:', e.message, e.stack);
     }
   });
 
@@ -2263,11 +2263,11 @@ wss.on('connection', (ws, req) => {
     session.clients.delete(ws);
     if (session.primaryClient === ws) session.primaryClient = null;
     if (session.resizeOwner === ws) session.resizeOwner = null;
-    console.log(`[webcc] Client left session ${sessionId} (${session.clients.size} remaining)`);
+    console.log(`[multicc] Client left session ${sessionId} (${session.clients.size} remaining)`);
   });
 
   ws.on('error', (err) => {
-    console.error('[webcc] WebSocket error:', err.message);
+    console.error('[multicc] WebSocket error:', err.message);
     session.clients.delete(ws);
     if (session.primaryClient === ws) session.primaryClient = null;
     if (session.resizeOwner === ws) session.resizeOwner = null;
@@ -2289,7 +2289,7 @@ wss.on('close', () => clearInterval(wsPingInterval));
 recoverTmuxSessions();
 
 server.listen(PORT, () => {
-  console.log(`\n  WebCC is running at http://localhost:${PORT}\n`);
+  console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);
   console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
   console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
 });

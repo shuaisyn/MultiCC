@@ -1,10 +1,10 @@
 'use strict';
 
 /**
- * WeChat iLink Bridge for WebCC
+ * WeChat iLink Bridge for MultiCC
  *
  * Directly connects to Tencent's official iLink Bot API (ilinkai.weixin.qq.com)
- * to relay messages between WeChat and WebCC Claude Code sessions.
+ * to relay messages between WeChat and MultiCC Claude Code sessions.
  *
  * No external MCP server required — pure HTTP long-polling.
  */
@@ -128,7 +128,7 @@ class ILinkClient {
   }
 
   async sendMessage(toUserId, text, contextToken) {
-    const clientId = `webcc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const clientId = `multicc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const body = {
       msg: {
         from_user_id: '',
@@ -338,7 +338,7 @@ async function _handleCommand(text, msg) {
       reply = [
         '📋 可用命令:',
         '/status — 查看桥接状态',
-        '/sessions — 列出所有 WebCC 会话',
+        '/sessions — 列出所有 MultiCC 会话',
         '/bind <id> — 绑定到指定会话',
         '/unbind — 解除绑定（回到默认会话）',
         '/send <id> <text> — 向指定会话发送一条命令',
@@ -360,10 +360,10 @@ async function _handleCommand(text, msg) {
 
     case '/sessions': {
       if (!_persistedSessions || _persistedSessions.size === 0) {
-        reply = '没有活跃的 WebCC 会话';
+        reply = '没有活跃的 MultiCC 会话';
         break;
       }
-      const lines = ['📂 WebCC 会话:'];
+      const lines = ['📂 MultiCC 会话:'];
       for (const [id, p] of _persistedSessions) {
         const active = _sessions && _sessions.has(id);
         const bound = _routeMap.get(userId) === id ? ' ← 当前' : '';

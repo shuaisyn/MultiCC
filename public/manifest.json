@@ -1,6 +1,6 @@
 {
-  "name": "WebCC — Claude Code",
-  "short_name": "WebCC",
+  "name": "MultiCC — Claude Code",
+  "short_name": "MultiCC",
   "description": "Web interface for Claude Code CLI with push notifications",
   "start_url": "/manage",
   "display": "standalone",

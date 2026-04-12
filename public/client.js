@@ -103,7 +103,7 @@ if (sessionLabel) {
 /* ── Voice Notifications (task complete / waiting for action) ── */
 const notifyBtn = document.getElementById('notify-btn');
 const notifyToast = document.getElementById('notify-toast');
-let _notifyEnabled = localStorage.getItem('webcc_notify') !== 'off';
+let _notifyEnabled = localStorage.getItem('multicc_notify') !== 'off';
 let _notifyState = 'idle';       // idle | active | waiting
 let _notifyOutputChars = 0;
 let _notifyIdleTimer = null;
@@ -168,7 +168,7 @@ updateNotifyBtn();
 if (notifyBtn) {
   notifyBtn.addEventListener('click', () => {
     _notifyEnabled = !_notifyEnabled;
-    localStorage.setItem('webcc_notify', _notifyEnabled ? 'on' : 'off');
+    localStorage.setItem('multicc_notify', _notifyEnabled ? 'on' : 'off');
     updateNotifyBtn();
   });
 }
@@ -774,17 +774,17 @@ voicePanel.addEventListener('click', (e) => {
 });
 
 // ── Native bridge callbacks (Android WebView) ──
-const _hasNativeBridge = !!(window.WebCCBridge && window.WebCCBridge.isAvailable());
+const _hasNativeBridge = !!(window.MultiCCBridge && window.MultiCCBridge.isAvailable());
 
 let _bridgeRecTimeout = null;
 
 // Called when Java confirms recording started
-window.__webccRecStarted = () => {
+window.__multiccRecStarted = () => {
   console.log('[voice-bridge] recording started on native side');
 };
 
 // Called when recording file is ready — fetch it via localhost URL
-window.__webccRecReady = async () => {
+window.__multiccRecReady = async () => {
   clearTimeout(_bridgeRecTimeout);
   isRecording = false;
   micBtn.classList.remove('active');
@@ -805,7 +805,7 @@ window.__webccRecReady = async () => {
   }
 };
 
-window.__webccRecError = (msg) => {
+window.__multiccRecError = (msg) => {
   clearTimeout(_bridgeRecTimeout);
   isRecording = false;
   micBtn.classList.remove('active');
@@ -816,7 +816,7 @@ window.__webccRecError = (msg) => {
 
 function startRecording() {
   if (_hasNativeBridge) {
-    window.WebCCBridge.startRecording();
+    window.MultiCCBridge.startRecording();
     isRecording = true;
     micBtn.classList.add('active');
     micStatus.textContent = '正在录音…';
@@ -873,7 +873,7 @@ function stopRecording() {
         setTimeout(() => { micStatus.textContent = ''; }, 3000);
       }
     }, 15000);
-    try { window.WebCCBridge.stopRecording(); } catch (e) {
+    try { window.MultiCCBridge.stopRecording(); } catch (e) {
       clearTimeout(_bridgeRecTimeout);
       isRecording = false;
       micBtn.classList.remove('active');
@@ -1379,7 +1379,7 @@ let _initParent      = ''; // parent path for ".." entry
 
 function showInitCwdPicker() {
   setStatus('disconnected', '请选择工作目录');
-  if (!initCwdModal) { console.error('[webcc] init-cwd-modal not found'); connect(); return; }
+  if (!initCwdModal) { console.error('[multicc] init-cwd-modal not found'); connect(); return; }
   // Show modal FIRST, before anything that might throw
   initCwdModal.style.display = 'flex';
   try {
@@ -1387,7 +1387,7 @@ function showInitCwdPicker() {
     if (initCwdError) initCwdError.style.display = 'none';
     loadInitDirs('~');
   } catch (e) {
-    console.error('[webcc] showInitCwdPicker error:', e);
+    console.error('[multicc] showInitCwdPicker error:', e);
   }
 }
 

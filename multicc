@@ -1,14 +1,14 @@
 #!/bin/bash
-# WebCC service manager — start/stop/restart/log
-# Usage: ./webcc start|stop|restart|status|log|install|uninstall
+# MultiCC service manager — start/stop/restart/log
+# Usage: ./multicc start|stop|restart|status|log|install|uninstall
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LABEL="com.webcc.server"
+LABEL="com.multicc.server"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$SCRIPT_DIR/logs"
-OUT_LOG="$LOG_DIR/webcc.log"
-ERR_LOG="$LOG_DIR/webcc-error.log"
-PID_FILE="$SCRIPT_DIR/.webcc.pid"
+OUT_LOG="$LOG_DIR/multicc.log"
+ERR_LOG="$LOG_DIR/multicc-error.log"
+PID_FILE="$SCRIPT_DIR/.multicc.pid"
 NODE="/opt/homebrew/bin/node"
 
 mkdir -p "$LOG_DIR"
@@ -35,17 +35,17 @@ get_pid() {
 
 do_start() {
   if is_running; then
-    echo "WebCC is already running (PID $(get_pid))"
+    echo "MultiCC is already running (PID $(get_pid))"
     return 1
   fi
-  echo "Starting WebCC..."
+  echo "Starting MultiCC..."
   cd "$SCRIPT_DIR"
   nohup "$NODE" server.js >> "$OUT_LOG" 2>> "$ERR_LOG" &
   local pid=$!
   echo $pid > "$PID_FILE"
   sleep 1
   if kill -0 $pid 2>/dev/null; then
-    echo "WebCC started (PID $pid)"
+    echo "MultiCC started (PID $pid)"
     echo "Log: $OUT_LOG"
   else
     echo "Failed to start. Check $ERR_LOG"
@@ -56,12 +56,12 @@ do_start() {
 
 do_stop() {
   if ! is_running; then
-    echo "WebCC is not running"
+    echo "MultiCC is not running"
     rm -f "$PID_FILE"
     return 0
   fi
   local pid=$(get_pid)
-  echo "Stopping WebCC (PID $pid)..."
+  echo "Stopping MultiCC (PID $pid)..."
   kill "$pid" 2>/dev/null
   # Wait up to 5 seconds for graceful shutdown
   for i in $(seq 1 10); do
@@ -75,7 +75,7 @@ do_stop() {
     kill -9 "$pid" 2>/dev/null
   fi
   rm -f "$PID_FILE"
-  echo "WebCC stopped"
+  echo "MultiCC stopped"
 }
 
 do_restart() {
@@ -86,9 +86,9 @@ do_restart() {
 
 do_status() {
   if is_running; then
-    echo "WebCC is running (PID $(get_pid))"
+    echo "MultiCC is running (PID $(get_pid))"
   else
-    echo "WebCC is not running"
+    echo "MultiCC is not running"
   fi
 }
 
@@ -135,22 +135,22 @@ EOF
   # Stop if already loaded
   launchctl unload "$PLIST" 2>/dev/null
   launchctl load "$PLIST"
-  echo "WebCC installed as login service"
+  echo "MultiCC installed as login service"
   echo "  Auto-starts on login, auto-restarts on crash"
   echo "  Plist: $PLIST"
   echo ""
-  echo "  ./webcc restart   — restart service"
-  echo "  ./webcc stop      — stop (will auto-restart via KeepAlive)"
-  echo "  ./webcc uninstall — remove auto-start"
+  echo "  ./multicc restart   — restart service"
+  echo "  ./multicc stop      — stop (will auto-restart via KeepAlive)"
+  echo "  ./multicc uninstall — remove auto-start"
 }
 
 do_uninstall() {
   if [ -f "$PLIST" ]; then
     launchctl unload "$PLIST" 2>/dev/null
     rm -f "$PLIST"
-    echo "WebCC service uninstalled"
+    echo "MultiCC service uninstalled"
   else
-    echo "WebCC service not installed"
+    echo "MultiCC service not installed"
   fi
   # Also kill any running instance
   do_stop
@@ -166,14 +166,14 @@ case "${1:-}" in
   install)   do_install ;;
   uninstall) do_uninstall ;;
   *)
-    echo "WebCC service manager"
+    echo "MultiCC service manager"
     echo ""
-    echo "Usage: ./webcc <command>"
+    echo "Usage: ./multicc <command>"
     echo ""
     echo "Commands:"
-    echo "  start      Start WebCC server"
-    echo "  stop       Stop WebCC server"
-    echo "  restart    Restart WebCC server"
+    echo "  start      Start MultiCC server"
+    echo "  stop       Stop MultiCC server"
+    echo "  restart    Restart MultiCC server"
     echo "  status     Check if running"
     echo "  log        Tail live logs"
     echo "  install    Install as login service (auto-start + auto-restart)"

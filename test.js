@@ -1,6 +1,6 @@
 'use strict';
 /**
- * webcc integration test
+ * multicc integration test
  * Usage:  node test.js           (auto-detects running server)
  *         node test.js --no-ws   (skip WebSocket test)
  *         npm test

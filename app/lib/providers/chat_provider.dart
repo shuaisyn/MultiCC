@@ -224,7 +224,7 @@ class ChatProvider extends ChangeNotifier {
   void _maybeNotify(String title, String detail) {
     if (isInBackground || !isActive) {
       NotificationService.show(
-        title: 'WebCC #$sessionName: $title',
+        title: 'MultiCC #$sessionName: $title',
         body: detail.isNotEmpty ? detail : sessionName,
         id: sessionName.hashCode,
       );

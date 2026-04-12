@@ -9,7 +9,7 @@ node_modules/
 sessions.json
 chat_history/
 logs/
-.webcc.pid
+.multicc.pid
 
 # Certificates (local-generated)
 cert.pem

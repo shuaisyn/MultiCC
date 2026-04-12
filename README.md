@@ -1,142 +1,140 @@
 <p align="center">
-  <img src="public/icon.svg" width="120" height="120" alt="WebCC Logo" />
+  <img src="public/icon.svg" width="120" height="120" alt="MultiCC Logo" />
 </p>
 
-<h1 align="center">WebCC</h1>
+<h1 align="center">MultiCC</h1>
 
 <p align="center">
-  <strong>Run Claude Code in your browser. From any device.</strong>
+  <strong>One Claude Code instance. Many clients. Any device.</strong>
 </p>
 
 <p align="center">
+  <a href="#what-is-multicc">What it is</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
   <a href="#configuration">Configuration</a> &bull;
-  <a href="#api-reference">API Reference</a> &bull;
+  <a href="#api-reference">API</a> &bull;
   <a href="#faq">FAQ</a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen" alt="Node.js >=18" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform" />
+  <img src="https://img.shields.io/badge/flutter-Android%20%7C%20iOS-02569B" alt="Flutter app" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
-  <img src="https://img.shields.io/badge/version-1.0.0-orange" alt="Version" />
 </p>
 
 ---
 
-## What is WebCC?
+## What is MultiCC?
 
-**WebCC** (Web Claude Code) turns your local [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI into a full-featured, browser-based terminal that you can access from **any device** on your network — your phone, tablet, another laptop, or even from WeChat.
+**MultiCC** (Multi-Client Claude Code) is a self-hosted server that lets you drive one local [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI from a browser, a PWA, a native Flutter app (Android/iOS), or even a WeChat chat — all at the same time, all against the same persistent sessions.
 
-Unlike traditional SSH or web terminal tools, WebCC is purpose-built for Claude Code workflows:
+It is designed around three observations:
 
-- **Voice Input** — dictate commands and let AI refine your speech into precise technical language
-- **Multi-Session Dashboard** — monitor and manage multiple Claude Code sessions from a single page
-- **Smart Notifications** — get voice alerts and push notifications when Claude finishes a task or needs your input
-- **WeChat Bridge** — relay conversations between WeChat and Claude Code (ideal for mobile-first workflows in China)
-- **PWA Support** — install as a native-like app on iOS and Android
+1. **Claude Code sessions should outlive the client.** You open a task on your laptop, walk away, and want to keep an eye on it from your phone. MultiCC runs sessions in `tmux` so disconnecting never kills progress.
+2. **One UI can't serve every moment.** Sometimes you want a full terminal; sometimes a chat bubble is enough; sometimes you just want push notifications when Claude is waiting. MultiCC ships multiple front-ends against one backend.
+3. **Voice is the fastest input on a phone.** Dictate in Chinese or English, let Whisper transcribe, let an LLM rewrite it into a precise technical prompt. Corrections feed back into the vocabulary so the system gets sharper the more you use it.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Phone / Tablet / Laptop / WeChat                       │
-│                    ▼                                     │
-│         https://192.168.x.x:3443                        │
-│                    ▼                                     │
-│  ┌──────────── WebCC Server ────────────┐               │
-│  │  Express + WebSocket + HTTPS         │               │
-│  │       ▼              ▼               │               │
-│  │   tmux session   tmux session        │               │
-│  │   └─ claude      └─ claude           │               │
-│  └──────────────────────────────────────┘               │
-└─────────────────────────────────────────────────────────┘
+        ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+        │ Desktop Web  │   │  Mobile PWA  │   │ Flutter App  │   │   WeChat     │
+        │ (Terminal)   │   │    (Chat)    │   │  (Android)   │   │   Bridge     │
+        └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+               │                  │                  │                  │
+               ▼                  ▼                  ▼                  ▼
+        ┌──────────────────────────────────────────────────────────────────────┐
+        │                  MultiCC Server (Express + ws + HTTPS)               │
+        │   ┌────────────────────────┐         ┌────────────────────────┐     │
+        │   │  tmux session backend  │         │ Claude stream-json     │     │
+        │   │  (terminal mode)       │         │ spawner (chat mode)    │     │
+        │   └──────────┬─────────────┘         └──────────┬─────────────┘     │
+        │              ▼                                   ▼                   │
+        │         claude CLI                          claude --output-format  │
+        │                                             stream-json              │
+        └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-### Terminal
+### Two modes against the same backend
 
-| Feature | Description |
-|---------|-------------|
-| **Full xterm.js Terminal** | Complete terminal emulation with 256-color support, clickable URLs, 5000-line scrollback |
-| **Multi-Session** | Run multiple independent Claude Code sessions simultaneously |
-| **Session Persistence** | Sessions survive server restarts (backed by tmux); reconnect to pick up where you left off |
-| **Auto-Reconnect** | Exponential-backoff reconnection with instant resume when switching back to the app |
-| **Multi-Client** | Multiple browser tabs/devices can share the same session in real-time |
-| **Custom Session ID** | Name your sessions (`?newid=my-project`) for easy identification |
-| **Directory Picker** | Visual directory browser when creating new sessions |
-| **Change Working Dir** | Switch a running session's working directory on the fly |
+| Mode | UI | Backend |
+|------|----|---------|
+| **Terminal** (`/`) | Full `xterm.js` — scrollback, colors, input, resize | `tmux` session, `pipe-pane` + named FIFO for reliable output capture |
+| **Chat** (`/chat`) | Message bubbles with streaming tool cards | `claude --output-format stream-json` — events forwarded live over WebSocket |
 
-### Voice Input
+Both modes share the same session registry, auth layer, and notification pipeline.
 
-| Feature | Description |
-|---------|-------------|
-| **Whisper STT** | Record audio in-browser, transcribe via Whisper API (Groq, OpenRouter, or any OpenAI-compatible endpoint) |
-| **AI Refinement** | Raw transcription is streamed through an LLM to convert spoken language into precise technical commands |
-| **Vocabulary Learning** | The system learns from your corrections — frequently corrected terms are fed back into Whisper prompts |
-| **SSE Streaming** | AI refinement results stream in real-time with latency metrics (queue, first-token, total) |
+### Multi-client per session
+
+- Multiple browser tabs / devices can attach to the same session and see output in sync.
+- Reconnect is instant on foreground: a rolling replay buffer (last 500 stream events) backfills chat bubbles so you never see a half-empty conversation after the screen wakes up.
+- Flutter app and web UI can talk to the same `chat` session concurrently.
+
+### Flutter native app
+
+- Rewrite of the old Capacitor webview client — now a real Flutter app with `xterm` terminal widget and a custom chat UI.
+- **Multi-session sidebar** with swipe-to-close, unread badges, and per-session cwd.
+- **Background notifications** via `flutter_local_notifications` + the server's Web Push/Bark pipeline.
+- **In-app APK auto-update**: the app pings the server's `/multicc.apk` mtime and offers a one-tap update when a newer build is available.
+- **Voice capture** using the `record` plugin with waveform.
+- Distributed as a signed APK via `/manage` → APK button.
+
+### Voice input
+
+- **Whisper STT** through any OpenAI-compatible endpoint (Groq, OpenRouter, self-hosted).
+- **AI refinement** streams raw text through an LLM (default: OpenRouter) and replaces filler/hallucinations with precise technical language — delivered over SSE with first-token and total-latency metrics.
+- **Vocabulary learning loop.** Every time you accept a refined result (or edit it), the diff is stored in `voice_examples.json`; terms that keep appearing are promoted into `whisper_vocab.json` and fed back as the Whisper `prompt` parameter, so Whisper gets better at your project's jargon over time.
 
 ### Notifications
 
-| Feature | Description |
-|---------|-------------|
-| **Voice Alerts** | Browser speech synthesis announces "Task completed" or "Waiting for your action" |
-| **Smart Trigger** | Notifications only fire when the page is in the background — no interruptions while you're looking at the terminal |
-| **Pattern Detection** | Recognizes Claude's prompts: Y/n confirmations, Allow/Deny, numbered choices, idle prompts |
-| **Push Notifications** | Web Push via VAPID — works even when the browser is closed |
-| **Toast Overlay** | Visual toast notification with auto-dismiss; cancelled immediately when you return to the page |
+Three delivery channels, all triggered from the same "waiting / completed" detector:
 
-### File Management
+| Channel | Reach | Typical use |
+|---------|-------|-------------|
+| **Web Push (VAPID)** | Any browser / PWA with push permission | Laptop in another room, phone in your pocket |
+| **Bark** | iOS `Bark` app | Reliable iOS push without Apple certs |
+| **Webhook** | Any HTTP endpoint | Pipe into Slack, Lark, n8n, Home Assistant |
+| **In-app voice alert** | Browser `speechSynthesis` (foreground only) | Desk laptop — "task completed" speaks aloud |
+| **Flutter local notification** | Android notification tray | Lock-screen alerts when the app is backgrounded |
 
-| Feature | Description |
-|---------|-------------|
-| **File Browser** | Slide-in panel to browse server-side files; click to insert paths into the terminal |
-| **File Upload** | Drag-and-drop, paste from clipboard, or use the file picker — up to 25 MB per file |
-| **File Download** | Download or preview files directly from the file browser (images, PDFs, code, audio, video) |
-| **Attachment Chips** | Uploaded files appear as clickable chips; click to insert the server path |
+Alerts fire only when the originating client is **not** looking at the session — no interruptions while you're actively reading output.
 
-### Dashboard (`/manage`)
+### Multi-session dashboard (`/manage`)
 
-| Feature | Description |
-|---------|-------------|
-| **Session Grid** | Visual cards for all sessions with status, cwd, connection count, last activity |
-| **Inline Terminal** | Click a session card to open its terminal in an embedded iframe — no new tab needed |
-| **Notification Monitor** | Per-session WebSocket monitoring with real-time "waiting" / "completed" badges |
-| **Notification Log** | Bottom bar showing recent events with dismiss and click-to-focus |
-| **Voice Settings** | Configure OpenRouter and Whisper API credentials, models, and vocabulary directly from the UI |
-| **QR Code** | One-click QR code with your LAN IP and access token — scan from any phone to connect |
+- Visual cards for every tmux session (status, cwd, client count, last activity).
+- Click a card to open its terminal in an inline iframe — no new tabs.
+- Per-session WebSocket monitors tag sessions as `waiting` / `completed` in real time.
+- One-click **QR code** with LAN IP + access token for phone onboarding.
+- **Voice settings panel** (OpenRouter/Whisper keys, models, vocabulary) hot-reloaded without restart.
+- **Notification settings** for Web Push subscribe/unsubscribe, Bark URL, Webhook URL.
+- **APK download** button that serves the latest Flutter build.
+- **phtunnel/花生壳 monitor** (optional) — a shell watchdog that restarts the Phtunnel DDNS app if the public URL goes unreachable.
 
-### Mobile
+### WeChat bridge (`/wechat`)
 
-| Feature | Description |
-|---------|-------------|
-| **Responsive Layout** | Full-width terminal on mobile; sidebar hides when viewing a session |
-| **Mobile Input Bar** | Special key buttons (Esc, Tab, Ctrl+C, Ctrl+D, arrows, Home, End) + text input field |
-| **Keyboard Handling** | `visualViewport` resize tracking ensures the terminal shrinks when the soft keyboard appears |
-| **PWA** | Installable as a home-screen app with standalone display mode |
-| **iOS Safe Areas** | Proper `env(safe-area-inset-*)` padding for notched devices |
+Two implementations share the same UI:
 
-### WeChat Bridge (`/wechat`)
+- **iLink bridge** (`wechat-ilink.js`) — current default. Uses the iLink WeChat API to relay messages; works with PC WeChat.
+- **MCP bridge** (`wechat-bridge.js`) — legacy. Talks to a `wechat-mcp` server over JSON-RPC.
 
-| Feature | Description |
-|---------|-------------|
-| **Bidirectional Relay** | Messages from a WeChat contact/group are forwarded to Claude; Claude's output is sent back to WeChat |
-| **MCP Integration** | Connects to a `wechat-mcp` server via JSON-RPC 2.0 over HTTP |
-| **Echo Filtering** | Hash-based deduplication prevents message loops |
-| **Chat Commands** | `/help`, `/status`, `/sessions`, `/bind <id>` — control the bridge from within WeChat |
-| **Live Chat Log** | SSE-powered real-time message stream in the browser UI |
+Features (both):
+
+- Bidirectional relay between a WeChat contact/group and a MultiCC session.
+- Hash-based deduplication to break echo loops.
+- In-WeChat commands: `/help`, `/status`, `/sessions`, `/bind <id>`.
+- Live SSE log stream in the browser UI.
 
 ### Security
 
-| Feature | Description |
-|---------|-------------|
-| **Token Authentication** | Optional `ACCESS_TOKEN` protects all API and WebSocket endpoints |
-| **Auto-Generated HTTPS** | Self-signed TLS certificate with SAN IPs, auto-renewed on IP change |
-| **Localhost Bypass** | Local connections are always allowed without a token |
-| **Static Asset Exemption** | JS/CSS/images served without auth to avoid breaking the page load |
+- Optional `ACCESS_TOKEN` gates every API/WebSocket endpoint.
+- `multicc_auth` HTTP-only cookie minted from the token for sticky browser sessions.
+- Localhost connections bypass the token.
+- Self-signed HTTPS certificate auto-generated with SAN entries for every local IP, auto-renewed when your IP changes (required for microphone + PWA).
 
 ---
 
@@ -145,157 +143,163 @@ Unlike traditional SSH or web terminal tools, WebCC is purpose-built for Claude 
 ### Prerequisites
 
 - **Node.js** >= 18
-- **tmux** installed and available in PATH
-- **Claude Code CLI** installed (`claude` command available)
-- **openssl** (for auto-generated HTTPS certificates)
+- **tmux** (for terminal mode; chat mode does not need it)
+- **Claude Code CLI** — `claude` on your PATH, already logged in
+- **openssl** (HTTPS cert generation)
+- **Flutter** 3.8+ (only if you want to build the native app yourself)
 
-### Installation
+### Run the server
 
 ```bash
-# Clone the repository
-git clone https://github.com/user/webcc.git
-cd webcc
-
-# Install dependencies
+git clone https://github.com/lsjwzh/MultiCC.git
+cd MultiCC
 npm install
-
-# (Optional) Configure environment
-cp .env.example .env
-# Edit .env with your API keys
-```
-
-### Start the Server
-
-```bash
 npm start
 ```
 
-The server will:
-
-1. Auto-detect your local IP addresses
-2. Generate a self-signed TLS certificate (if needed)
-3. Start listening on `https://localhost:3443`
-
 ```
-  WebCC is running at https://localhost:3443
+  MultiCC is running at https://localhost:3443
 
-  Other devices can access via:
-    https://192.168.1.100:3443
-
-  Note: First visit will show a security warning (self-signed cert).
-  Click "Advanced" -> "Proceed" / "Continue" to accept.
+  Other devices:
+    https://192.168.1.100:3443?token=<ACCESS_TOKEN>
 ```
 
-### Access from Other Devices
+First visit will show a cert warning — accept it once per device.
 
-1. Open `https://<your-ip>:3443` on your phone/tablet
-2. Accept the self-signed certificate warning
-3. If `ACCESS_TOKEN` is set, append `?token=<your-token>` to the URL
-4. Or use the QR code from the Dashboard (`/manage`) page
+### Run as a background service (macOS)
+
+```bash
+./multicc install    # installs a launchd agent — auto-start on login, auto-restart on crash
+./multicc status
+./multicc log
+./multicc restart
+./multicc uninstall  # removes the launchd agent
+```
+
+The service writes logs to `logs/multicc.log` and `logs/multicc-error.log`.
+
+### Build the Flutter app
+
+```bash
+cd app
+flutter pub get
+flutter build apk --release           # Android
+flutter build ios --release --no-codesign   # iOS (needs Xcode + signing to install)
+```
+
+The release APK is copied to `public/multicc.apk` by the build; the `/manage` page serves it from there.
 
 ---
 
 ## Configuration
 
-All configuration is done via environment variables in the `.env` file. The server hot-reloads voice settings when changed through the Dashboard UI.
+All configuration is environment-variable driven. Voice settings additionally hot-reload when edited via the dashboard UI.
 
 ### Server
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3443` (HTTPS) / `3000` (HTTP) | Server listen port |
-| `ACCESS_TOKEN` | *(none)* | Access token for remote authentication. If unset, no auth required |
+| `PORT` | `3443` (HTTPS) / `3000` (HTTP) | Listen port |
+| `ACCESS_TOKEN` | *(none)* | Gate all endpoints; localhost always bypassed |
 | `CLAUDE_CMD` | *(auto-detected)* | Override path to the `claude` binary |
-| `CLAUDE_ARGS` | *(none)* | Extra CLI arguments passed to Claude (space-separated) |
+| `CLAUDE_ARGS` | *(none)* | Extra CLI args passed to every spawned `claude` |
 
-### Voice Refinement (OpenRouter / LLM)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENROUTER_API_KEY` | *(none)* | API key for the LLM used to refine voice transcriptions |
-| `OPENROUTER_MODEL` | `google/gemini-2.0-flash-001` | LLM model name |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter-compatible API base URL |
-
-### Voice STT (Whisper)
+### Voice — LLM refinement
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_API_KEY` | *(falls back to `OPENROUTER_API_KEY`)* | API key for the Whisper STT service |
-| `WHISPER_BASE_URL` | `https://openrouter.ai/api/v1` | Whisper-compatible API base URL (e.g., `https://api.groq.com/openai/v1`) |
-| `WHISPER_MODEL` | `whisper-large-v3-turbo` | Whisper model name |
-| `WHISPER_LANGUAGE` | `zh` | ISO 639-1 language code for transcription |
-| `WHISPER_PROMPT` | *(none)* | Static vocabulary hints for Whisper (comma-separated technical terms) |
+| `OPENROUTER_API_KEY` | *(none)* | API key for the refinement LLM |
+| `OPENROUTER_MODEL` | `google/gemini-2.0-flash-001` | Model name |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible base URL |
 
-### Push Notifications (VAPID)
+### Voice — Whisper STT
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VAPID_PUBLIC_KEY` | *(auto-generated)* | VAPID public key for Web Push |
-| `VAPID_PRIVATE_KEY` | *(auto-generated)* | VAPID private key for Web Push |
+| `WHISPER_API_KEY` | *(falls back to `OPENROUTER_API_KEY`)* | API key |
+| `WHISPER_BASE_URL` | `https://openrouter.ai/api/v1` | e.g. `https://api.groq.com/openai/v1` |
+| `WHISPER_MODEL` | `whisper-large-v3-turbo` | Model name |
+| `WHISPER_LANGUAGE` | `zh` | ISO 639-1 language hint |
+| `WHISPER_PROMPT` | *(none)* | Static vocabulary hints (auto-learned terms merge with this) |
 
-> VAPID keys are automatically generated on first run and persisted to `.env`. You typically do not need to set these manually.
+### Notifications
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(auto-generated)* | Web Push keys — written to `.env` on first run |
+| `BARK_URL` | *(none)* | Bark push endpoint, e.g. `https://api.day.app/<your-key>` |
+| `WEBHOOK_URL` | *(none)* | Generic webhook URL — receives JSON `{ title, body, type, sessionId, url }` |
 
 ---
 
 ## Architecture
 
 ```
-webcc/
-├── server.js              # Main server: Express, WebSocket, tmux, all API routes
-├── wechat-bridge.js       # WeChat MCP bridge module
+multicc/
+├── server.js                   # Main server — Express, ws, tmux, chat spawner, voice, push
+├── wechat-ilink.js             # WeChat bridge (iLink API — current default)
+├── wechat-bridge.js            # WeChat bridge (legacy MCP variant)
+├── multicc                     # Launchd service manager script
+├── phtunnel-monitor.sh         # Optional DDNS watchdog
 ├── package.json
-├── .env                   # Environment configuration
+├── .env                        # Environment + VAPID keys
 │
-├── public/                # Static frontend files
-│   ├── index.html         # Terminal page (main UI)
-│   ├── client.js          # Terminal client logic
-│   ├── manage.html        # Dashboard page
-│   ├── manage.js          # Dashboard logic
-│   ├── wechat.html        # WeChat bridge UI
-│   ├── wechat.js          # WeChat bridge client logic
-│   ├── pwa.js             # PWA registration & push subscription
-│   ├── sw.js              # Service Worker (push notifications, caching)
-│   ├── icon.svg           # App icon
-│   ├── manifest.json      # Web App Manifest
-│   └── qrcode.min.js      # QR code generation library
+├── public/                     # Zero-build static frontend
+│   ├── index.html / client.js  # Terminal mode UI
+│   ├── chat.html   / chat.js   # Chat mode UI
+│   ├── manage.html             # Multi-session dashboard
+│   ├── wechat.html             # WeChat bridge UI
+│   ├── pwa.js / sw.js          # PWA registration + push subscription + service worker
+│   ├── manifest.json           # Web App Manifest
+│   ├── icon.svg
+│   └── multicc.apk             # Served by /multicc.apk (build output, gitignored)
 │
-├── sessions.json          # Persisted session registry
-├── voice_examples.json    # STT feedback history (up to 50 entries)
-├── whisper_vocab.json     # Auto-learned vocabulary (up to 100 terms)
-├── push_subscriptions.json# Web Push subscription store
-├── wechat-config.json     # WeChat bridge configuration
-├── cert.pem / key.pem     # Auto-generated TLS certificate
-└── cert.pem.bak / key.pem.bak  # Certificate backups
+├── app/                        # Flutter native client (Android + iOS)
+│   ├── lib/
+│   │   ├── main.dart
+│   │   ├── providers/          # ChatProvider, SessionProvider
+│   │   ├── screens/            # SetupScreen, ChatScreen, SessionListScreen
+│   │   ├── services/           # ChatService, SettingsService, NotificationService, UpdateService
+│   │   └── widgets/            # InputBar (voice + file picker), MessageBubble, ToolCard
+│   ├── android/                # package com.multicc.multicc_app
+│   └── ios/                    # bundle com.multicc.multiccApp
+│
+├── sessions.json               # Persisted session registry (gitignored)
+├── chat_history/               # Per-session chat transcripts (gitignored)
+├── voice_examples.json         # STT correction history (50-entry FIFO)
+├── whisper_vocab.json          # Auto-learned vocabulary (100-term LRU)
+├── push_subscriptions.json     # Web Push subscription store
+├── wechat-config.json          # WeChat bridge configuration
+└── cert.pem / key.pem          # Auto-generated self-signed TLS cert
 ```
 
-### How It Works
+### How a message flows
+
+**Terminal mode:**
 
 ```
-Browser (xterm.js)
-    │
-    ├── WebSocket ──────► Express Server
-    │                         │
-    │                    tmux session
-    │                    ┌─────────┐
-    │                    │ claude   │  ← Claude Code CLI
-    │                    └─────────┘
-    │                         │
-    │   pipe-pane + FIFO      │  output
-    │◄────────────────────────┘
-    │
-    ├── POST /api/voice/stt ──► Whisper API (Groq/OpenRouter)
-    │
-    ├── POST /api/voice/refine ──► LLM API (OpenRouter) ──► SSE stream
-    │
-    └── WebSocket (manage.js) ──► per-session monitoring ──► Push notifications
+browser keystroke → ws → tmux send-keys → claude → tmux pipe-pane → FIFO → ws → xterm render
+```
+
+**Chat mode:**
+
+```
+user message
+  → ws → server.js (chatProviderSpawn)
+  → claude --output-format stream-json [--resume <id>]
+  → stdout stream-json events
+  → server buffers last 500 events for reconnect replay
+  → fan-out to all attached clients (web + Flutter)
+  → chat bubble render with live tool cards
 ```
 
 **Key design decisions:**
 
-- **tmux as session backend** — Claude Code sessions survive server restarts; `tmux pipe-pane` with named FIFOs provides reliable output capture without node-pty limitations
-- **No database** — all state is in-memory `Map` objects backed by flat JSON files; simple, zero-dependency persistence
-- **Two-layer notifications** — client-side `speechSynthesis` for foreground alerts, server-side Web Push for background/closed-browser notifications
-- **Vocabulary learning loop** — user corrections flow from `/api/voice/feedback` → `voice_examples.json` → `whisper_vocab.json` → Whisper prompt → better future transcriptions
+- **tmux for terminal, raw spawn for chat.** Terminal needs persistent TTY-backed state and survives disconnects via tmux. Chat is turn-based, so the server spawns `claude` per user turn, relying on `--resume` to keep conversational continuity.
+- **No database.** All state is in-memory `Map` objects persisted to flat JSON files.
+- **Single auth layer.** `ACCESS_TOKEN` → HTTP-only `multicc_auth` cookie → applied uniformly to REST, WebSocket, and static file routes (with JS/CSS exemption for login-page rendering).
+- **Vocabulary learning loop.** Corrections flow from `/api/voice/feedback` → `voice_examples.json` → frequency ranking → `whisper_vocab.json` → Whisper `prompt` param.
+- **Reconnect-safe chat.** Every chat WS connect replays the buffered events before resuming live, so the client can rebuild its bubble state deterministically.
 
 ---
 
@@ -309,6 +313,7 @@ Browser (xterm.js)
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Kill and delete a session |
 | `POST` | `/api/sessions/:id/relocate` | Change session's working directory |
+| `POST` | `/api/sessions/:id/restart` | Restart a dead terminal session in place |
 
 ### Files
 
@@ -321,170 +326,117 @@ Browser (xterm.js)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/voice/stt` | Upload audio for Whisper transcription (multipart `file` field) |
-| `POST` | `/api/voice/refine` | Stream AI-refined text via SSE (`{ raw }` JSON body) |
-| `POST` | `/api/voice/feedback` | Submit correction feedback (`{ raw, refined, userFinal }`) |
-| `GET` | `/api/voice/vocab` | Get learned vocabulary terms |
-| `DELETE` | `/api/voice/vocab/:term` | Remove a vocabulary term |
-| `GET` | `/api/voice/test-sse` | Debug: test SSE streaming |
+| `POST` | `/api/voice/stt` | Multipart audio upload → Whisper transcription |
+| `POST` | `/api/voice/refine` | `{ raw }` → SSE stream of refined text |
+| `POST` | `/api/voice/feedback` | `{ raw, refined, userFinal }` → correction log |
+| `GET` | `/api/voice/vocab` | Learned vocabulary terms |
+| `DELETE` | `/api/voice/vocab/:term` | Remove a term |
+| `GET` / `POST` | `/api/settings/voice` | Get / update voice configuration (hot-reload) |
 
-### Voice Settings
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/settings/voice` | Get current voice/STT configuration |
-| `POST` | `/api/settings/voice` | Update voice/STT configuration |
-
-### Push Notifications
+### Push / Notifications
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/push/vapid-key` | Get VAPID public key |
-| `POST` | `/api/push/subscribe` | Register push subscription |
-| `DELETE` | `/api/push/subscribe` | Remove push subscription |
+| `GET` | `/api/push/vapid-key` | VAPID public key |
+| `POST` / `DELETE` | `/api/push/subscribe` | Register / remove push subscription |
+| `POST` | `/api/push/test` | Fire a test push to all subscribers |
+| `POST` | `/api/bark/test` | Fire a test Bark push |
+| `POST` | `/api/webhook/test` | Fire a test webhook |
 
 ### WeChat Bridge
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/wechat/status` | Bridge running state |
-| `GET` | `/api/wechat/config` | Get bridge configuration |
-| `POST` | `/api/wechat/config` | Update bridge configuration |
-| `POST` | `/api/wechat/start` | Start the bridge |
-| `POST` | `/api/wechat/stop` | Stop the bridge |
+| `GET` / `POST` | `/api/wechat/config` | Get / update bridge config |
+| `POST` | `/api/wechat/start` | Start bridge |
+| `POST` | `/api/wechat/stop` | Stop bridge |
 | `POST` | `/api/wechat/send` | Send message to PTY or WeChat (`{ text, target }`) |
-| `GET` | `/api/wechat/log` | Get message log (supports `?since=<ms>`) |
+| `GET` | `/api/wechat/log` | Message log (`?since=<ms>`) |
 | `GET` | `/api/wechat/events` | SSE stream of live log entries |
 
-### Server Info
+### Server Info & Update
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/server-info` | Get server IP, port, protocol, URL, and token |
+| `GET` | `/api/server-info` | Server IP, port, protocol, URL, token |
+| `GET` | `/multicc.apk` | Latest Flutter APK (served from `public/multicc.apk`) |
 
 ### WebSocket Protocol
 
-**Connect:** `ws[s]://host/?id=<sessionId>&token=<token>`
-
-**Client -> Server:**
+**Terminal mode:** `ws[s]://host/?id=<sessionId>&token=<token>`
 
 ```jsonc
-{ "type": "input",  "data": "ls -la\r" }          // Terminal input
-{ "type": "resize", "cols": 120, "rows": 40 }      // Terminal resize
+// Client -> Server
+{ "type": "input",  "data": "ls -la\r" }
+{ "type": "resize", "cols": 120, "rows": 40 }
 { "type": "upload", "tempId": "up_xxx", "name": "file.txt", "mime": "text/plain", "data": "<base64>" }
+
+// Server -> Client
+{ "type": "session_id", "id": "a1b2c3d4" }
+{ "type": "output",     "data": "..." }
+{ "type": "exit",       "data": "..." }
+{ "type": "relocate",   "cwd": "/new/path" }
+{ "type": "file_saved", "tempId": "up_xxx", "path": "/tmp/multicc_xxx.txt", "name": "file.txt" }
 ```
 
-**Server -> Client:**
+**Chat mode:** `ws[s]://host/chat?id=<sessionId>&token=<token>`
 
 ```jsonc
-{ "type": "session_id", "id": "a1b2c3d4" }         // Session assigned
-{ "type": "output",     "data": "..." }             // Terminal output
-{ "type": "exit",       "data": "..." }             // Session ended
-{ "type": "relocate",   "cwd": "/new/path" }        // Directory changed
-{ "type": "file_saved", "tempId": "up_xxx", "path": "/tmp/webcc_xxx.txt", "name": "file.txt" }
+// Client -> Server
+{ "type": "user_message", "text": "refactor server.js", "files": [...] }
+{ "type": "cancel" }          // abort the in-flight turn
+{ "type": "clear" }           // wipe history and start a fresh claude session
+
+// Server -> Client
+{ "type": "system",    "subtype": "init", "is_streaming": false, "session_id": "..." }   // only the server's own init carries is_streaming
+{ "type": "stream_event", "event": { /* Claude stream-json event */ } }
+{ "type": "turn_end",  "ok": true }
+{ "type": "error",     "error": "..." }
 ```
 
 ---
 
-## Usage Guide
-
-### Voice Input Workflow
-
-1. Click the **microphone button** (or tap on mobile)
-2. Speak your command in natural language (supports mixed Chinese/English)
-3. Recording stops on second click; audio is uploaded for Whisper transcription
-4. The **Voice Panel** opens showing:
-   - **Raw text** — direct Whisper output (editable)
-   - **AI-refined text** — streaming LLM-processed version (editable)
-   - Timing info (queue, first-token, total latency)
-5. Choose **Use Raw**, **Use AI Text**, or edit either field before sending
-6. The chosen text is sent to the terminal; corrections are saved to improve future transcriptions
-
-### Dashboard Multi-Session Management
-
-1. Navigate to `/manage` (or `/manage?token=<token>`)
-2. Click **+ New Session** to create sessions
-3. Click any session card to view its terminal inline
-4. Watch for notification badges:
-   - **Yellow "等待操作"** — Claude is waiting for input (Y/n, Allow/Deny, etc.)
-   - **Green "已完成"** — Claude has finished its task
-5. Configure voice settings in the collapsible **Voice Settings** section at the bottom
-6. Use the **QR** button to share access with your phone
-
-### WeChat Bridge
-
-1. Start a [`wechat-mcp`](https://github.com/user/wechat-mcp) server
-2. Navigate to `/wechat` in WebCC
-3. Configure:
-   - **MCP URL**: Your wechat-mcp server address (default `http://localhost:8000/mcp`)
-   - **Chat Name**: The WeChat contact or group name to monitor
-   - **Session**: Which WebCC session to bind to
-4. Click **Start** to begin relaying
-5. In WeChat, send messages to the configured contact/group — they'll appear in Claude's terminal
-6. Claude's responses will be sent back to WeChat automatically
-7. Use `/help` in WeChat to see available commands
-
-### Mobile Best Practices
-
-- **Install as PWA**: Use "Add to Home Screen" in Safari/Chrome for a native app experience
-- **Accept the certificate**: On first visit, you must accept the self-signed certificate
-- **Use the mobile input bar**: Special keys (Esc, Tab, Ctrl+C, arrows) are available as buttons below the terminal
-- **Voice input**: The microphone button works on mobile — ensure you grant microphone permission
-- **Push notifications**: Enable via the Dashboard's "Push" button to get notified even when the app is closed
-
----
-
-## Data Files
-
-WebCC stores all persistent data as flat JSON files in the project root:
-
-| File | Description | Max Size |
-|------|-------------|----------|
-| `sessions.json` | Session registry (`id`, `cwd`, `createdAt`) | Grows with sessions |
-| `voice_examples.json` | STT correction history | 50 entries (FIFO) |
-| `whisper_vocab.json` | Learned vocabulary terms | 100 terms (sorted by frequency) |
-| `push_subscriptions.json` | Web Push subscription objects | Grows with subscribers |
-| `wechat-config.json` | WeChat bridge configuration | Single object |
-| `cert.pem` / `key.pem` | Auto-generated TLS certificate | Regenerated on IP change |
-
----
-
-## Troubleshooting
+## FAQ
 
 ### "Certificate warning" on first visit
 
-This is expected. WebCC generates a self-signed certificate for HTTPS (required for microphone access and PWA). Click **Advanced** -> **Proceed** in your browser.
+Expected. MultiCC generates a self-signed cert for HTTPS (required for microphone + PWA). Click **Advanced** → **Proceed** once per device.
 
 ### Claude command not found
 
-WebCC searches common install paths automatically. If it still can't find `claude`, set the `CLAUDE_CMD` environment variable:
+MultiCC searches common install paths on startup. If it still can't find `claude`, set the env var:
 
 ```bash
 echo 'CLAUDE_CMD=/path/to/claude' >> .env
 ```
 
-### Voice input shows "此浏览器不支持录音"
+### "此浏览器不支持录音"
 
-`MediaRecorder` requires a **secure context** (HTTPS or localhost). Ensure you're accessing via `https://` and have accepted the certificate.
+`MediaRecorder` requires a secure context. Make sure you're on `https://` (or `http://localhost`) and that you've accepted the certificate.
 
-### "fetch failed" on voice STT
+### Flutter app can't reach the server from my phone
 
-This usually means the server can't reach the Whisper API. Check:
-1. `WHISPER_API_KEY` is set in `.env`
-2. `WHISPER_BASE_URL` is correct (e.g., `https://api.groq.com/openai/v1` for Groq)
-3. Your server has internet access
-
-### Session shows "Disconnected" and won't reconnect
-
-If using `ACCESS_TOKEN`, ensure the token is in your URL (`?token=<token>`). WebCC preserves the token across reconnections, but clearing the URL manually will lose it.
+- Check the phone is on the same LAN.
+- Open `https://<your-ip>:3443` in the phone's browser first and accept the cert — the Flutter app piggybacks on the system trust store.
+- Confirm `ACCESS_TOKEN` is set in the Flutter setup screen if the server has one.
 
 ### tmux sessions pile up
 
-WebCC names its tmux sessions `webcc-<id>`. To clean up orphaned sessions:
+Terminal-mode sessions are named `multicc-<id>`. To clean up orphans:
 
 ```bash
-tmux list-sessions | grep webcc | cut -d: -f1 | xargs -I{} tmux kill-session -t {}
+tmux list-sessions | grep multicc | cut -d: -f1 | xargs -I{} tmux kill-session -t {}
 ```
+
+### I upgraded from WebCC and my app settings are gone
+
+The rename changed persistence keys (`webcc_*` → `multicc_*`) and the Android/iOS package identifiers (`com.webcc.*` → `com.multicc.*`). Consequences:
+
+- **Web UI:** you'll get logged out once, and notification/voice toggles reset to defaults.
+- **Flutter app:** install it as a **new app** (old one stays side-by-side until you uninstall it). Setup screen will ask for host / token / session again.
+- **launchd service:** `./webcc uninstall` first under the old checkout, then `./multicc install` under the new checkout — the `Label` changed from `com.webcc.server` to `com.multicc.server`.
+- **Running tmux sessions** named `webcc-*` are orphaned; kill them with the command above (substituting `webcc`).
 
 ---
 
@@ -492,49 +444,39 @@ tmux list-sessions | grep webcc | cut -d: -f1 | xargs -I{} tmux kill-session -t 
 
 | Component | Technology |
 |-----------|------------|
-| **Server** | Node.js + Express |
-| **Terminal Backend** | tmux + pipe-pane + named FIFO |
-| **WebSocket** | ws |
-| **Frontend Terminal** | xterm.js 5.3 (FitAddon, WebLinksAddon) |
-| **Voice STT** | Whisper API (Groq / OpenRouter / OpenAI-compatible) |
-| **Voice Refinement** | OpenRouter LLM (SSE streaming) |
-| **Push Notifications** | Web Push (VAPID) via web-push |
-| **WeChat Integration** | MCP (Model Context Protocol) over HTTP |
-| **TLS** | Auto-generated self-signed certificates via openssl |
-| **PWA** | Service Worker + Web App Manifest |
+| **Server** | Node.js + Express + ws |
+| **Terminal backend** | tmux + pipe-pane + named FIFO |
+| **Chat backend** | `claude --output-format stream-json` with `--resume` |
+| **Web frontend** | vanilla JS, xterm.js 5.3, zero build step |
+| **Mobile app** | Flutter 3.8, `xterm`, `web_socket_channel`, `shared_preferences`, `flutter_local_notifications` |
+| **Voice STT** | Whisper (Groq / OpenRouter / OpenAI-compatible) |
+| **Voice refinement** | OpenRouter LLM over SSE |
+| **Notifications** | Web Push (VAPID) + Bark + generic webhook |
+| **WeChat** | iLink API (default) or MCP (legacy) |
+| **TLS** | Auto-generated self-signed certs with SAN IPs |
+| **Service manager** | macOS `launchd` via `./multicc install` |
 
-### Dependencies
+### Runtime dependencies
 
 ```
 express          ^4.18.2    HTTP server and routing
 ws               ^8.16.0    WebSocket server
 multer           ^1.4.5     Multipart file upload handling
 web-push         ^3.6.7     VAPID push notifications
-better-sqlite3   ^12.6.2    SQLite (available for future features)
+node-pty         ^1.0.0     PTY fallback (terminal recovery path)
+better-sqlite3   ^12.6.2    Reserved for future features
 ```
 
-> **Zero frontend build step** — all client code is vanilla JavaScript served as static files. No webpack, no bundler, no transpiler.
-
----
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the branch (`git push origin feat/amazing-feature`)
-5. Open a Pull Request
+> **Zero frontend build step.** All web client code is plain JavaScript served as static files.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
 
 ---
 
 <p align="center">
-  <sub>Built with Claude Code</sub>
+  <sub>Built with Claude Code · https://github.com/lsjwzh/MultiCC</sub>
 </p>

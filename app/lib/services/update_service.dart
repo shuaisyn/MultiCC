@@ -7,7 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'settings_service.dart';
 
 class UpdateService {
-  static const _keyLastMtime = 'webcc_apk_mtime';
+  static const _keyLastMtime = 'multicc_apk_mtime';
 
   static Future<void> checkUpdate(BuildContext context, SettingsService settings) async {
     if (!settings.isConfigured) return;
@@ -64,7 +64,7 @@ class UpdateService {
         if (shouldUpdate == true) {
           await prefs.setString(_keyLastMtime, serverMtime);
           // Build download URL with token for authentication
-          var downloadUrl = settings.buildHttpUrl('/webcc.apk');
+          var downloadUrl = settings.buildHttpUrl('/multicc.apk');
           if (settings.token.isNotEmpty) {
             downloadUrl += '?token=${Uri.encodeQueryComponent(settings.token)}';
           }

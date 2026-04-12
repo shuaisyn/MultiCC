@@ -8,7 +8,7 @@ const _params = new URLSearchParams(location.search);
 const _token = _params.get('token') || '';
 let _cwd = _params.get('cwd') || '';
 const _sessionName = _params.get('session') || '';  // dashboard session name
-const _hasNativeBridge = typeof window.WebCCBridge !== 'undefined' && !!window.WebCCBridge;
+const _hasNativeBridge = typeof window.MultiCCBridge !== 'undefined' && !!window.MultiCCBridge;
 
 function withToken(url) {
   if (!_token) return url;
@@ -451,7 +451,7 @@ function replayHistory(messages) {
       messagesEl.appendChild(div);
     }
     } catch (err) {
-      console.warn('[webcc] replayHistory: skipped message', mi, err.message);
+      console.warn('[multicc] replayHistory: skipped message', mi, err.message);
     }
   }
   scrollToBottom();
@@ -703,7 +703,7 @@ function hideMicToast() {
 
 function startRecording() {
   if (_hasNativeBridge) {
-    window.WebCCBridge.startRecording();
+    window.MultiCCBridge.startRecording();
     isRecording = true;
     micBtn.classList.add('recording');
     showMicToast('Recording...');
@@ -738,7 +738,7 @@ function startRecording() {
 function stopRecording() {
   if (_hasNativeBridge && isRecording) {
     showMicToast('Processing...');
-    try { window.WebCCBridge.stopRecording(); } catch (_) {}
+    try { window.MultiCCBridge.stopRecording(); } catch (_) {}
     isRecording = false;
     micBtn.classList.remove('recording');
     return;
@@ -774,8 +774,8 @@ async function uploadAudioForSTT(blob) {
 }
 
 // Native bridge callbacks
-window.__webccRecStarted = () => {};
-window.__webccRecReady = async () => {
+window.__multiccRecStarted = () => {};
+window.__multiccRecReady = async () => {
   isRecording = false;
   micBtn.classList.remove('recording');
   micBtn.classList.add('processing');
@@ -790,7 +790,7 @@ window.__webccRecReady = async () => {
     micBtn.classList.remove('processing');
   }
 };
-window.__webccRecError = (msg) => {
+window.__multiccRecError = (msg) => {
   isRecording = false;
   micBtn.classList.remove('recording', 'processing');
   showMicToast('Record error: ' + msg);

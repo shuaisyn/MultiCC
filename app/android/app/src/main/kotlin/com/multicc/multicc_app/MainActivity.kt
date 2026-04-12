@@ -1,4 +1,4 @@
-package com.webcc.webcc_app
+package com.multicc.multicc_app
 
 import io.flutter.embedding.android.FlutterActivity
 

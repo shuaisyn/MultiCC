@@ -73,7 +73,7 @@ class _SetupScreenState extends State<SetupScreen> {
               children: [
                 // Logo
                 const Text(
-                  'WebCC',
+                  'MultiCC',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Color(0xFFf78166),

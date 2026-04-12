@@ -62,7 +62,7 @@ class McpClient {
     const res = await this.request('initialize', {
       protocolVersion: '2025-03-26',
       capabilities: {},
-      clientInfo: { name: 'webcc-wechat-bridge', version: '1.0.0' },
+      clientInfo: { name: 'multicc-wechat-bridge', version: '1.0.0' },
     });
     await this.notify('notifications/initialized');
     return res;
@@ -117,7 +117,7 @@ function _log(type, text) {
   for (const res of _sseClients) {
     try { res.write(`data: ${JSON.stringify(entry)}\n\n`); } catch (_) { _sseClients.delete(res); }
   }
-  console.log(`[webcc/wechat] [${type}] ${String(text).slice(0, 200)}`);
+  console.log(`[multicc/wechat] [${type}] ${String(text).slice(0, 200)}`);
 }
 
 function _hashMsg(text) {
@@ -428,7 +428,7 @@ router.get('/events', (req, res) => {
 function init(sessionsMap, persistedSessionsMap) {
   _sessions = sessionsMap;
   _persistedSessions = persistedSessionsMap;
-  console.log('[webcc/wechat] Bridge module initialized');
+  console.log('[multicc/wechat] Bridge module initialized');
 }
 
 module.exports = { router, init, onSessionOutput, loadConfig, startBridge, stopBridge };

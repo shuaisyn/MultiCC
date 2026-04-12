@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const https = require('https');
 
-// Allow self-signed certs for local WebCC server
+// Allow self-signed certs for local MultiCC server
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // ── Load .env (same approach as server.js) ──
@@ -17,7 +17,7 @@ try {
   });
 } catch (_) {}
 
-const WEBCC_BASE_URL = process.env.WEBCC_BASE_URL || 'https://localhost:3443';
+const MULTICC_BASE_URL = process.env.MULTICC_BASE_URL || 'https://localhost:3443';
 
 // ── Parse CLI args ──
 const args = process.argv.slice(2);
@@ -89,10 +89,10 @@ function diffSummary(a, b) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  STT: WebCC Whisper (POST /api/voice/stt, multipart)
+//  STT: MultiCC Whisper (POST /api/voice/stt, multipart)
 // ═══════════════════════════════════════════════════════════════
 
-async function webccWhisperSTT(audioPath) {
+async function multiccWhisperSTT(audioPath) {
   const audioData = fs.readFileSync(audioPath);
   const ext = path.extname(audioPath).slice(1) || 'ogg';
   const mimeMap = { ogg: 'audio/ogg', webm: 'audio/webm', wav: 'audio/wav', mp3: 'audio/mpeg' };
@@ -103,7 +103,7 @@ async function webccWhisperSTT(audioPath) {
   const blob = new Blob([audioData], { type: mime });
   formData.append('file', blob, path.basename(audioPath));
 
-  const response = await fetch(`${WEBCC_BASE_URL}/api/voice/stt`, {
+  const response = await fetch(`${MULTICC_BASE_URL}/api/voice/stt`, {
     method: 'POST',
     body: formData,
   });
@@ -112,7 +112,7 @@ async function webccWhisperSTT(audioPath) {
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`WebCC STT ${response.status}: ${errText.slice(0, 300)}`);
+    throw new Error(`MultiCC STT ${response.status}: ${errText.slice(0, 300)}`);
   }
 
   const data = await response.json();
@@ -120,14 +120,14 @@ async function webccWhisperSTT(audioPath) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  Refine: Call WebCC /api/voice/refine (SSE)
+//  Refine: Call MultiCC /api/voice/refine (SSE)
 // ═══════════════════════════════════════════════════════════════
 
-async function webccRefine(rawText) {
+async function multiccRefine(rawText) {
   const t0 = Date.now();
 
   return new Promise((resolve, reject) => {
-    const url = new URL(`${WEBCC_BASE_URL}/api/voice/refine`);
+    const url = new URL(`${MULTICC_BASE_URL}/api/voice/refine`);
     const postData = JSON.stringify({ raw: rawText });
 
     const options = {
@@ -235,11 +235,11 @@ async function main() {
   const refineResults = [];
 
   // ═══════════════════════════════════════
-  //  Test A: STT 对比 (WebCC Whisper vs Typeless)
+  //  Test A: STT 对比 (MultiCC Whisper vs Typeless)
   // ═══════════════════════════════════════
   if (!refineOnly) {
     console.log('\n' + '═'.repeat(60));
-    console.log('  测试 A: STT 对比（WebCC Whisper vs Typeless）');
+    console.log('  测试 A: STT 对比（MultiCC Whisper vs Typeless）');
     console.log('═'.repeat(60));
 
     for (let i = 0; i < testRows.length; i++) {
@@ -249,7 +249,7 @@ async function main() {
       console.log(`\n[${i + 1}/${testRows.length}] ${fileName} (${row.duration}s, ${(fileSize / 1024).toFixed(0)}KB, ${row.mode})`);
 
       try {
-        const result = await webccWhisperSTT(row.audio_local_path);
+        const result = await multiccWhisperSTT(row.audio_local_path);
         const sim = similarity(result.text, row.refined_text);
 
         sttResults.push({
@@ -286,11 +286,11 @@ async function main() {
   }
 
   // ═══════════════════════════════════════
-  //  Test B: AI 润色对比 (WebCC refine)
+  //  Test B: AI 润色对比 (MultiCC refine)
   // ═══════════════════════════════════════
   if (!sttOnly) {
     console.log('\n' + '═'.repeat(60));
-    console.log('  测试 B: 全链路 — Whisper STT → WebCC Refine');
+    console.log('  测试 B: 全链路 — Whisper STT → MultiCC Refine');
     console.log('═'.repeat(60));
 
     // Use voice_transcript entries (pure transcription comparison is meaningful)
@@ -306,7 +306,7 @@ async function main() {
 
         try {
           // Step 1: Whisper STT
-          const stt = await webccWhisperSTT(row.audio_local_path);
+          const stt = await multiccWhisperSTT(row.audio_local_path);
           console.log(`  1) Whisper STT (${stt.latencyMs}ms): ${truncate(stt.text)}`);
 
           if (!stt.text) {
@@ -320,8 +320,8 @@ async function main() {
             continue;
           }
 
-          // Step 2: WebCC Refine
-          const refine = await webccRefine(stt.text);
+          // Step 2: MultiCC Refine
+          const refine = await multiccRefine(stt.text);
           const totalMs = stt.latencyMs + refine.latencyMs;
           const simStt = similarity(stt.text, row.refined_text);
           const simRefine = similarity(refine.text, row.refined_text);
@@ -367,13 +367,13 @@ async function main() {
 function printReport(sttResults, refineResults) {
   console.log('\n\n');
   console.log('═'.repeat(60));
-  console.log('  WebCC Whisper vs Typeless 对比测试报告');
+  console.log('  MultiCC Whisper vs Typeless 对比测试报告');
   console.log('═'.repeat(60));
 
   // ── STT Results ──
   if (sttResults.length > 0) {
     console.log('\n┌─────────────────────────────────────────────────────────┐');
-    console.log('│  STT 对比（WebCC Whisper vs Typeless refined_text）     │');
+    console.log('│  STT 对比（MultiCC Whisper vs Typeless refined_text）     │');
     console.log('└─────────────────────────────────────────────────────────┘');
 
     for (const r of sttResults) {
@@ -411,7 +411,7 @@ function printReport(sttResults, refineResults) {
   // ── Refine Results ──
   if (refineResults.length > 0) {
     console.log('\n┌─────────────────────────────────────────────────────────┐');
-    console.log('│  全链路: Whisper STT → WebCC Refine vs Typeless        │');
+    console.log('│  全链路: Whisper STT → MultiCC Refine vs Typeless        │');
     console.log('└─────────────────────────────────────────────────────────┘');
 
     for (const r of refineResults) {
@@ -460,7 +460,7 @@ function printReport(sttResults, refineResults) {
     console.log(`  全链路:  ${vr.length} 条 | vs Typeless 相似度 ${(avgSimR * 100).toFixed(1)}% | 总延迟 avg ${avgTotal.toFixed(0)}ms`);
   }
   if (vs.length === 0 && vr.length === 0) {
-    console.log('  所有测试均失败，请检查 WebCC 服务是否运行 及 .env 配置。');
+    console.log('  所有测试均失败，请检查 MultiCC 服务是否运行 及 .env 配置。');
   }
 
   console.log('\n  用法: node test-voice-compare.js [--stt-only] [--refine-only] [--limit N] [--mode voice_transcript]');

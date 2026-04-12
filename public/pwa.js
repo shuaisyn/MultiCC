@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * PWA registration and push notification subscription for WebCC.
+ * PWA registration and push notification subscription for MultiCC.
  * Include this script on any page that needs push notifications.
  *
  * Features:
@@ -119,12 +119,12 @@ async function validateSubscription() {
     }
 
     // Check if endpoint changed since last time
-    const savedEndpoint = localStorage.getItem('webcc_push_endpoint');
+    const savedEndpoint = localStorage.getItem('multicc_push_endpoint');
     if (savedEndpoint && savedEndpoint !== _pushSubscription.endpoint) {
       console.log('[pwa] Push endpoint changed — updating server');
       await syncSubscriptionToServer(_pushSubscription);
     }
-    localStorage.setItem('webcc_push_endpoint', _pushSubscription.endpoint);
+    localStorage.setItem('multicc_push_endpoint', _pushSubscription.endpoint);
 
   } catch (err) {
     console.error('[pwa] Subscription validation failed:', err);
@@ -146,7 +146,7 @@ async function syncSubscriptionToServer(sub) {
       headers,
       body: JSON.stringify(sub.toJSON()),
     });
-    localStorage.setItem('webcc_push_endpoint', sub.endpoint);
+    localStorage.setItem('multicc_push_endpoint', sub.endpoint);
   } catch (err) {
     console.error('[pwa] Sync subscription failed:', err);
   }
@@ -205,7 +205,7 @@ async function unsubscribePush() {
     const endpoint = _pushSubscription.endpoint;
     await _pushSubscription.unsubscribe();
     _pushSubscription = null;
-    localStorage.removeItem('webcc_push_endpoint');
+    localStorage.removeItem('multicc_push_endpoint');
 
     const token = new URLSearchParams(location.search).get('token');
     const headers = { 'Content-Type': 'application/json' };

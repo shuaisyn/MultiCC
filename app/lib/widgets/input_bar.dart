@@ -115,7 +115,7 @@ class _InputBarState extends State<InputBar> {
   Future<void> _startRecording() async {
     if (!await _recorder.hasPermission()) return;
     final dir = await getTemporaryDirectory();
-    final filePath = '${dir.path}/webcc_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    final filePath = '${dir.path}/multicc_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
     await _recorder.start(
       const RecordConfig(encoder: AudioEncoder.aacLc, numChannels: 1, sampleRate: 16000),
       path: filePath,

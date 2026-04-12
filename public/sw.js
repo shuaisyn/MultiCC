@@ -1,15 +1,15 @@
 'use strict';
 
-const CACHE_NAME = 'webcc-v1';
+const CACHE_NAME = 'multicc-v1';
 
 // Push notification received
 self.addEventListener('push', (event) => {
-  let title = 'WebCC';
+  let title = 'MultiCC';
   let options = {
     body: 'New notification',
     icon: '/icon.svg',
     badge: '/icon.svg',
-    tag: 'webcc-general',
+    tag: 'multicc-general',
     renotify: true,
     vibrate: [200, 100, 200],
     data: { url: '/manage' },
@@ -22,15 +22,15 @@ self.addEventListener('push', (event) => {
     try {
       payload = event.data.json();
     } catch (_) {
-      payload = { title: 'WebCC', body: event.data.text() };
+      payload = { title: 'MultiCC', body: event.data.text() };
     }
 
-    title = payload.title || 'WebCC';
+    title = payload.title || 'MultiCC';
     options = {
       body: payload.body || payload.message || '',
       icon: '/icon.svg',
       badge: '/icon.svg',
-      tag: payload.tag || `webcc-${payload.sessionId || 'general'}`,
+      tag: payload.tag || `multicc-${payload.sessionId || 'general'}`,
       renotify: true,
       vibrate: [200, 100, 200],
       data: {
@@ -55,7 +55,7 @@ self.addEventListener('push', (event) => {
   } catch (err) {
     // Fallback: show a generic notification on any parse error
     console.error('[sw] Push parse error:', err);
-    title = 'WebCC';
+    title = 'MultiCC';
     options.body = 'New notification (tap to open)';
   }
 

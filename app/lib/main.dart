@@ -19,12 +19,12 @@ Future<void> main() async {
 
   await NotificationService.init();
   final settings = await SettingsService.getInstance();
-  runApp(WebCCApp(settings: settings));
+  runApp(MultiCCApp(settings: settings));
 }
 
-class WebCCApp extends StatelessWidget {
+class MultiCCApp extends StatelessWidget {
   final SettingsService settings;
-  const WebCCApp({super.key, required this.settings});
+  const MultiCCApp({super.key, required this.settings});
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +39,7 @@ class WebCCApp extends StatelessWidget {
     }
 
     return MaterialApp(
-      title: 'WebCC',
+      title: 'MultiCC',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

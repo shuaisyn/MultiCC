@@ -1,10 +1,10 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SettingsService {
-  static const _keyHost = 'webcc_host';
-  static const _keyToken = 'webcc_token';
-  static const _keySession = 'webcc_session';
-  static const _keyCwd = 'webcc_cwd';
+  static const _keyHost = 'multicc_host';
+  static const _keyToken = 'multicc_token';
+  static const _keySession = 'multicc_session';
+  static const _keyCwd = 'multicc_cwd';
 
   static SettingsService? _instance;
   late SharedPreferences _prefs;
