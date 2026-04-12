@@ -917,34 +917,25 @@ vpUseRaw.onclick = () => useVoiceText(vpRaw.value);
 vpUseRefined.onclick = () => useVoiceText(_vpRefinedFinal || vpRefined.value || vpRaw.value);
 
 async function fetchRefined(raw) {
-  vpStatus.textContent = 'processing...';
+  vpStatus.textContent = 'processing (AuxQueue)...';
+  const t0 = Date.now();
   try {
     const res = await fetch(withToken('/api/voice/refine'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw }),
     });
-    if (!res.body) { vpStatus.textContent = 'no stream'; return; }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6).trim();
-        if (payload === '[DONE]') { vpStatus.textContent = 'done'; return; }
-        try {
-          const p = JSON.parse(payload);
-          if (p.text) { vpRefined.value += p.text; _vpRefinedFinal = vpRefined.value; }
-        } catch (_) {}
-      }
+    const data = await res.json();
+    const clientMs = Date.now() - t0;
+    if (data.ok && data.text) {
+      vpRefined.value = data.text;
+      _vpRefinedFinal = data.text;
+      vpStatus.textContent = `done (${(data.ms / 1000).toFixed(1)}s server, ${(clientMs / 1000).toFixed(1)}s total)`;
+    } else {
+      vpRefined.value = data.text || '';
+      _vpRefinedFinal = vpRefined.value;
+      vpStatus.textContent = data.ok ? 'done' : `error: ${data.text || 'unknown'}`;
     }
-    vpStatus.textContent = 'done';
   } catch (e) {
     vpStatus.textContent = 'error';
     console.error('[voice] refine error:', e);

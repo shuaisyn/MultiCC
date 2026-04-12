@@ -1043,16 +1043,13 @@ app.delete('/api/uploads/cleanup', (req, res) => {
   }
 });
 
-app.post('/api/voice/refine', (req, res) => {
+app.post('/api/voice/refine', async (req, res) => {
   const reqId = `vr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const raw = (req.body.raw || '').trim();
   console.log(`[multicc/voice][${reqId}] POST /api/voice/refine received, raw length: ${raw.length}, raw: ${JSON.stringify(raw.slice(0, 100))}`);
 
   if (!raw) {
-    console.log(`[multicc/voice][${reqId}] Empty raw, sending immediate [DONE]`);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.write('data: [DONE]\n\n');
-    return res.end();
+    return res.json({ ok: true, text: '', ms: 0 });
   }
 
   const examples = loadVoiceExamples();
@@ -1073,97 +1070,20 @@ app.post('/api/voice/refine', (req, res) => {
 原始语音：${raw}
 直接输出优化后的文本，不要任何解释或前缀。`;
 
-  console.log(`[multicc/voice][${reqId}] Prompt length: ${prompt.length} chars`);
-  console.log(`[multicc/voice][${reqId}] Setting SSE response headers...`);
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');  // disable proxy buffering
-  res.flushHeaders();
-  console.log(`[multicc/voice][${reqId}] SSE headers flushed`);
-  // Disable Nagle's algorithm so small SSE chunks are sent immediately (important for TLS/HTTPS)
-  if (res.socket) {
-    res.socket.setNoDelay(true);
-    console.log(`[multicc/voice][${reqId}] Socket NoDelay set`);
-  }
-
-  // Send SSE comment heartbeats every 5s to prevent browser/proxy idle disconnects
-  const heartbeat = setInterval(() => {
-    if (!clientDisconnected) {
-      try { res.write(': heartbeat\n\n'); } catch (_) {}
-    }
-  }, 5000);
-
-  let clientDisconnected = false;
-  res.on('close', () => {
-    clientDisconnected = true;
-    clearInterval(heartbeat);
-    console.log(`[multicc/voice][${reqId}] Client disconnected (res close event)`);
-  });
-
-  // Helper: write SSE event and force flush (important for TLS/HTTPS)
-  function sseWrite(chunk) {
-    if (clientDisconnected) {
-      console.warn(`[multicc/voice][${reqId}] sseWrite skipped (client disconnected), chunk: ${JSON.stringify(chunk.slice(0, 100))}`);
-      return;
-    }
-    try {
-      const writeResult = res.write(chunk);
-      console.log(`[multicc/voice][${reqId}] res.write returned: ${writeResult}, chunk: ${JSON.stringify(chunk.slice(0, 120))}`);
-      // Force flush the underlying socket for TLS connections
-      if (res.socket && typeof res.socket.uncork === 'function') {
-        res.socket.cork();
-        res.socket.uncork();
-      }
-    } catch (writeErr) {
-      console.error(`[multicc/voice][${reqId}] sseWrite error:`, writeErr.message);
-    }
-  }
-
+  console.log(`[multicc/voice][${reqId}] Routing to AuxQueue (prompt ${prompt.length} chars)`);
   const t0 = Date.now();
-  console.log(`[multicc/voice][${reqId}] Calling OpenRouter API (model: ${OPENROUTER_MODEL})`);
 
-  callVoiceAPI(prompt, {
-    reqId,
-    onStart() {
-      console.log(`[multicc/voice][${reqId}] API request started`);
-      sseWrite(`data: ${JSON.stringify({ timing: 'queue', ms: 0 })}\n\n`);
-    },
-    onFirstToken(ms) {
-      console.log(`[multicc/voice][${reqId}] First token: ${ms}ms`);
-      sseWrite(`data: ${JSON.stringify({ timing: 'first_token', ms })}\n\n`);
-    },
-    onChunk(text) {
-      sseWrite(`data: ${JSON.stringify({ text })}\n\n`);
-    },
-    onDone() {
-      clearInterval(heartbeat);
-      const totalMs = Date.now() - t0;
-      console.log(`[multicc/voice][${reqId}] Done, total: ${totalMs}ms, clientDisconnected=${clientDisconnected}`);
-      if (!clientDisconnected) {
-        try {
-          sseWrite(`data: ${JSON.stringify({ timing: 'ai_process', ms: totalMs })}\n\n`);
-          sseWrite(`data: ${JSON.stringify({ timing: 'total', ms: totalMs })}\n\n`);
-          res.write('data: [DONE]\n\n');
-          res.end();
-        } catch (endErr) {
-          console.error(`[multicc/voice][${reqId}] Error ending response:`, endErr.message);
-        }
-      }
-    },
-    onError(msg) {
-      clearInterval(heartbeat);
-      console.error(`[multicc/voice][${reqId}] Error: ${msg}`);
-      if (!clientDisconnected) {
-        try {
-          res.write(`data: ${JSON.stringify({ text: `[错误: ${msg}]` })}\n\n`);
-          res.write('data: [DONE]\n\n');
-          res.end();
-        } catch (_) {}
-      }
-    },
-  });
+  try {
+    const result = await auxQueue.enqueue({ type: 'voice_refine', prompt, meta: { reqId } });
+    const ms = Date.now() - t0;
+    console.log(`[multicc/voice][${reqId}] AuxQueue done in ${ms}ms, text length: ${(result.text || '').length}`);
+    res.json({ ok: true, text: result.text || '', ms });
+  } catch (err) {
+    const ms = Date.now() - t0;
+    const errMsg = err?.cancelled ? 'cancelled' : (err?.message || String(err));
+    console.error(`[multicc/voice][${reqId}] AuxQueue error after ${ms}ms:`, errMsg);
+    res.json({ ok: false, text: `[错误: ${errMsg}]`, ms });
+  }
 });
 
 app.post('/api/voice/feedback', (req, res) => {
