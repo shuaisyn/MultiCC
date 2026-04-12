@@ -209,6 +209,15 @@ function handleEvent(msg) {
     case 'rate_limit_event':
       break;
 
+    case 'stream_end':
+      // Safety net: server confirms process exited — ensure cancel button is hidden
+      if (isStreaming) {
+        isStreaming = false;
+        finishStreaming();
+        updateUI();
+      }
+      break;
+
     case 'error':
       addSystemMsg(`Error: ${msg.error || JSON.stringify(msg)}`);
       isStreaming = false;
@@ -617,9 +626,15 @@ function truncate(s, n) {
 }
 
 /* ── Auto-resize textarea ── */
+let _lastTypingSent = 0;
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  // Notify server that user is typing (throttled: max once per 3s)
+  if (ws && ws.readyState === WebSocket.OPEN && Date.now() - _lastTypingSent > 3000) {
+    ws.send(JSON.stringify({ type: 'typing' }));
+    _lastTypingSent = Date.now();
+  }
 });
 
 // Desktop: Enter sends, Shift+Enter newline

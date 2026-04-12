@@ -528,12 +528,25 @@ function createSession(id, cwd) {
 app.use(express.json());
 
 app.get('/api/sessions', (req, res) => {
-  const list = [...persistedSessions.values()].map(p => {
+  const list = [...persistedSessions.values()]
+    .filter(p => p.type !== 'aux') // exclude __aux__ from normal listing
+    .map(p => {
     const active = sessions.get(p.id);
     return active
       ? { id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true }
       : { id: p.id, cwd: p.cwd, createdAt: p.createdAt, lastActivity: null, clients: 0, active: false };
   });
+  // Append __aux__ session info separately
+  const auxP = persistedSessions.get(AUX_SESSION_ID);
+  if (auxP) {
+    list.unshift({
+      id: AUX_SESSION_ID, cwd: auxP.cwd, createdAt: auxP.createdAt,
+      lastActivity: auxQueue.lastTaskTime ? new Date(auxQueue.lastTaskTime) : null,
+      clients: auxQueue.clients.size, active: auxQueue.processing,
+      type: 'aux', label: auxP.label || 'AI Assistant',
+      auxStatus: auxQueue.getStatus(),
+    });
+  }
   res.json(list);
 });
 
@@ -1739,6 +1752,228 @@ function triggerPush(sessionId, type, message) {
   console.log(`[multicc/push] Sent ${type} notification for session ${sessionId}`);
 }
 
+// ── AuxQueue: stateless claude -p AI service (intent classification, etc.) ──
+const AUX_SESSION_ID = '__aux__';
+const AUX_TIMEOUT_MS = 30000;
+const AUX_HISTORY_MAX = 200;
+
+const auxQueue = {
+  queue: [],          // [{ id, type, prompt, meta, cancelled, resolve, reject, ts }]
+  currentTask: null,
+  processing: false,
+  totalProcessed: 0,
+  lastTaskTime: null,
+  clients: new Set(), // WebSocket clients watching aux events
+  history: [],        // loaded from chat_history/__aux__.json
+
+  init() {
+    this.history = loadChatHistory(AUX_SESSION_ID);
+    // Register __aux__ as a special persisted session
+    if (!persistedSessions.has(AUX_SESSION_ID)) {
+      persistedSessions.set(AUX_SESSION_ID, {
+        id: AUX_SESSION_ID, cwd: __dirname, createdAt: new Date(), type: 'aux', label: 'AI Assistant',
+      });
+      savePersistedSessions();
+    } else {
+      const existing = persistedSessions.get(AUX_SESSION_ID);
+      if (existing.type !== 'aux') { existing.type = 'aux'; existing.label = 'AI Assistant'; savePersistedSessions(); }
+    }
+    console.log('[multicc/aux] AuxQueue initialized');
+  },
+
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      task.id = task.id || crypto.randomUUID();
+      task.ts = Date.now();
+      task.cancelled = false;
+      task.resolve = resolve;
+      task.reject = reject;
+      this.queue.push(task);
+      this.broadcast({ type: 'aux_event', status: 'queued', task: { id: task.id, type: task.type, meta: task.meta }, queueDepth: this.queue.length });
+      console.log(`[multicc/aux] Enqueued ${task.type} (queue: ${this.queue.length})`);
+      this.drain();
+    });
+  },
+
+  cancel(taskId) {
+    // In queue but not yet processing → remove
+    const idx = this.queue.findIndex(t => t.id === taskId);
+    if (idx !== -1) {
+      const task = this.queue.splice(idx, 1)[0];
+      task.reject({ cancelled: true });
+      this.broadcast({ type: 'aux_event', status: 'cancelled', task: { id: taskId } });
+      console.log(`[multicc/aux] Cancelled queued task ${taskId}`);
+      return;
+    }
+    // Currently executing → mark cancelled (let it finish, discard result)
+    if (this.currentTask?.id === taskId) {
+      this.currentTask.cancelled = true;
+      this.broadcast({ type: 'aux_event', status: 'cancelled', task: { id: taskId } });
+      console.log(`[multicc/aux] Marked in-flight task ${taskId} as cancelled`);
+    }
+  },
+
+  async drain() {
+    if (this.processing || this.queue.length === 0) return;
+    this.processing = true;
+
+    const task = this.queue.shift();
+    this.currentTask = task;
+    this.broadcast({ type: 'aux_event', status: 'processing', task: { id: task.id, type: task.type, meta: task.meta } });
+
+    const startTime = Date.now();
+    try {
+      const resultText = await this.execute(task);
+      const durationMs = Date.now() - startTime;
+      this.totalProcessed++;
+      this.lastTaskTime = Date.now();
+
+      // Save to history
+      appendChatMessage(AUX_SESSION_ID, {
+        role: 'user', content: task.prompt, ts: task.ts,
+        taskType: task.type, taskId: task.id, meta: task.meta,
+      });
+      appendChatMessage(AUX_SESSION_ID, {
+        role: 'assistant', content: resultText, ts: Date.now(),
+        taskId: task.id, durationMs, cancelled: task.cancelled,
+      });
+
+      if (task.cancelled) {
+        task.reject({ cancelled: true });
+        this.broadcast({ type: 'aux_event', status: 'done', task: { id: task.id, type: task.type }, result: resultText, durationMs, cancelled: true });
+      } else {
+        task.resolve({ text: resultText, cancelled: false });
+        this.broadcast({ type: 'aux_event', status: 'done', task: { id: task.id, type: task.type }, result: resultText, durationMs, cancelled: false });
+      }
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      const errMsg = err?.message || String(err);
+      appendChatMessage(AUX_SESSION_ID, {
+        role: 'user', content: task.prompt, ts: task.ts,
+        taskType: task.type, taskId: task.id, meta: task.meta,
+      });
+      appendChatMessage(AUX_SESSION_ID, {
+        role: 'assistant', content: `[ERROR] ${errMsg}`, ts: Date.now(),
+        taskId: task.id, durationMs, error: true,
+      });
+      task.reject(err);
+      this.broadcast({ type: 'aux_event', status: 'error', task: { id: task.id, type: task.type }, error: errMsg, durationMs });
+      console.error(`[multicc/aux] Task ${task.id} failed:`, errMsg);
+    }
+
+    this.currentTask = null;
+    this.processing = false;
+    this.drain(); // process next
+  },
+
+  execute(task) {
+    return new Promise((resolve, reject) => {
+      const args = ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose', task.prompt];
+      const proc = spawn(CLAUDE_CMD, args, {
+        cwd: __dirname,
+        env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let assistantText = '';
+      let lineBuf = '';
+      let stderrBuf = '';
+
+      const timeout = setTimeout(() => {
+        try { proc.kill('SIGTERM'); } catch (_) {}
+        reject(new Error('timeout'));
+      }, AUX_TIMEOUT_MS);
+
+      proc.stdout.on('data', (chunk) => {
+        lineBuf += chunk.toString();
+        const lines = lineBuf.split('\n');
+        lineBuf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const evt = JSON.parse(line);
+            if (evt.type === 'assistant' && evt.message?.content) {
+              for (const block of evt.message.content) {
+                if (block.type === 'text') assistantText += block.text;
+              }
+            }
+            if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+              assistantText += evt.delta.text;
+            }
+          } catch (_) {}
+        }
+      });
+
+      proc.stderr.on('data', (chunk) => { stderrBuf += chunk.toString(); });
+
+      proc.on('close', (code) => {
+        clearTimeout(timeout);
+        // Process remaining buffer
+        if (lineBuf.trim()) {
+          try {
+            const evt = JSON.parse(lineBuf);
+            if (evt.type === 'assistant' && evt.message?.content) {
+              for (const block of evt.message.content) {
+                if (block.type === 'text') assistantText += block.text;
+              }
+            }
+          } catch (_) {}
+        }
+        if (assistantText) {
+          resolve(assistantText);
+        } else if (code !== 0) {
+          reject(new Error(`claude exited ${code}: ${stderrBuf.slice(0, 300)}`));
+        } else {
+          resolve('');
+        }
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  },
+
+  broadcast(payload) {
+    const json = JSON.stringify(payload);
+    for (const client of this.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        try { client.send(json); } catch (_) {}
+      }
+    }
+  },
+
+  getStatus() {
+    return {
+      processing: this.processing,
+      queueDepth: this.queue.length,
+      currentTask: this.currentTask ? { id: this.currentTask.id, type: this.currentTask.type } : null,
+      totalProcessed: this.totalProcessed,
+      lastTaskTime: this.lastTaskTime,
+    };
+  },
+};
+
+// REST API for aux
+app.get('/api/aux/status', (req, res) => {
+  res.json(auxQueue.getStatus());
+});
+
+app.get('/api/aux/history', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, AUX_HISTORY_MAX);
+  const history = loadChatHistory(AUX_SESSION_ID);
+  res.json(history.slice(-limit));
+});
+
+app.post('/api/aux/enqueue', (req, res) => {
+  const { type, prompt, meta } = req.body || {};
+  if (!prompt) return res.status(400).json({ error: 'prompt required' });
+  auxQueue.enqueue({ type: type || 'manual', prompt, meta: meta || {} })
+    .then(result => res.json({ ok: true, result: result.text }))
+    .catch(err => res.json({ ok: false, error: err?.message || 'cancelled' }));
+});
+
 // ── WeChat Bridge ──
 wechatBridge.init(sessions, persistedSessions, tmuxWriteInput);
 app.use('/api/wechat', wechatBridge.router);
@@ -1812,7 +2047,8 @@ function saveChatHistory(sessionName) {
 function appendChatMessage(sessionName, msg) {
   const history = loadChatHistory(sessionName);
   history.push(msg);
-  while (history.length > MAX_CHAT_MESSAGES) history.shift();
+  const limit = sessionName === AUX_SESSION_ID ? AUX_HISTORY_MAX : MAX_CHAT_MESSAGES;
+  while (history.length > limit) history.shift();
   saveChatHistory(sessionName);
 }
 
@@ -1831,6 +2067,57 @@ function chatBroadcast(sessionName, payload) {
       try { client.send(json); } catch (_) {}
     }
   }
+}
+
+// ── Chat intent classification: 30s delayed trigger ──
+const CLASSIFY_DELAY_MS = 30000;
+
+function cancelPendingClassify(cs) {
+  if (cs.pendingClassifyTimer) {
+    clearTimeout(cs.pendingClassifyTimer);
+    cs.pendingClassifyTimer = null;
+  }
+  if (cs.pendingClassifyTaskId) {
+    auxQueue.cancel(cs.pendingClassifyTaskId);
+    cs.pendingClassifyTaskId = null;
+  }
+}
+
+function scheduleIntentClassify(cs, sessionName) {
+  cancelPendingClassify(cs); // clear any previous pending
+
+  const text = cs.currentAssistantText;
+  if (!text || text.length < 20) return;
+
+  const tail = text.slice(-1500);
+  const sessionId = persistedSessions.get(sessionName)?.id || sessionName;
+
+  cs.pendingClassifyTimer = setTimeout(() => {
+    cs.pendingClassifyTimer = null;
+    const taskId = crypto.randomUUID();
+    cs.pendingClassifyTaskId = taskId;
+
+    auxQueue.enqueue({
+      id: taskId,
+      type: 'intent_classify',
+      prompt: `你是一个意图分类器。判断以下 AI 助手回复的结尾状态，只回复一个字母：
+C — 任务已完成，不需要用户操作
+W — 正在等待用户回复或决策
+
+回复内容：
+${tail}`,
+      meta: { sessionName, sessionId },
+    }).then(result => {
+      cs.pendingClassifyTaskId = null;
+      if (result.cancelled) return;
+      const state = result.text.trim().toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+      const msg = state === 'waiting' ? '等待操作' : '任务已完成';
+      triggerPush(sessionId, state, `[Chat] ${msg}`);
+      console.log(`[multicc/aux] Intent classify for ${sessionName}: ${state}`);
+    }).catch(() => {
+      cs.pendingClassifyTaskId = null;
+    });
+  }, CLASSIFY_DELAY_MS);
 }
 
 // ── Chat mode: stream-json WebSocket ──
@@ -1872,6 +2159,9 @@ function handleChatWs(ws, req, urlObj) {
       isStreaming: false,
       // Replay buffer: stream events from current turn, for reconnecting clients
       streamReplay: [],
+      // AuxQueue intent classification: 30s delayed trigger
+      pendingClassifyTimer: null,
+      pendingClassifyTaskId: null,
     };
     chatSessions.set(sessionName, cs);
   }
@@ -1914,7 +2204,14 @@ function handleChatWs(ws, req, urlObj) {
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+      // Typing signal: user is composing → cancel pending intent classify
+      if (msg.type === 'typing') {
+        cancelPendingClassify(cs);
+        return;
+      }
+
       if (msg.type === 'cancel') {
+        cancelPendingClassify(cs);
         if (cs.claudeProc) {
           console.log('[multicc/chat] Cancel requested, killing claude process');
           try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
@@ -1951,6 +2248,7 @@ function handleChatWs(ws, req, urlObj) {
       }
 
       if (msg.type === 'user_message' && msg.text) {
+        cancelPendingClassify(cs);
         // Kill previous process if still running
         if (cs.claudeProc) {
           try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
@@ -2060,6 +2358,8 @@ function handleChatWs(ws, req, urlObj) {
                     cs.chatTurnCount++;
                     cs._resultSaved = true;  // flag so proc.close doesn't double-save
                   }
+                  // Schedule intent classification after 30s idle
+                  scheduleIntentClassify(cs, sessionName);
                 }
 
                 // Drop Claude CLI's own `system init` event — the server already
@@ -2136,6 +2436,11 @@ function handleChatWs(ws, req, urlObj) {
             cs.currentToolCalls = [];
             cs._resultSaved = false;
 
+            // Notify clients that streaming is definitively over (safety net:
+            // if the 'result' event was missed due to buffering / disconnect,
+            // this ensures the cancel button goes away)
+            chatBroadcast(sessionName, { type: 'stream_end' });
+
             console.log(`[multicc/chat] claude exited with code ${code}`);
           });
 
@@ -2177,6 +2482,19 @@ wss.on('connection', (ws, req) => {
   // Route to chat handler if path matches
   if (urlObj.pathname === '/ws/chat') {
     return handleChatWs(ws, req, urlObj);
+  }
+
+  // Route to aux queue monitor (read-only WebSocket for __aux__ session)
+  if (urlObj.pathname === '/ws/aux') {
+    auxQueue.clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+    // Send current status + recent history on connect
+    ws.send(JSON.stringify({ type: 'aux_init', status: auxQueue.getStatus() }));
+    const history = loadChatHistory(AUX_SESSION_ID);
+    ws.send(JSON.stringify({ type: 'aux_history', messages: history.slice(-100) }));
+    ws.on('close', () => { auxQueue.clients.delete(ws); });
+    return;
   }
 
   let sessionId = urlObj.searchParams.get('id') || '';
@@ -2330,6 +2648,9 @@ wss.on('close', () => clearInterval(wsPingInterval));
 
 // Recover existing tmux sessions on startup
 recoverTmuxSessions();
+
+// Initialize AuxQueue (loads history, registers __aux__ session)
+auxQueue.init();
 
 server.listen(PORT, () => {
   console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);

@@ -170,7 +170,7 @@ function stopMonitor(sessionId) {
 }
 
 function syncMonitors(sessions) {
-  const activeIds = new Set(sessions.filter(s => s.active).map(s => s.id));
+  const activeIds = new Set(sessions.filter(s => s.active && s.type !== 'aux').map(s => s.id));
   // Start monitors for new active sessions
   for (const id of activeIds) {
     if (!monitors.has(id)) startMonitor(id);
@@ -237,6 +237,43 @@ async function loadSessions() {
   }
 }
 
+function renderAuxCard(s, isFocused) {
+  const focusedClass = s.id === _focusedSessionId ? ' focused' : '';
+  const aux = s.auxStatus || {};
+  let statusClass, statusText;
+  if (aux.processing) {
+    statusClass = 'running'; statusText = '处理中';
+  } else if (aux.queueDepth > 0) {
+    statusClass = 'waiting'; statusText = `${aux.queueDepth} 排队`;
+  } else {
+    statusClass = 'idle'; statusText = '空闲';
+  }
+  const lastAct = s.lastActivity ? formatRelative(s.lastActivity) : 'N/A';
+  const totalTasks = aux.totalProcessed || 0;
+
+  return `
+    <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="focusAux()" style="border-color:#8957e5;">
+      <div class="card-top">
+        <span class="session-id" style="color:#d2a8ff;">AI Assistant</span>
+        <span class="status-badge ${statusClass}">${statusText}</span>
+      </div>
+      <div class="card-body">
+        <div class="card-field">
+          <span class="field-label">Tasks</span>
+          <span class="field-value">${totalTasks} processed</span>
+        </div>
+        ${isFocused ? '' : `<div class="card-field">
+          <span class="field-label">Active</span>
+          <span class="field-value">${escapeHtml(lastAct)}</span>
+        </div>`}
+      </div>
+      <div class="card-footer">
+        <span class="client-count" style="color:#d2a8ff;">auxqueue</span>
+        <button class="btn btn-sm" onclick="event.stopPropagation(); focusAux()">History</button>
+      </div>
+    </div>`;
+}
+
 function renderSessions(sessions) {
   const el = document.getElementById('session-list');
 
@@ -250,8 +287,12 @@ function renderSessions(sessions) {
     return;
   }
 
-  // Sort: active first, then by lastActivity desc
-  sessions.sort((a, b) => {
+  // Separate aux from regular sessions
+  const auxSessions = sessions.filter(s => s.type === 'aux');
+  const regularSessions = sessions.filter(s => s.type !== 'aux');
+
+  // Sort regular: active first, then by lastActivity desc
+  regularSessions.sort((a, b) => {
     if (a.active !== b.active) return b.active ? 1 : -1;
     const aTime = a.lastActivity ? new Date(a.lastActivity) : new Date(0);
     const bTime = b.lastActivity ? new Date(b.lastActivity) : new Date(0);
@@ -261,7 +302,10 @@ function renderSessions(sessions) {
   const isFocused = !!_focusedSessionId;
   const maxCwd = isFocused ? 24 : 36;
 
-  const cards = sessions.map(s => {
+  // Render aux cards first
+  const auxCards = auxSessions.map(s => renderAuxCard(s, isFocused)).join('');
+
+  const cards = regularSessions.map(s => {
     const shortCwd = shortenPath(s.cwd, maxCwd);
     const monStatus = _sessionStatus.get(s.id);
     const mon = monitors.get(s.id);
@@ -310,7 +354,7 @@ function renderSessions(sessions) {
       </div>`;
   }).join('');
 
-  el.innerHTML = `<div class="session-grid">${cards}</div>`;
+  el.innerHTML = `<div class="session-grid">${auxCards}${cards}</div>`;
   // Re-apply persistent status badges (DOM was rebuilt)
 }
 
@@ -1000,6 +1044,171 @@ async function cleanupUploads() {
   }
 }
 
+/* ── AuxQueue: history viewer + WebSocket ── */
+let _auxWs = null;
+let _auxHistory = [];
+let _auxConnected = false;
+
+function auxConnect() {
+  if (_auxWs && _auxWs.readyState <= 1) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tokenParam = _urlToken ? `?token=${_urlToken}` : '';
+  _auxWs = new WebSocket(`${proto}//${location.host}/ws/aux${tokenParam}`);
+
+  _auxWs.onopen = () => { _auxConnected = true; };
+
+  _auxWs.onmessage = ({ data }) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'aux_history') {
+        _auxHistory = msg.messages || [];
+        if (_focusedSessionId === '__aux__') renderAuxPanel();
+      } else if (msg.type === 'aux_init') {
+        // status info on connect — will be refreshed via /api/sessions
+      } else if (msg.type === 'aux_event') {
+        // Real-time task event — append to history display
+        if (msg.status === 'done' || msg.status === 'error') {
+          // Refresh history from full data on next render
+          loadSessions();
+        }
+        if (_focusedSessionId === '__aux__') renderAuxTaskEvent(msg);
+      }
+    } catch (_) {}
+  };
+
+  _auxWs.onclose = () => {
+    _auxConnected = false;
+    setTimeout(auxConnect, 5000);
+  };
+  _auxWs.onerror = () => {};
+}
+
+function focusAux() {
+  acknowledgeSession('__aux__');
+  if (_focusedSessionId === '__aux__') return;
+  _focusedSessionId = '__aux__';
+
+  document.body.classList.add('has-focus');
+  focusId.textContent = 'AI Assistant';
+  focusId.style.color = '#d2a8ff';
+  focusCwd.textContent = 'AuxQueue — Intent Classification Service';
+
+  // Hide all cached iframes + the original placeholder
+  focusIframe.style.display = 'none';
+  for (const [, frame] of _iframeCache) frame.style.display = 'none';
+
+  // Show aux history panel
+  let auxPanel = document.getElementById('aux-panel');
+  if (!auxPanel) {
+    auxPanel = document.createElement('div');
+    auxPanel.id = 'aux-panel';
+    auxPanel.style.cssText = 'flex:1;overflow-y:auto;padding:16px;font-family:monospace;font-size:12px;background:#0d1117;';
+    focusContainer.appendChild(auxPanel);
+  }
+  auxPanel.style.display = '';
+  renderAuxPanel();
+  renderSessions(_cachedSessions);
+
+  // Ensure WS connected
+  auxConnect();
+}
+
+function renderAuxPanel() {
+  const panel = document.getElementById('aux-panel');
+  if (!panel) return;
+
+  if (_auxHistory.length === 0) {
+    panel.innerHTML = '<div style="text-align:center;color:#484f58;padding:40px 0;">No tasks yet</div>';
+    return;
+  }
+
+  // Group history into task pairs (user prompt + assistant result)
+  const tasks = [];
+  for (let i = 0; i < _auxHistory.length; i++) {
+    const msg = _auxHistory[i];
+    if (msg.role === 'user' && i + 1 < _auxHistory.length && _auxHistory[i + 1].role === 'assistant') {
+      tasks.push({ input: msg, output: _auxHistory[i + 1] });
+      i++; // skip assistant
+    } else if (msg.role === 'user') {
+      tasks.push({ input: msg, output: null });
+    }
+  }
+
+  // Reverse to show newest first
+  tasks.reverse();
+
+  const html = tasks.map(t => {
+    const time = new Date(t.input.ts);
+    const timeStr = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}:${time.getSeconds().toString().padStart(2, '0')}`;
+    const taskType = t.input.taskType || 'unknown';
+    const meta = t.input.meta || {};
+    const metaStr = meta.sessionName ? `session=${escapeHtml(meta.sessionName)}` : '';
+
+    let resultHtml = '<span style="color:#d29922;">pending...</span>';
+    let durationHtml = '';
+    if (t.output) {
+      const isErr = t.output.error;
+      const isCancelled = t.output.cancelled;
+      const text = escapeHtml((t.output.content || '').trim());
+      const color = isErr ? '#f85149' : isCancelled ? '#d29922' : '#3fb950';
+      const label = isErr ? 'ERR' : isCancelled ? 'CANCELLED' : text;
+      resultHtml = `<span style="color:${color};font-weight:600;">${label}</span>`;
+      if (t.output.durationMs) durationHtml = `<span style="color:#484f58;margin-left:8px;">${(t.output.durationMs / 1000).toFixed(1)}s</span>`;
+    }
+
+    // Truncated prompt preview
+    const promptPreview = escapeHtml((t.input.content || '').split('\n').pop().slice(0, 80));
+
+    return `
+      <div style="border-left:2px solid #8957e5;padding:6px 10px;margin-bottom:8px;background:#161b22;border-radius:0 6px 6px 0;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="color:#484f58;">${timeStr}</span>
+          <span style="color:#d2a8ff;font-weight:600;">${escapeHtml(taskType)}</span>
+          <span style="color:#6e7681;">${metaStr}</span>
+          <span style="margin-left:auto;">${resultHtml}${durationHtml}</span>
+        </div>
+        <div style="color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(t.input.content || '')}">${promptPreview}</div>
+      </div>`;
+  }).join('');
+
+  panel.innerHTML = html;
+}
+
+function renderAuxTaskEvent(msg) {
+  // For real-time events, just show a transient notification at top of panel
+  const panel = document.getElementById('aux-panel');
+  if (!panel) return;
+  const statusColors = { queued: '#d29922', processing: '#58a6ff', done: '#3fb950', error: '#f85149', cancelled: '#6e7681' };
+  const color = statusColors[msg.status] || '#8b949e';
+  const existing = document.getElementById('aux-live-status');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'aux-live-status';
+  div.style.cssText = `padding:8px 12px;margin-bottom:12px;background:#21262d;border-radius:6px;border:1px solid ${color};color:${color};font-weight:600;`;
+  div.textContent = `${msg.status.toUpperCase()}: ${msg.task?.type || ''}${msg.result ? ' → ' + msg.result : ''}${msg.error ? ' → ' + msg.error : ''}`;
+  panel.prepend(div);
+  // Auto-remove after 10s
+  setTimeout(() => { if (div.parentNode) div.remove(); }, 10000);
+}
+
+// Override closeFocusPanel to also hide aux panel
+const _origCloseFocus = closeFocusPanel;
+closeFocusPanel = function() {
+  const auxPanel = document.getElementById('aux-panel');
+  if (auxPanel) auxPanel.style.display = 'none';
+  focusId.style.color = ''; // reset color
+  _origCloseFocus();
+};
+
+// Also hide aux panel when focusing a regular session
+const _origFocusSession = focusSession;
+focusSession = function(id) {
+  const auxPanel = document.getElementById('aux-panel');
+  if (auxPanel) auxPanel.style.display = 'none';
+  focusId.style.color = ''; // reset color
+  _origFocusSession(id);
+};
+
 /* ── Init ── */
 loadSessions();
 loadVoiceSettings();
@@ -1009,6 +1218,7 @@ loadApkInfo();
 loadUploadStats();
 wechatLoadConfig();
 wechatCheckStatus();
+auxConnect();
 autoRefreshTimer = setInterval(loadSessions, 5000);
 // Refresh push diagnostics periodically and on visibility change
 setInterval(loadPushDiagnostics, 30000);
