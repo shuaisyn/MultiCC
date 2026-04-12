@@ -1,0 +1,82 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'settings_service.dart';
+
+class UpdateService {
+  static const _keyLastMtime = 'webcc_apk_mtime';
+
+  static Future<void> checkUpdate(BuildContext context, SettingsService settings) async {
+    if (!settings.isConfigured) return;
+
+    try {
+      final url = settings.buildHttpUrl('/api/apk-info');
+      final headers = <String, String>{};
+      if (settings.token.isNotEmpty) {
+        headers['X-Access-Token'] = settings.token;
+      }
+      final res = await http
+          .get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) return;
+
+      final json = jsonDecode(res.body) as Map<String, dynamic>;
+      if (json['exists'] != true) return;
+
+      final serverMtime = json['mtime'] as String? ?? '';
+      if (serverMtime.isEmpty) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      final lastMtime = prefs.getString(_keyLastMtime) ?? '';
+
+      if (lastMtime.isEmpty) {
+        await prefs.setString(_keyLastMtime, serverMtime);
+        return;
+      }
+
+      if (serverMtime != lastMtime) {
+        if (!context.mounted) return;
+        final shouldUpdate = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            backgroundColor: const Color(0xFF161b22),
+            title: const Text('发现新版本', style: TextStyle(color: Color(0xFFf0f6fc))),
+            content: const Text(
+              '服务器上有新版本的 APK，是否下载更新？',
+              style: TextStyle(color: Color(0xFF8b949e)),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('稍后', style: TextStyle(color: Color(0xFF8b949e))),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('更新', style: TextStyle(color: Color(0xFF58a6ff), fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+        );
+
+        if (shouldUpdate == true) {
+          await prefs.setString(_keyLastMtime, serverMtime);
+          // Build download URL with token for authentication
+          var downloadUrl = settings.buildHttpUrl('/webcc.apk');
+          if (settings.token.isNotEmpty) {
+            downloadUrl += '?token=${Uri.encodeQueryComponent(settings.token)}';
+          }
+          // Don't use canLaunchUrl — it's unreliable on Android 11+
+          await launchUrl(
+            Uri.parse(downloadUrl),
+            mode: LaunchMode.externalApplication,
+          );
+        }
+      }
+    } catch (_) {
+      // Silently ignore
+    }
+  }
+}

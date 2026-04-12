@@ -747,9 +747,11 @@ async function fetchRefined(raw) {
 function showVoicePanel(rawText) {
   vpRaw.value = rawText;
   vpRefined.value = '';
+  vpRefined.placeholder = '点击「AI 重排」按钮处理';
   vpStatus.textContent = '';
+  _vpRefinedFinal = '';
   voicePanel.classList.add('open');
-  fetchRefined(rawText);
+  // No longer auto-refine — user clicks the button when ready
 }
 
 vpUseRaw.addEventListener('click', () => {
@@ -757,6 +759,11 @@ vpUseRaw.addEventListener('click', () => {
 });
 
 vpUseRefined.addEventListener('click', () => {
+  // If AI hasn't been run yet, trigger it first
+  if (!vpRefined.value.trim() && vpRaw.value.trim()) {
+    fetchRefined(vpRaw.value);
+    return;
+  }
   sendVoiceText(vpRefined.value, vpRaw.value, _vpRefinedFinal);
 });
 
