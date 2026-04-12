@@ -1685,6 +1685,8 @@ const auxQueue = {
   lastTaskTime: null,
   clients: new Set(), // WebSocket clients watching aux events
   history: [],        // loaded from chat_history/__aux__.json
+  _warmProc: null,    // pre-spawned claude process waiting for stdin input
+  _warmReady: false,  // true once the warm process has started successfully
 
   init() {
     this.history = loadChatHistory(AUX_SESSION_ID);
@@ -1698,7 +1700,33 @@ const auxQueue = {
       const existing = persistedSessions.get(AUX_SESSION_ID);
       if (existing.type !== 'aux') { existing.type = 'aux'; existing.label = 'AI Assistant'; savePersistedSessions(); }
     }
-    console.log('[multicc/aux] AuxQueue initialized');
+    // Pre-warm a claude process so first task has no cold-start
+    this.prespawn();
+    console.log('[multicc/aux] AuxQueue initialized (with process pre-warming)');
+  },
+
+  /** Spawn a warm claude -p process that blocks on stdin, ready for instant use */
+  prespawn() {
+    if (this._warmProc) return; // already warming
+    try {
+      const proc = spawn(CLAUDE_CMD, ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose'], {
+        cwd: __dirname,
+        env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+        stdio: ['pipe', 'pipe', 'pipe'],  // stdin open — process blocks waiting for input
+      });
+      proc.on('error', () => { this._warmProc = null; this._warmReady = false; });
+      proc.on('exit', () => {
+        // If it exits before we used it (crash during init), clear it
+        if (this._warmProc === proc) { this._warmProc = null; this._warmReady = false; }
+      });
+      this._warmProc = proc;
+      this._warmReady = true;
+      console.log(`[multicc/aux] Pre-warmed claude process (pid ${proc.pid})`);
+    } catch (err) {
+      console.error('[multicc/aux] Failed to pre-warm:', err.message);
+      this._warmProc = null;
+      this._warmReady = false;
+    }
   },
 
   enqueue(task) {
@@ -1788,12 +1816,28 @@ const auxQueue = {
 
   execute(task) {
     return new Promise((resolve, reject) => {
-      const args = ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose', task.prompt];
-      const proc = spawn(CLAUDE_CMD, args, {
-        cwd: __dirname,
-        env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      let proc;
+      let usedWarm = false;
+
+      // Try to use pre-warmed process (stdin still open, waiting for input)
+      if (this._warmProc && this._warmReady) {
+        proc = this._warmProc;
+        usedWarm = true;
+        this._warmProc = null;
+        this._warmReady = false;
+        console.log(`[multicc/aux] Using pre-warmed process (pid ${proc.pid})`);
+        // Feed the prompt via stdin and close it to trigger processing
+        proc.stdin.write(task.prompt);
+        proc.stdin.end();
+      } else {
+        // Fallback: cold spawn with prompt as CLI argument
+        console.log('[multicc/aux] No warm process available, cold spawning');
+        proc = spawn(CLAUDE_CMD, ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose', task.prompt], {
+          cwd: __dirname,
+          env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      }
 
       let assistantText = '';
       let lineBuf = '';
@@ -1828,6 +1872,9 @@ const auxQueue = {
 
       proc.on('close', (code) => {
         clearTimeout(timeout);
+        // Immediately pre-spawn next warm process
+        this.prespawn();
+
         // Process remaining buffer
         if (lineBuf.trim()) {
           try {
@@ -1850,6 +1897,7 @@ const auxQueue = {
 
       proc.on('error', (err) => {
         clearTimeout(timeout);
+        this.prespawn(); // try to recover warm pool
         reject(err);
       });
     });
@@ -1871,6 +1919,7 @@ const auxQueue = {
       currentTask: this.currentTask ? { id: this.currentTask.id, type: this.currentTask.type } : null,
       totalProcessed: this.totalProcessed,
       lastTaskTime: this.lastTaskTime,
+      warmReady: this._warmReady,
     };
   },
 };

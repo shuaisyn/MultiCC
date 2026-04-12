@@ -246,10 +246,11 @@ function renderAuxCard(s, isFocused) {
   } else if (aux.queueDepth > 0) {
     statusClass = 'waiting'; statusText = `${aux.queueDepth} 排队`;
   } else {
-    statusClass = 'idle'; statusText = '空闲';
+    statusClass = 'idle'; statusText = aux.warmReady ? '就绪' : '空闲';
   }
   const lastAct = s.lastActivity ? formatRelative(s.lastActivity) : 'N/A';
   const totalTasks = aux.totalProcessed || 0;
+  const warmDot = aux.warmReady ? '<span title="进程已预热" style="color:#3fb950;">●</span>' : '<span title="进程未就绪" style="color:#484f58;">○</span>';
 
   return `
     <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="focusAux()" style="border-color:#8957e5;">
@@ -260,7 +261,7 @@ function renderAuxCard(s, isFocused) {
       <div class="card-body">
         <div class="card-field">
           <span class="field-label">Tasks</span>
-          <span class="field-value">${totalTasks} processed</span>
+          <span class="field-value">${totalTasks} processed ${warmDot}</span>
         </div>
         ${isFocused ? '' : `<div class="card-field">
           <span class="field-label">Active</span>
