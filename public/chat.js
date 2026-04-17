@@ -21,9 +21,11 @@ function _hashColor(s) {
   let h = 0; for (let i = 0; i < s.length; i++) h = (h + s.charCodeAt(i) * 31) | 0;
   return _TAB_COLORS[Math.abs(h) % _TAB_COLORS.length];
 }
+let _baseTitle = _sessionName ? `${_sessionName} — MultiCC Chat` : 'MultiCC Chat';
 function updateTabIdentity(id) {
   if (!id) return;
-  document.title = `${id} — MultiCC Chat`;
+  _baseTitle = `${id} — MultiCC Chat`;
+  document.title = _baseTitle;
   const letter = id.charAt(0).toUpperCase();
   const color = _hashColor(id);
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#161b22"/><text x="32" y="45" text-anchor="middle" font-family="system-ui,sans-serif" font-size="38" font-weight="700" fill="${color}">${letter}</text></svg>`;
@@ -64,6 +66,7 @@ const cancelBtn   = document.getElementById('cancel-btn');
 let ws = null;
 let sessionId = null;
 let isStreaming = false;
+let _pendingCancel = false; // cancel requested while WS was disconnected
 
 // Context window tracking
 let _contextWindow = 1000000;
@@ -156,15 +159,23 @@ function handleEvent(msg) {
         if (msg.model) parts.push(msg.model);
         if (parts.length) addSystemMsg(parts.join(' | '));
         // Sync streaming state with server on (re)connect
-        if (msg.is_streaming && !isStreaming) {
+        if (msg.is_streaming && _pendingCancel) {
+          // User cancelled while disconnected — now that we're back, send it
+          _pendingCancel = false;
+          ws.send(JSON.stringify({ type: 'cancel' }));
+          // Don't enter streaming state — we just cancelled
+        } else if (msg.is_streaming && !isStreaming) {
           isStreaming = true;
           showThinking();
+          startTitleAnimation();
           updateUI();
         } else if (!msg.is_streaming && isStreaming) {
           // Task finished while we were disconnected
           isStreaming = false;
           hideThinking();
           finishStreaming();
+          stopTitleAnimation();
+          speakNotify('任务已完成', 'completed');
           addSystemMsg('⚠️ Response completed while disconnected. Check history above.');
           updateUI();
         }
@@ -192,6 +203,8 @@ function handleEvent(msg) {
     case 'result':
       isStreaming = false;
       finishStreaming();
+      stopTitleAnimation();
+      speakNotify('任务已完成', 'completed');
       if (msg.total_cost_usd) {
         costBar.textContent = `$${msg.total_cost_usd.toFixed(4)} | ${msg.duration_ms}ms | ${msg.num_turns} turn(s)`;
       }
@@ -214,6 +227,8 @@ function handleEvent(msg) {
       if (isStreaming) {
         isStreaming = false;
         finishStreaming();
+        stopTitleAnimation();
+        speakNotify('任务已完成', 'completed');
         updateUI();
       }
       break;
@@ -222,6 +237,7 @@ function handleEvent(msg) {
       addSystemMsg(`Error: ${msg.error || JSON.stringify(msg)}`);
       isStreaming = false;
       finishStreaming();
+      stopTitleAnimation();
       updateUI();
       break;
   }
@@ -239,6 +255,7 @@ function handleStreamEvent(evt) {
       // can place tool cards above the user message that triggered them.
       finishStreaming();
       currentMsgEl = createAssistantBubble();
+      startTitleAnimation();
       updateUI();
       break;
 
@@ -553,21 +570,33 @@ function send() {
 
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'user_message', text }));
+    _pendingCancel = false;
     isStreaming = true;
     showThinking();
+    startTitleAnimation();
+    dismissNotifyToast();
     updateUI();
   }
 }
 
 /* ── Cancel ── */
 function cancelStreaming() {
-  if (!isStreaming) return;
+  // Always try to send cancel to server (idempotent on server side).
+  // This avoids the race where a 'result' event sets isStreaming=false
+  // right before the user's click is processed — we still want the
+  // cancel signal to reach the server.
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'cancel' }));
+    _pendingCancel = false;
+  } else {
+    // WS disconnected — remember the cancel intent so we can send it on reconnect
+    _pendingCancel = true;
   }
+  if (!isStreaming) return;
   hideThinking();
   isStreaming = false;
   finishStreaming();
+  stopTitleAnimation();
   addSystemMsg('Cancelled');
   updateUI();
 }
@@ -763,6 +792,111 @@ function guessPastedFileName(file) {
     ? 'jpg'
     : (file.type || '').split('/')[1] || 'bin';
   return `pasted-file.${ext}`;
+}
+
+/* ── Voice Notifications (task complete / waiting for action) ── */
+const notifyBtn   = document.getElementById('notify-btn');
+const notifyToast = document.getElementById('notify-toast');
+let _notifyEnabled = localStorage.getItem('multicc_notify') !== 'off';
+let _notifyLastCompleted = 0;
+let _notifyLastAction = 0;
+let _notifyToastTimer = null;
+
+const NOTIFY_COOLDOWN = 8000;
+
+function updateNotifyBtn() {
+  if (!notifyBtn) return;
+  if (_notifyEnabled) {
+    notifyBtn.style.background = '#1f6feb';
+    notifyBtn.style.borderColor = '#58a6ff';
+    notifyBtn.style.color = '#fff';
+    notifyBtn.title = '语音通知 (已开启)';
+  } else {
+    notifyBtn.style.background = '#21262d';
+    notifyBtn.style.borderColor = '#30363d';
+    notifyBtn.style.color = '#c9d1d9';
+    notifyBtn.title = '语音通知 (已关闭)';
+  }
+}
+updateNotifyBtn();
+
+if (notifyBtn) {
+  notifyBtn.addEventListener('click', () => {
+    _notifyEnabled = !_notifyEnabled;
+    localStorage.setItem('multicc_notify', _notifyEnabled ? 'on' : 'off');
+    updateNotifyBtn();
+  });
+}
+
+function showNotifyToast(text, type) {
+  if (!notifyToast) return;
+  const closeBtn = notifyToast.querySelector('.toast-close');
+  notifyToast.textContent = '';
+  notifyToast.appendChild(document.createTextNode(text + ' '));
+  notifyToast.appendChild(closeBtn);
+  notifyToast.className = type;
+  notifyToast.style.display = 'block';
+  if (_notifyToastTimer) clearTimeout(_notifyToastTimer);
+  _notifyToastTimer = setTimeout(dismissNotifyToast, 15000);
+}
+
+function dismissNotifyToast() {
+  if (notifyToast) notifyToast.style.display = 'none';
+  if (_notifyToastTimer) { clearTimeout(_notifyToastTimer); _notifyToastTimer = null; }
+}
+
+if (notifyToast) {
+  notifyToast.addEventListener('click', dismissNotifyToast);
+}
+
+// When page becomes visible, stop any ongoing voice and dismiss toast
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    dismissNotifyToast();
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+});
+
+function speakNotify(text, type) {
+  if (!_notifyEnabled) return;
+  if (document.visibilityState === 'visible') return;
+
+  const now = Date.now();
+  if (type === 'completed') {
+    if (now - _notifyLastCompleted < NOTIFY_COOLDOWN) return;
+    _notifyLastCompleted = now;
+  } else {
+    if (now - _notifyLastAction < NOTIFY_COOLDOWN) return;
+    _notifyLastAction = now;
+  }
+
+  showNotifyToast(text, type);
+
+  if (window.speechSynthesis) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-CN';
+    utterance.rate = 1.1;
+    utterance.volume = 0.8;
+    window.speechSynthesis.speak(utterance);
+  }
+}
+
+/* ── Dynamic title animation during streaming ── */
+let _titleTimer = null;
+let _titleDots = 0;
+
+function startTitleAnimation() {
+  if (_titleTimer) return;
+  _titleDots = 0;
+  _titleTimer = setInterval(() => {
+    _titleDots = (_titleDots % 3) + 1;
+    document.title = _baseTitle + ' ' + '.'.repeat(_titleDots);
+  }, 500);
+}
+
+function stopTitleAnimation() {
+  if (_titleTimer) { clearInterval(_titleTimer); _titleTimer = null; }
+  document.title = _baseTitle;
 }
 
 /* ── Voice Input ── */

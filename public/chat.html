@@ -396,6 +396,45 @@
     }
     #mic-toast.show { display: block; }
 
+    /* ── Notification Toast ── */
+    #notify-toast {
+      display: none;
+      position: fixed;
+      top: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9000;
+      background: #1f6feb;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 36px 8px 14px;
+      border-radius: 8px;
+      box-shadow: 0 4px 16px #00000066;
+      cursor: pointer;
+      animation: toastSlide 0.3s ease;
+      white-space: nowrap;
+      max-width: 90%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #notify-toast.waiting { background: #d29922; }
+    #notify-toast.completed { background: #238636; }
+    #notify-toast .toast-close {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 16px;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+    #notify-toast .toast-close:hover { opacity: 1; }
+    @keyframes toastSlide {
+      from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+      to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+
     /* ── Voice panel ── */
     #voice-panel {
       display: none;
@@ -498,6 +537,7 @@
     <span class="badge">Chat</span>
     <span id="status">Connecting...</span>
     <span class="hdr-spacer"></span>
+    <button id="notify-btn" class="hdr-btn" title="语音通知 (点击开启/关闭)">&#128276;</button>
     <a href="/" class="hdr-btn" title="Terminal mode">Terminal</a>
     <button class="hdr-btn" id="clear-ctx-btn" title="Clear context">Clear</button>
     <button id="manage-btn" class="hdr-btn" onclick="location.href='/manage'">Manage</button>
@@ -533,6 +573,9 @@
 
   <!-- Mic toast -->
   <div id="mic-toast"></div>
+
+  <!-- Notify toast -->
+  <div id="notify-toast"><span class="toast-close">&#10005;</span></div>
 
   <!-- Voice panel -->
   <div id="voice-panel">

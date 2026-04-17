@@ -358,7 +358,7 @@ function loadPersistedSessions() {
 }
 
 function savePersistedSessions() {
-  const data = [...persistedSessions.values()].map(({ id, cwd, createdAt, claudeSessionId }) => ({ id, cwd, createdAt, claudeSessionId }));
+  const data = [...persistedSessions.values()].map(({ id, cwd, createdAt, claudeSessionId, chatClaudeSessionId }) => ({ id, cwd, createdAt, claudeSessionId, chatClaudeSessionId }));
   try {
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
@@ -2368,8 +2368,8 @@ function handleChatWs(ws, req, urlObj) {
             cs.isStreaming = false;
             cs.streamReplay = [];
 
-            // If resume failed (non-zero exit, no assistant output), retry without resume
-            if (code !== 0 && !isRetry && !cs.currentAssistantText && cs.chatTurnCount > 0) {
+            // If resume failed (non-zero exit OR zero exit with no output), retry without resume
+            if (!isRetry && !cs.currentAssistantText && cs.chatTurnCount > 0) {
               console.warn(`[multicc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
               cs.chatClaudeSessionId = crypto.randomUUID();
               cs.chatTurnCount = 0;
