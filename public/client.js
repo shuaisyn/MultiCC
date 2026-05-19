@@ -434,6 +434,29 @@ function connect() {
         currentSessionId = msg.id;
         updateSessionLabel(msg.id);
         updateTabIdentity(msg.id);
+        // Badge: indicate which CLI is running (Claude orange / Codex green)
+        if (msg.cli) {
+          const logo = document.querySelector('#header .logo');
+          if (logo) logo.title = `CLI: ${msg.cli}`;
+          let cliBadge = document.getElementById('cli-badge');
+          if (!cliBadge) {
+            cliBadge = document.createElement('span');
+            cliBadge.id = 'cli-badge';
+            cliBadge.style.cssText = 'font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-left:6px;';
+            const label = document.getElementById('status-label');
+            if (label && label.parentNode) label.parentNode.insertBefore(cliBadge, label.nextSibling);
+          }
+          cliBadge.textContent = msg.cli;
+          if (msg.cli === 'codex') {
+            cliBadge.style.background = '#2ea04320';
+            cliBadge.style.color = '#a5d6a7';
+            cliBadge.style.border = '1px solid #2ea04340';
+          } else {
+            cliBadge.style.background = '#f7816620';
+            cliBadge.style.color = '#f78166';
+            cliBadge.style.border = '1px solid #f7816640';
+          }
+        }
         const _urlParams = new URLSearchParams(location.search);
         _urlParams.set('id', msg.id);
         const newUrl = `${location.pathname}?${_urlParams.toString()}`;

@@ -221,19 +221,33 @@ function acknowledgeSession(sessionId) {
   window.speechSynthesis && window.speechSynthesis.cancel();
 }
 
-/* ── Session loading ── */
-async function loadSessions() {
+/* ── Dashboard loading: fetches directories + sessions in parallel ── */
+let _cachedDirectories = [];
+const _expandedDirs = new Set();  // dirIds currently expanded in the tree
+
+async function loadSessions() { return loadDashboard(); }  // back-compat alias
+
+async function loadDashboard() {
   try {
-    const res = await fetch('/api/sessions' + tokenQS('?'));
-    const sessions = await res.json();
+    const [dirRes, sessRes] = await Promise.all([
+      fetch('/api/directories' + tokenQS('?')),
+      fetch('/api/sessions' + tokenQS('?')),
+    ]);
+    const directories = await dirRes.json();
+    const sessions = await sessRes.json();
+    _cachedDirectories = directories;
     _cachedSessions = sessions;
-    renderSessions(sessions);
+    // Default: expand all directories on first load
+    if (_expandedDirs.size === 0 && directories.length > 0) {
+      for (const d of directories) _expandedDirs.add(d.id);
+    }
+    renderDashboard(directories, sessions);
     syncMonitors(sessions);
     if (typeof wechatPopulateSessionSelect === 'function') wechatPopulateSessionSelect(sessions);
   } catch (err) {
-    console.error('Failed to load sessions:', err);
-    document.getElementById('session-list').innerHTML =
-      `<div class="empty-state"><p style="color:#f85149">Failed to load sessions: ${err.message}</p></div>`;
+    console.error('Failed to load dashboard:', err);
+    const el = document.getElementById('directory-list');
+    if (el) el.innerHTML = `<div class="empty-state"><p style="color:#f85149">Failed to load: ${err.message}</p></div>`;
   }
 }
 
@@ -276,87 +290,252 @@ function renderAuxCard(s, isFocused) {
 }
 
 function renderSessions(sessions) {
-  const el = document.getElementById('session-list');
+  // Back-compat: rerender using the cached directory list (status updates etc.)
+  renderDashboard(_cachedDirectories, sessions);
+}
 
-  if (sessions.length === 0) {
-    el.innerHTML = `
+function renderDashboard(directories, sessions) {
+  const auxSessions = sessions.filter(s => s.type === 'aux');
+  const regularSessions = sessions.filter(s => s.type !== 'aux');
+  const isFocused = !!_focusedSessionId;
+
+  // Aux section (always first)
+  const auxEl = document.getElementById('aux-section');
+  if (auxEl) {
+    auxEl.innerHTML = auxSessions.length
+      ? `<div class="session-grid" style="margin-bottom:16px;">${auxSessions.map(s => renderAuxCard(s, isFocused)).join('')}</div>`
+      : '';
+  }
+
+  // Directory tree
+  const listEl = document.getElementById('directory-list');
+  if (!listEl) return;
+
+  if (directories.length === 0) {
+    listEl.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">🖥️</div>
-        <p>No active sessions</p>
-        <button class="btn btn-green" onclick="newSession()">+ New Session</button>
+        <div class="empty-icon">📁</div>
+        <p>No directories yet</p>
+        <button class="btn btn-green" onclick="openNewDirectoryModal()">+ New Directory</button>
       </div>`;
     return;
   }
 
-  // Separate aux from regular sessions
-  const auxSessions = sessions.filter(s => s.type === 'aux');
-  const regularSessions = sessions.filter(s => s.type !== 'aux');
+  // Group sessions by dirId
+  const byDir = new Map();
+  for (const s of regularSessions) {
+    if (!s.dirId) continue;
+    if (!byDir.has(s.dirId)) byDir.set(s.dirId, []);
+    byDir.get(s.dirId).push(s);
+  }
 
-  // Sort regular: active first, then by lastActivity desc
-  regularSessions.sort((a, b) => {
-    if (a.active !== b.active) return b.active ? 1 : -1;
-    const aTime = a.lastActivity ? new Date(a.lastActivity) : new Date(0);
-    const bTime = b.lastActivity ? new Date(b.lastActivity) : new Date(0);
-    return bTime - aTime;
-  });
+  const orphans = regularSessions.filter(s => !s.dirId);
 
-  const isFocused = !!_focusedSessionId;
-  const maxCwd = isFocused ? 24 : 36;
+  const dirHtml = directories.map(d => renderDirectoryBlock(d, byDir.get(d.id) || [])).join('');
+  const orphanHtml = orphans.length ? renderOrphans(orphans) : '';
+  listEl.innerHTML = dirHtml + orphanHtml;
+}
 
-  // Render aux cards first
-  const auxCards = auxSessions.map(s => renderAuxCard(s, isFocused)).join('');
+function renderDirectoryBlock(dir, dirSessions) {
+  const openClass = _expandedDirs.has(dir.id) ? ' open' : '';
+  const id = dir.id;
+  const maxPath = _focusedSessionId ? 30 : 60;
 
-  const cards = regularSessions.map(s => {
-    const shortCwd = shortenPath(s.cwd, maxCwd);
-    const monStatus = _sessionStatus.get(s.id);
-    const mon = monitors.get(s.id);
-    let statusClass, statusText;
-    if (!s.active) {
-      statusClass = 'inactive'; statusText = 'Stopped';
-    } else if (monStatus === 'waiting') {
-      statusClass = 'waiting'; statusText = '等待操作';
-    } else if (monStatus === 'completed') {
-      statusClass = 'completed'; statusText = '任务完成';
-    } else if (mon && mon.state === 'active') {
-      statusClass = 'running'; statusText = '运行中';
-    } else {
-      statusClass = 'idle'; statusText = '空闲';
-    }
-    const lastAct = s.lastActivity ? formatRelative(s.lastActivity) : 'N/A';
-    const created = formatTime(s.createdAt);
-    const focusedClass = s.id === _focusedSessionId ? ' focused' : '';
+  // Split sessions by (cli, kind)
+  const groups = {
+    claude_terminal: [], claude_chat: [],
+    codex_terminal: [], codex_chat: [],
+  };
+  for (const s of dirSessions) {
+    const key = `${s.cli || 'claude'}_${s.kind || 'terminal'}`;
+    if (groups[key]) groups[key].push(s);
+  }
 
+  const renderGroup = (cli, kind, label) => {
+    const ss = groups[`${cli}_${kind}`];
+    const rows = ss.length ? ss.map(s => renderSessionRow(s)).join('') : `<div class="sess-group-empty">none</div>`;
     return `
-      <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="focusSession('${escapeHtml(s.id)}')">
-        <div class="card-top">
-          <span class="session-id">#${escapeHtml(s.id)}</span>
-          <span class="status-badge ${statusClass}">${statusText}</span>
-        </div>
-        <div class="card-body">
-          <div class="card-field">
-            <span class="field-label">cwd</span>
-            <span class="field-value cwd-value" title="${escapeHtml(s.cwd || '')}">${escapeHtml(shortCwd)}</span>
-          </div>
-          <div class="card-field">
-            <span class="field-label">Created</span>
-            <span class="field-value">${escapeHtml(created)}</span>
-          </div>
-          ${isFocused ? '' : `<div class="card-field">
-            <span class="field-label">Active</span>
-            <span class="field-value">${escapeHtml(lastAct)}</span>
-          </div>`}
-        </div>
-        <div class="card-footer">
-          <span class="client-count"><span class="count-num">${s.clients}</span> conn</span>
-          <button class="btn btn-sm" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">Terminal</button>
-          <button class="btn btn-sm" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}', '${escapeHtml(s.cwd || '')}')">Chat</button>
-          <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
-        </div>
+      <div class="sess-group ${cli}">
+        <div class="sess-group-label">${label} (${ss.length})</div>
+        ${rows}
       </div>`;
-  }).join('');
+  };
 
-  el.innerHTML = `<div class="session-grid">${auxCards}${cards}</div>`;
-  // Re-apply persistent status badges (DOM was rebuilt)
+  return `
+    <div class="dir-block${openClass}" data-dir-id="${escapeHtml(id)}">
+      <div class="dir-header">
+        <span class="dir-name" onclick="toggleDirectory('${escapeHtml(id)}')">${escapeHtml(dir.name)}</span>
+        <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
+        <span class="dir-actions">
+          <button class="btn add-claude" title="New Claude terminal" onclick="newSessionInDir('${escapeHtml(id)}','claude','terminal')">+ Claude Term</button>
+          <button class="btn add-claude" title="New Claude chat" onclick="newSessionInDir('${escapeHtml(id)}','claude','chat')">+ Claude Chat</button>
+          <button class="btn add-codex" title="New Codex terminal" onclick="newSessionInDir('${escapeHtml(id)}','codex','terminal')">+ Codex Term</button>
+          <button class="btn add-codex" title="New Codex chat" onclick="newSessionInDir('${escapeHtml(id)}','codex','chat')">+ Codex Chat</button>
+          <button class="btn btn-danger" title="Delete directory" onclick="deleteDirectory('${escapeHtml(id)}')">Del</button>
+        </span>
+      </div>
+      <div class="dir-body">
+        ${renderGroup('claude', 'terminal', 'Claude Terminals')}
+        ${renderGroup('claude', 'chat', 'Claude Chats')}
+        ${renderGroup('codex',  'terminal', 'Codex Terminals')}
+        ${renderGroup('codex',  'chat', 'Codex Chats')}
+      </div>
+    </div>`;
+}
+
+function renderSessionRow(s) {
+  const focusedClass = s.id === _focusedSessionId ? ' focused' : '';
+  const monStatus = _sessionStatus.get(s.id);
+  const mon = monitors.get(s.id);
+  let statusText = 'idle', statusCls = '';
+  if (s.active) { statusCls = 'active'; statusText = 'active'; }
+  if (monStatus === 'waiting') { statusCls = 'waiting'; statusText = '等待'; }
+  else if (monStatus === 'completed') { statusCls = 'completed'; statusText = '完成'; }
+  else if (mon && mon.state === 'active') { statusCls = 'active'; statusText = '运行中'; }
+
+  const openBtn = s.kind === 'chat'
+    ? `<button class="btn" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}')">Open</button>`
+    : `<button class="btn" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">Open</button>`;
+
+  return `
+    <div class="sess-row${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="openSessionInline('${escapeHtml(s.id)}','${escapeHtml(s.kind || 'terminal')}')">
+      <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
+      <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
+      <span class="sess-id">#${escapeHtml(s.id)}</span>
+      <span class="sess-label">${escapeHtml(s.label || '')}</span>
+      <span class="sess-status ${statusCls}">${statusText}</span>
+      <span class="sess-actions">
+        ${openBtn}
+        <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
+      </span>
+    </div>`;
+}
+
+function renderOrphans(sessions) {
+  // Edge case: sessions without a directory (shouldn't happen post-migration)
+  return `
+    <div class="dir-block open">
+      <div class="dir-header">
+        <span class="dir-name">(Orphan sessions)</span>
+        <span class="dir-path">— no directory assigned</span>
+      </div>
+      <div class="dir-body">
+        ${sessions.map(s => renderSessionRow(s)).join('')}
+      </div>
+    </div>`;
+}
+
+function toggleDirectory(id) {
+  if (_expandedDirs.has(id)) _expandedDirs.delete(id);
+  else _expandedDirs.add(id);
+  renderDashboard(_cachedDirectories, _cachedSessions);
+}
+
+/* ── Directory management ── */
+function openNewDirectoryModal() {
+  const modal = document.getElementById('newdir-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  document.getElementById('newdir-name').value = '';
+  document.getElementById('newdir-path').value = '';
+  document.getElementById('newdir-error').style.display = 'none';
+  setTimeout(() => document.getElementById('newdir-name').focus(), 50);
+}
+
+function closeNewDirectoryModal() {
+  const modal = document.getElementById('newdir-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function submitNewDirectory() {
+  const name = document.getElementById('newdir-name').value.trim();
+  const dirPath = document.getElementById('newdir-path').value.trim();
+  const errEl = document.getElementById('newdir-error');
+  errEl.style.display = 'none';
+  if (!name || !dirPath) {
+    errEl.textContent = 'Name and path are required';
+    errEl.style.display = 'block';
+    return;
+  }
+  try {
+    const res = await fetch('/api/directories' + tokenQS('?'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, path: dirPath }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      errEl.textContent = err.error || `HTTP ${res.status}`;
+      errEl.style.display = 'block';
+      return;
+    }
+    const dir = await res.json();
+    _expandedDirs.add(dir.id);
+    closeNewDirectoryModal();
+    showToast(`Directory "${dir.name}" created`);
+    loadDashboard();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+}
+
+async function deleteDirectory(id) {
+  const dir = _cachedDirectories.find(d => d.id === id);
+  if (!dir) return;
+  const hasSessions = _cachedSessions.some(s => s.dirId === id);
+  const msg = hasSessions
+    ? `Delete "${dir.name}" and ALL its sessions? This cannot be undone.`
+    : `Delete empty directory "${dir.name}"?`;
+  if (!confirm(msg)) return;
+  try {
+    const qs = tokenQS('?');
+    const url = `/api/directories/${id}${qs}${qs ? '&' : '?'}force=1`;
+    const res = await fetch(url, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(`Error: ${err.error}`, true);
+      return;
+    }
+    showToast(`Directory "${dir.name}" deleted`);
+    _expandedDirs.delete(id);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+async function newSessionInDir(dirId, cli, kind) {
+  try {
+    const res = await fetch(`/api/directories/${dirId}/sessions${tokenQS('?')}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cli, kind }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(`Error: ${err.error}`, true);
+      return;
+    }
+    const sess = await res.json();
+    showToast(`Created ${cli} ${kind}: ${sess.id}`);
+    _expandedDirs.add(dirId);
+    await loadDashboard();
+    // Open it immediately
+    openSessionInline(sess.id, sess.kind);
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+// Route an inline-open request by session kind (terminal → iframe, chat → chat page)
+function openSessionInline(id, kind) {
+  if (kind === 'chat') {
+    // Chat doesn't have an inline iframe panel yet — open in a new tab
+    openSessionChat(id);
+    return;
+  }
+  focusSession(id);
 }
 
 /* ── Focus panel: embed terminal iframe ── */
@@ -431,11 +610,11 @@ function openSessionNewTab(id) {
   acknowledgeSession(id);
 }
 
-function openSessionChat(id, cwd) {
+function openSessionChat(id, _cwd) {
+  // cwd is ignored now — server derives it from the session's directory
   const urlToken = new URLSearchParams(location.search).get('token');
   const params = new URLSearchParams();
   if (urlToken) params.set('token', urlToken);
-  if (cwd) params.set('cwd', cwd);
   params.set('session', id);
   window.open(`/chat.html?${params.toString()}`, '_blank');
 }
@@ -461,8 +640,9 @@ async function deleteSession(id) {
 }
 
 function newSession() {
-  window.open('/', '_blank');
-  setTimeout(loadSessions, 800);
+  // Legacy: `/` no longer works without an existing session id. Prompt for a directory.
+  showToast('Create a directory first, then add sessions to it', true);
+  openNewDirectoryModal();
 }
 
 function showToast(msg, isError = false) {
@@ -473,9 +653,20 @@ function showToast(msg, isError = false) {
   setTimeout(() => toast.classList.remove('show'), 2500);
 }
 
-/* ── Keyboard shortcut: Esc to close focus panel ── */
+/* ── Keyboard shortcut: Esc to close focus panel or modal ── */
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && _focusedSessionId) closeFocusPanel();
+  if (e.key === 'Escape') {
+    const modal = document.getElementById('newdir-modal');
+    if (modal && modal.style.display === 'flex') { closeNewDirectoryModal(); return; }
+    if (_focusedSessionId) closeFocusPanel();
+  }
+  if (e.key === 'Enter') {
+    const modal = document.getElementById('newdir-modal');
+    if (modal && modal.style.display === 'flex' &&
+        (e.target.id === 'newdir-name' || e.target.id === 'newdir-path')) {
+      submitNewDirectory();
+    }
+  }
 });
 
 /* ── Voice Settings ── */
@@ -1211,7 +1402,7 @@ focusSession = function(id) {
 };
 
 /* ── Init ── */
-loadSessions();
+loadDashboard();
 loadVoiceSettings();
 loadPushDiagnostics();
 loadNotifySettings();
@@ -1220,7 +1411,7 @@ loadUploadStats();
 wechatLoadConfig();
 wechatCheckStatus();
 auxConnect();
-autoRefreshTimer = setInterval(loadSessions, 5000);
+autoRefreshTimer = setInterval(loadDashboard, 5000);
 // Refresh push diagnostics periodically and on visibility change
 setInterval(loadPushDiagnostics, 30000);
 document.addEventListener('visibilitychange', () => {

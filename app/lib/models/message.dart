@@ -82,29 +82,79 @@ class ChatMessage {
   }
 }
 
+/// Which CLI binary this session drives. Claude Code or OpenAI Codex.
+enum SessionCli { claude, codex }
+
+/// Interactive TUI terminal, or stream-json chat.
+enum SessionKind { terminal, chat }
+
+SessionCli _parseCli(String? s) => s == 'codex' ? SessionCli.codex : SessionCli.claude;
+SessionKind _parseKind(String? s) => s == 'chat' ? SessionKind.chat : SessionKind.terminal;
+
+extension SessionCliX on SessionCli {
+  String get name => this == SessionCli.codex ? 'codex' : 'claude';
+}
+
+extension SessionKindX on SessionKind {
+  String get name => this == SessionKind.chat ? 'chat' : 'terminal';
+}
+
 class Session {
   final String id;
+  final String? dirId;
+  final SessionCli cli;
+  final SessionKind kind;
+  final String? cliSessionId;
+  final String? label;
   final String cwd;
   final DateTime createdAt;
-  final String? claudeSessionId;
+  final bool active;
+  final int clients;
+  final DateTime? lastActivity;
+  final String? type;   // 'aux' for the special AuxQueue session
+  final String? auxLabel;
 
   Session({
     required this.id,
-    required this.cwd,
+    this.dirId,
+    this.cli = SessionCli.claude,
+    this.kind = SessionKind.terminal,
+    this.cliSessionId,
+    this.label,
+    this.cwd = '',
     required this.createdAt,
-    this.claudeSessionId,
+    this.active = false,
+    this.clients = 0,
+    this.lastActivity,
+    this.type,
+    this.auxLabel,
   });
 
   factory Session.fromJson(Map<String, dynamic> json) {
     return Session(
       id: (json['id'] ?? '').toString(),
+      dirId: json['dirId']?.toString(),
+      cli: _parseCli(json['cli']?.toString()),
+      kind: _parseKind(json['kind']?.toString()),
+      cliSessionId: json['cliSessionId']?.toString(),
+      label: json['label']?.toString(),
       cwd: (json['cwd'] ?? '').toString(),
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'].toString()) ?? DateTime.now()
           : DateTime.now(),
-      claudeSessionId: json['claudeSessionId']?.toString(),
+      active: json['active'] == true,
+      clients: (json['clients'] as num?)?.toInt() ?? 0,
+      lastActivity: json['lastActivity'] != null
+          ? DateTime.tryParse(json['lastActivity'].toString())
+          : null,
+      type: json['type']?.toString(),
+      auxLabel: json['label']?.toString(),
     );
   }
+
+  bool get isAux => type == 'aux';
+  bool get isChat => kind == SessionKind.chat;
+  bool get isTerminal => kind == SessionKind.terminal;
 
   String get displayName => id.length > 12 ? id.substring(0, 12) : id;
   String get shortCwd {
@@ -112,4 +162,46 @@ class Session {
     final parts = cwd.split('/');
     return parts.last.isEmpty ? '/' : parts.last;
   }
+}
+
+/// A working directory (workspace). Holds multiple sessions of any cli/kind.
+class Directory {
+  final String id;
+  final String name;
+  final String path;
+  final DateTime createdAt;
+  final int claudeTerminalCount;
+  final int claudeChatCount;
+  final int codexTerminalCount;
+  final int codexChatCount;
+
+  Directory({
+    required this.id,
+    required this.name,
+    required this.path,
+    required this.createdAt,
+    this.claudeTerminalCount = 0,
+    this.claudeChatCount = 0,
+    this.codexTerminalCount = 0,
+    this.codexChatCount = 0,
+  });
+
+  factory Directory.fromJson(Map<String, dynamic> json) {
+    final counts = (json['counts'] as Map<String, dynamic>?) ?? const {};
+    return Directory(
+      id: (json['id'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      path: (json['path'] ?? '').toString(),
+      createdAt: json['createdAt'] != null
+          ? DateTime.tryParse(json['createdAt'].toString()) ?? DateTime.now()
+          : DateTime.now(),
+      claudeTerminalCount: (counts['claude_terminal'] as num?)?.toInt() ?? 0,
+      claudeChatCount: (counts['claude_chat'] as num?)?.toInt() ?? 0,
+      codexTerminalCount: (counts['codex_terminal'] as num?)?.toInt() ?? 0,
+      codexChatCount: (counts['codex_chat'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  int get totalSessions =>
+      claudeTerminalCount + claudeChatCount + codexTerminalCount + codexChatCount;
 }

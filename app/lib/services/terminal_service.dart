@@ -45,18 +45,25 @@ class TerminalService {
 
     final url = _buildUrl();
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(url));
+      final channel = WebSocketChannel.connect(Uri.parse(url));
+      _channel = channel;
       _sub?.cancel();
-      _sub = _channel!.stream.listen(
+      _sub = channel.stream.listen(
         _onMessage,
         onError: (_) => _scheduleReconnect(),
         onDone: _scheduleReconnect,
       );
-      _state = TerminalConnectionState.connected;
-      _reconnectAttempt = 0;
-      _stateCtrl.add(_state);
-      // Send initial resize
-      _sendResize(terminal.viewWidth, terminal.viewHeight);
+      channel.ready.then((_) {
+        if (_disposed) return;
+        _lastCols = 0;
+        _lastRows = 0;
+        _state = TerminalConnectionState.connected;
+        _reconnectAttempt = 0;
+        _stateCtrl.add(_state);
+        _sendResize(terminal.viewWidth, terminal.viewHeight);
+      }).catchError((_) {
+        _scheduleReconnect();
+      });
     } catch (_) {
       _scheduleReconnect();
     }
@@ -79,11 +86,48 @@ class TerminalService {
   }
 
   void _onMessage(dynamic raw) {
+    String text;
     if (raw is String) {
-      // Server sends raw string output to write directly to terminal
-      terminal.write(raw);
+      text = raw;
     } else if (raw is List<int>) {
-      terminal.write(String.fromCharCodes(raw));
+      text = utf8.decode(raw, allowMalformed: true);
+    } else {
+      return;
+    }
+
+    dynamic msg;
+    try {
+      msg = jsonDecode(text);
+    } catch (_) {
+      terminal.write(text);
+      return;
+    }
+    if (msg is! Map) {
+      terminal.write(text);
+      return;
+    }
+
+    final type = msg['type'];
+    switch (type) {
+      case 'output':
+      case 'error':
+      case 'exit':
+        final data = msg['data'];
+        if (data is String) terminal.write(data);
+        break;
+      case 'restart':
+        terminal.write('\x1b[2J\x1b[H\x1b[33m[Restarting Claude…]\x1b[0m\r\n');
+        break;
+      case 'relocate':
+        final cwd = msg['cwd'] ?? '';
+        terminal.write('\x1b[2J\x1b[H\x1b[33m[Switching to: $cwd]\x1b[0m\r\n');
+        break;
+      case 'session_id':
+      case 'file_saved':
+        break;
+      default:
+        final data = msg['data'];
+        if (data is String) terminal.write(data);
     }
   }
 

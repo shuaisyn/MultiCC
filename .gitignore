@@ -7,9 +7,13 @@ node_modules/
 
 # Local runtime state
 sessions.json
+directories.json
 chat_history/
 logs/
 .multicc.pid
+
+# Local tool config
+.claude/
 push_subscriptions.json
 voice_examples.json
 wechat-config.json

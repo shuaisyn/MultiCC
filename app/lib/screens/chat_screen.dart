@@ -93,26 +93,26 @@ class _Header extends StatelessWidget {
             text: const TextSpan(
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               children: [
-                TextSpan(text: 'Web', style: TextStyle(color: Color(0xFFf78166))),
+                TextSpan(text: 'Multi', style: TextStyle(color: Color(0xFFf78166))),
                 TextSpan(text: 'CC', style: TextStyle(color: Color(0xFF79c0ff))),
               ],
             ),
           ),
-          if (provider.sessionId.isNotEmpty) ...[
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                provider.sessionName,
-                style: const TextStyle(
-                  color: Color(0xFF58a6ff),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'monospace',
-                ),
-                overflow: TextOverflow.ellipsis,
+          const SizedBox(width: 6),
+          _ChatCliBadge(cli: provider.cli),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              provider.sessionName,
+              style: const TextStyle(
+                color: Color(0xFF58a6ff),
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                fontFamily: 'monospace',
               ),
+              overflow: TextOverflow.ellipsis,
             ),
-          ],
+          ),
           const SizedBox(width: 8),
           GestureDetector(
             onTap: state == ChatConnectionState.disconnected ? provider.reconnect : null,
@@ -364,6 +364,24 @@ class _CostBar extends StatelessWidget {
         textAlign: TextAlign.center,
         style: const TextStyle(color: Color(0xFF6e7681), fontSize: 11),
       ),
+    );
+  }
+}
+
+class _ChatCliBadge extends StatelessWidget {
+  final SessionCli cli;
+  const _ChatCliBadge({required this.cli});
+  @override
+  Widget build(BuildContext context) {
+    final color = cli == SessionCli.codex ? const Color(0xFF3fb950) : const Color(0xFFf78166);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        border: Border.all(color: color.withOpacity(0.4)),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(cli.name, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w700)),
     );
   }
 }

@@ -222,6 +222,138 @@ const CLAUDE_CMD = resolveClaude();
 const CLAUDE_ARGS = process.env.CLAUDE_ARGS ? process.env.CLAUDE_ARGS.split(' ') : [];
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
+// ── Codex CLI binary resolution (mirrors claude lookup) ──
+function resolveCodex() {
+  if (process.env.CODEX_CMD) return process.env.CODEX_CMD;
+  const candidates = [
+    '/opt/homebrew/bin/codex', '/usr/local/bin/codex',
+    path.join(os.homedir(), '.local', 'bin', 'codex'),
+    path.join(os.homedir(), '.cargo', 'bin', 'codex'),
+  ];
+  for (const c of candidates) if (fs.existsSync(c)) return c;
+  if (!isWindows) {
+    for (const sh of ['/bin/zsh', '/bin/bash']) {
+      if (!fs.existsSync(sh)) continue;
+      try {
+        const r = execSync(`${sh} -l -c 'which codex 2>/dev/null'`, { encoding: 'utf8', timeout: 5000 }).trim().split(/\r?\n/)[0].trim();
+        if (r && fs.existsSync(r)) return r;
+      } catch (_) {}
+    }
+  }
+  try {
+    const r = execSync(isWindows ? 'where codex' : 'which codex', { encoding: 'utf8', timeout: 5000 }).trim().split(/\r?\n/)[0].trim();
+    if (r) return r;
+  } catch (_) {}
+  return isWindows ? 'codex.exe' : 'codex';
+}
+const CODEX_CMD = resolveCodex();
+const CODEX_ARGS = process.env.CODEX_ARGS ? process.env.CODEX_ARGS.split(' ') : [];
+const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
+console.log(`[multicc] Using codex: ${CODEX_CMD}`);
+
+// ── CLI provider abstraction ──
+// Each provider knows how to (1) build the interactive terminal command line for tmux,
+// (2) build chat-mode spawn args, (3) parse one line of streamed JSON output.
+// Chat-mode parse output schema: { kind: 'text'|'tool'|'tool_result'|'result'|'system'|'thread', ... }
+const cliProviders = {
+  claude: {
+    name: 'claude',
+    cmd: CLAUDE_CMD,
+    // Interactive terminal: `claude --session-id <uuid>`
+    buildTerminalCmd(session) {
+      let cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
+      if (session.cliSessionId) cmd += ` --session-id ${session.cliSessionId}`;
+      return cmd;
+    },
+    // Chat-mode spawn args: `-p --output-format stream-json [--resume id | --session-id id] <prompt>`
+    buildChatSpawnArgs(session, prompt, opts) {
+      const args = [
+        '-p', '--output-format', 'stream-json', '--verbose',
+        '--include-partial-messages', '--dangerously-skip-permissions',
+      ];
+      if (opts.isFirstTurn) args.push('--session-id', session.cliSessionId);
+      else args.push('--resume', session.cliSessionId);
+      args.push(prompt);
+      return args;
+    },
+    // Whether this provider needs the session id captured asynchronously after first launch
+    needsAsyncSessionIdCapture: false,
+  },
+  codex: {
+    name: 'codex',
+    cmd: CODEX_CMD,
+    // Interactive terminal: `codex` first time, `codex resume <id>` if id captured.
+    // Add `--dangerously-bypass-approvals-and-sandbox` to skip prompts (we run trusted local code).
+    buildTerminalCmd(session) {
+      const baseArgs = CODEX_ARGS.length ? ' ' + CODEX_ARGS.join(' ') : '';
+      if (session.cliSessionId) return `${CODEX_CMD}${baseArgs} resume ${session.cliSessionId}`;
+      return `${CODEX_CMD}${baseArgs}`;
+    },
+    // Chat-mode spawn args: `exec --json [--skip-git-repo-check] [--dangerously-bypass-approvals-and-sandbox] [resume <id>] <prompt>`
+    buildChatSpawnArgs(session, prompt, opts) {
+      const args = [];
+      if (opts.isFirstTurn) {
+        args.push('exec', '--json', '--skip-git-repo-check',
+          '--dangerously-bypass-approvals-and-sandbox', prompt);
+      } else {
+        args.push('exec', 'resume', session.cliSessionId, '--json',
+          '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', prompt);
+      }
+      return args;
+    },
+    needsAsyncSessionIdCapture: true,  // capture from ~/.codex/sessions filename
+  },
+};
+
+function providerFor(session) {
+  return cliProviders[session?.cli] || cliProviders.claude;
+}
+
+// ── Codex session-id capture: scans ~/.codex/sessions for a JSONL with matching cwd whose
+// session_meta.timestamp is newer than `sinceMs`. Returns the session id or null. ──
+function findCodexSessionId(cwd, sinceMs) {
+  try {
+    if (!fs.existsSync(CODEX_SESSIONS_DIR)) return null;
+    const candidates = [];
+    const walk = (dir) => {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.isFile() && e.name.endsWith('.jsonl')) {
+          try {
+            const stat = fs.statSync(p);
+            if (stat.mtimeMs >= sinceMs) candidates.push({ path: p, mtimeMs: stat.mtimeMs });
+          } catch (_) {}
+        }
+      }
+    };
+    walk(CODEX_SESSIONS_DIR);
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const c of candidates) {
+      try {
+        // Read first line only (session_meta is the first record)
+        const fd = fs.openSync(c.path, 'r');
+        const buf = Buffer.alloc(8192);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        fs.closeSync(fd);
+        const firstLine = buf.slice(0, n).toString().split('\n')[0];
+        if (!firstLine) continue;
+        const meta = JSON.parse(firstLine);
+        if (meta.type !== 'session_meta') continue;
+        const metaCwd = meta.payload?.cwd;
+        const metaId = meta.payload?.id;
+        // cwd may differ on macOS due to /private prefix; compare resolved real paths
+        if (!metaId) continue;
+        const norm = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+        if (norm(metaCwd) === norm(cwd)) return metaId;
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
 // ── tmux helpers ──
 const TMUX_PREFIX = 'multicc-';
 const TMUX_FIFO_DIR = path.join(os.tmpdir(), 'multicc-fifos');
@@ -236,12 +368,11 @@ function tmuxHasSession(id) {
   } catch { return false; }
 }
 
-function tmuxCreateSession(id, cwd, cols, rows, claudeSessionId) {
+function tmuxCreateSession(id, cwd, cols, rows, session) {
   const name = tmuxSessionName(id);
-  let cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
-  // Bind to a stable Claude session UUID so chat mode can --resume the same conversation
-  if (claudeSessionId) cmd += ` --session-id ${claudeSessionId}`;
-  // set-option remain-on-exit off so the session disappears when claude exits
+  const provider = providerFor(session);
+  const cmd = provider.buildTerminalCmd(session || {});
+  // set-option remain-on-exit off so the session disappears when CLI exits
   execSync(
     `tmux new-session -d -s "${name}" -x ${cols} -y ${rows} -c "${cwd}" "${cmd}"`,
     { env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } }
@@ -252,6 +383,24 @@ function tmuxResize(id, cols, rows) {
   try {
     execSync(`tmux resize-window -t "${tmuxSessionName(id)}" -x ${cols} -y ${rows} 2>/dev/null`);
   } catch (_) {}
+}
+
+// Compute pane size as max(cols) × max(rows) across all attached clients,
+// then push to tmux only if it actually changed. Skips clients that haven't
+// reported a size yet. Returns true if a resize was applied.
+function applyMaxClientSize(session) {
+  let maxCols = 0;
+  let maxRows = 0;
+  for (const c of session.clients) {
+    if (c._desiredCols && c._desiredCols > maxCols) maxCols = c._desiredCols;
+    if (c._desiredRows && c._desiredRows > maxRows) maxRows = c._desiredRows;
+  }
+  if (!maxCols || !maxRows) return false;
+  if (maxCols === session.appliedCols && maxRows === session.appliedRows) return false;
+  tmuxResize(session.id, maxCols, maxRows);
+  session.appliedCols = maxCols;
+  session.appliedRows = maxRows;
+  return true;
 }
 
 function tmuxKillSession(id) {
@@ -326,10 +475,13 @@ function recoverTmuxSessions() {
       if (!name || !name.startsWith(TMUX_PREFIX)) continue;
       const id = name.slice(TMUX_PREFIX.length);
       if (sessions.has(id)) continue;
-      const cwd = tmuxPaneCwd(id);
-      console.log(`[multicc] Recovering tmux session: ${id} (${cwd})`);
+      // Only recover sessions we know about (post-migration). Orphan tmux sessions
+      // are left alone — user can kill them via `tmux kill-session` if unwanted.
+      const persisted = persistedSessions.get(id);
+      if (!persisted || persisted.kind !== 'terminal') continue;
+      console.log(`[multicc] Recovering tmux session: ${id} (${persisted.cli})`);
       try {
-        createSession(id, cwd);
+        createSession(id);
       } catch (err) {
         console.error(`[multicc] Failed to recover session ${id}:`, err.message);
       }
@@ -339,26 +491,127 @@ function recoverTmuxSessions() {
   }
 }
 
-// ── Session persistence ──
+// ── Directory + session persistence ──
+// Schema:
+//   directories.json: [{ id, name, path, createdAt }]
+//   sessions.json:    [{ id, dirId, cli, kind, cliSessionId, label?, createdAt }]  (+ __aux__ special record)
+//
+// On first load, we auto-migrate the old flat { id, cwd, claudeSessionId, chatClaudeSessionId } schema
+// into directories.json + split each paired session into a terminal + optional chat record.
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const DIRECTORIES_FILE = path.join(__dirname, 'directories.json');
 
-function loadPersistedSessions() {
+function loadDirectories() {
   try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    if (fs.existsSync(DIRECTORIES_FILE)) {
+      const data = JSON.parse(fs.readFileSync(DIRECTORIES_FILE, 'utf8'));
       const map = new Map();
-      for (const s of data) map.set(s.id, s);
-      console.log(`[multicc] Loaded ${map.size} persisted session(s)`);
+      for (const d of data) map.set(d.id, d);
       return map;
     }
   } catch (e) {
-    console.error('[multicc] Failed to load sessions.json:', e.message);
+    console.error('[multicc] Failed to load directories.json:', e.message);
   }
   return new Map();
 }
 
+function saveDirectories() {
+  try {
+    fs.writeFileSync(DIRECTORIES_FILE, JSON.stringify([...directories.values()], null, 2));
+  } catch (e) {
+    console.error('[multicc] Failed to save directories.json:', e.message);
+  }
+}
+
+function isNewSchema(arr) {
+  return arr.some(s => s.dirId !== undefined || s.kind !== undefined);
+}
+
+// One-shot migration: old paired sessions → directories + split sessions.
+function migrateOldSchema(oldList) {
+  const newDirs = new Map();
+  const newSessions = new Map();
+  const chatHistoryRenames = [];
+
+  for (const s of oldList) {
+    if (s.id === '__aux__' || s.type === 'aux') {
+      newSessions.set(s.id, s); // keep as-is
+      continue;
+    }
+    const dirId = crypto.randomUUID();
+    newDirs.set(dirId, {
+      id: dirId,
+      name: s.id,                 // use old human-readable id as directory label
+      path: s.cwd,
+      createdAt: s.createdAt,
+    });
+    // Terminal session reuses the old id so existing tmux sessions (multicc-<id>) get recovered.
+    newSessions.set(s.id, {
+      id: s.id,
+      dirId,
+      cli: 'claude',
+      kind: 'terminal',
+      cliSessionId: s.claudeSessionId || null,
+      createdAt: s.createdAt,
+    });
+    // Chat session (if old record had chatClaudeSessionId) gets id + '-chat'.
+    if (s.chatClaudeSessionId) {
+      const chatId = s.id + '-chat';
+      newSessions.set(chatId, {
+        id: chatId,
+        dirId,
+        cli: 'claude',
+        kind: 'chat',
+        cliSessionId: s.chatClaudeSessionId,
+        createdAt: s.createdAt,
+      });
+      // Chat history was keyed by the old paired id; rename the file so the new chat
+      // session (id + '-chat') picks up its history.
+      chatHistoryRenames.push({ from: s.id, to: chatId });
+    }
+  }
+
+  return { newDirs, newSessions, chatHistoryRenames };
+}
+
+function loadPersistedState() {
+  let rawSessions = [];
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) rawSessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+  } catch (e) {
+    console.error('[multicc] Failed to load sessions.json:', e.message);
+  }
+
+  const dirMap = loadDirectories();
+
+  if (rawSessions.length > 0 && !isNewSchema(rawSessions)) {
+    console.log('[multicc] Migrating sessions.json to directory-based schema...');
+    const { newDirs, newSessions, chatHistoryRenames } = migrateOldSchema(rawSessions);
+    // Rename chat_history files (old paired id → new chat session id)
+    const CHAT_DIR = path.join(__dirname, 'chat_history');
+    for (const { from, to } of chatHistoryRenames) {
+      const src = path.join(CHAT_DIR, `${from}.json`);
+      const dst = path.join(CHAT_DIR, `${to}.json`);
+      try {
+        if (fs.existsSync(src) && !fs.existsSync(dst)) fs.renameSync(src, dst);
+      } catch (e) {
+        console.warn(`[multicc] chat_history rename failed ${from} → ${to}: ${e.message}`);
+      }
+    }
+    // Back up old sessions.json just in case
+    try { fs.copyFileSync(SESSIONS_FILE, SESSIONS_FILE + '.pre-directory.bak'); } catch (_) {}
+    return { directories: newDirs, persistedSessions: newSessions, needsSave: true };
+  }
+
+  // Already new-schema (or empty)
+  const sessionMap = new Map();
+  for (const s of rawSessions) sessionMap.set(s.id, s);
+  console.log(`[multicc] Loaded ${dirMap.size} directories, ${sessionMap.size} session(s)`);
+  return { directories: dirMap, persistedSessions: sessionMap, needsSave: false };
+}
+
 function savePersistedSessions() {
-  const data = [...persistedSessions.values()].map(({ id, cwd, createdAt, claudeSessionId, chatClaudeSessionId }) => ({ id, cwd, createdAt, claudeSessionId, chatClaudeSessionId }));
+  const data = [...persistedSessions.values()];
   try {
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
@@ -366,7 +619,23 @@ function savePersistedSessions() {
   }
 }
 
-const persistedSessions = loadPersistedSessions();
+const _state = loadPersistedState();
+const directories = _state.directories;
+const persistedSessions = _state.persistedSessions;
+if (_state.needsSave) {
+  saveDirectories();
+  savePersistedSessions();
+  console.log(`[multicc] Migration complete: ${directories.size} directories, ${persistedSessions.size} sessions`);
+}
+
+// Helper: resolve a session's cwd by looking up its directory.
+function cwdForSession(session) {
+  if (!session) return os.homedir();
+  if (session.type === 'aux') return session.cwd || __dirname;
+  const dir = directories.get(session.dirId);
+  if (dir && dir.path) return dir.path;
+  return session.cwd || os.homedir();
+}
 
 // ── Session management ──
 // { id, tmuxName, ttyPath, outputStream, fifoPath, buffer: string[], clients: Set<ws>, createdAt, lastActivity, cwd, exitCheckTimer }
@@ -384,22 +653,38 @@ function resolveCwd(current, arg) {
   return path.resolve(current, arg);
 }
 
-function createSession(id, cwd) {
-  // Fall back to homedir if the persisted cwd no longer exists
+function createSession(id) {
+  // Look up the persisted record (must exist — sessions are pre-created via REST now)
+  const persisted = persistedSessions.get(id);
+  if (!persisted) {
+    throw new Error(`Session ${id} has no persisted record. Create it via /api/directories/:id/sessions first.`);
+  }
+  if (persisted.kind && persisted.kind !== 'terminal') {
+    throw new Error(`Session ${id} is kind=${persisted.kind}, not a terminal`);
+  }
+
+  let cwd = cwdForSession(persisted);
   if (!cwd || !fs.existsSync(cwd)) {
     if (cwd) console.warn(`[multicc] cwd "${cwd}" not found, falling back to home dir`);
     cwd = os.homedir();
   }
 
-  // Get or create a stable Claude session UUID for this multicc session
-  const persisted = persistedSessions.get(id);
-  const claudeSessionId = persisted?.claudeSessionId || crypto.randomUUID();
+  const provider = providerFor(persisted);
+
+  // For Claude: pre-allocate a stable session UUID so chat-mode `--resume` works.
+  // For Codex: leave cliSessionId null on first launch and capture it asynchronously
+  // by scanning ~/.codex/sessions after the process boots.
+  if (provider.name === 'claude' && !persisted.cliSessionId) {
+    persisted.cliSessionId = crypto.randomUUID();
+    savePersistedSessions();
+  }
 
   // Create tmux session if it doesn't already exist (it may survive server restarts)
   let isRecovery = false;
+  const launchTime = Date.now();
   if (!tmuxHasSession(id)) {
-    console.log(`[multicc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd} (claude session: ${claudeSessionId})`);
-    tmuxCreateSession(id, cwd, 80, 24, claudeSessionId);
+    console.log(`[multicc] Creating tmux session: ${tmuxSessionName(id)} in ${cwd} (${provider.name} session: ${persisted.cliSessionId || '<pending>'})`);
+    tmuxCreateSession(id, cwd, 80, 24, persisted);
   } else {
     console.log(`[multicc] Attaching to existing tmux session: ${tmuxSessionName(id)}`);
     isRecovery = true;
@@ -420,24 +705,47 @@ function createSession(id, cwd) {
 
   const session = {
     id,
-    claudeSessionId,
+    cli: provider.name,
+    cliSessionId: persisted.cliSessionId || null,
+    dirId: persisted.dirId,
     tmuxName: tmuxSessionName(id),
     ttyPath,
     outputStream: stream,
     fifoPath,
     buffer: initialBuffer,
     clients: new Set(),
-    primaryClient: null,   // the client that controls resize (first to resize)
-    resizeOwner: null,     // locked resize ownership — only this ws can resize tmux
+    primaryClient: null,
+    // Tmux pane size = max(cols) × max(rows) across all attached clients.
+    // Each ws stores its desired cols/rows on itself (ws._desiredCols/Rows).
+    // appliedCols/Rows = the size we last actually pushed to tmux, used to skip no-op resizes.
+    appliedCols: 0,
+    appliedRows: 0,
     createdAt: persisted ? new Date(persisted.createdAt) : new Date(),
     lastActivity: new Date(),
     cwd,
     exitCheckTimer: null,
   };
 
-  // Save to persistence (includes claudeSessionId for chat mode --resume)
-  persistedSessions.set(id, { id, cwd, createdAt: session.createdAt, claudeSessionId });
-  savePersistedSessions();
+  // Schedule async session-id capture for codex (file-watch on ~/.codex/sessions).
+  // Polls every 1s for up to 30s. Persists the captured id so subsequent reattach can use `codex resume`.
+  if (provider.needsAsyncSessionIdCapture && !persisted.cliSessionId && !isRecovery) {
+    let attempts = 0;
+    const captureTimer = setInterval(() => {
+      attempts++;
+      const captured = findCodexSessionId(cwd, launchTime - 2000);
+      if (captured) {
+        clearInterval(captureTimer);
+        persisted.cliSessionId = captured;
+        session.cliSessionId = captured;
+        savePersistedSessions();
+        console.log(`[multicc] Captured codex session id for ${id}: ${captured}`);
+      } else if (attempts >= 30) {
+        clearInterval(captureTimer);
+        console.warn(`[multicc] Failed to capture codex session id for ${id} after 30s`);
+      }
+    }, 1000);
+    session.captureTimer = captureTimer;
+  }
 
   // Output stream → broadcast to all WebSocket clients
   const utf8Decoder = new StringDecoder('utf8');
@@ -466,7 +774,9 @@ function createSession(id, cwd) {
       if (!tmuxHasSession(id)) {
         console.log(`[multicc] Session ${id} exited (tmux session gone)`);
         cleanupPushMonitor(id);
-        const exitMsg = `\r\n\x1b[33m[Claude Code process exited]\x1b[0m\r\n`;
+        if (session.captureTimer) { clearInterval(session.captureTimer); session.captureTimer = null; }
+        const cliLabel = session.cli === 'codex' ? 'Codex' : 'Claude Code';
+        const exitMsg = `\r\n\x1b[33m[${cliLabel} process exited]\x1b[0m\r\n`;
         for (const client of session.clients) {
           if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify({ type: 'exit', data: exitMsg }));
@@ -529,14 +839,38 @@ app.use(express.json());
 
 app.get('/api/sessions', (req, res) => {
   const list = [...persistedSessions.values()]
-    .filter(p => p.type !== 'aux') // exclude __aux__ from normal listing
+    .filter(p => p.type !== 'aux')
     .map(p => {
-    const active = sessions.get(p.id);
-    return active
-      ? { id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true }
-      : { id: p.id, cwd: p.cwd, createdAt: p.createdAt, lastActivity: null, clients: 0, active: false };
-  });
-  // Append __aux__ session info separately
+      const active = sessions.get(p.id);
+      const activeChat = chatSessions.get(p.id);
+      const cwd = cwdForSession(p);
+      const base = {
+        id: p.id,
+        dirId: p.dirId || null,
+        cli: p.cli || 'claude',
+        kind: p.kind || 'terminal',
+        cliSessionId: p.cliSessionId || null,
+        label: p.label || null,
+        cwd,
+        createdAt: p.createdAt,
+      };
+      if (p.kind === 'chat' || active === undefined) {
+        // Chat sessions don't live in `sessions` (terminal) map; derive active state from chatSessions
+        const isChatActive = !!activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming);
+        return {
+          ...base,
+          lastActivity: activeChat?.lastActivity || null,
+          clients: activeChat ? activeChat.clients.size : 0,
+          active: isChatActive,
+        };
+      }
+      return {
+        ...base,
+        lastActivity: active.lastActivity,
+        clients: active.clients.size,
+        active: true,
+      };
+    });
   const auxP = persistedSessions.get(AUX_SESSION_ID);
   if (auxP) {
     list.unshift({
@@ -548,6 +882,134 @@ app.get('/api/sessions', (req, res) => {
     });
   }
   res.json(list);
+});
+
+// ── Directory REST API ──
+app.get('/api/directories', (req, res) => {
+  // Annotate each directory with counts per (cli, kind)
+  const list = [...directories.values()].map(d => {
+    const counts = { claude_terminal: 0, claude_chat: 0, codex_terminal: 0, codex_chat: 0 };
+    for (const s of persistedSessions.values()) {
+      if (s.dirId !== d.id) continue;
+      const k = `${s.cli || 'claude'}_${s.kind || 'terminal'}`;
+      if (counts[k] !== undefined) counts[k]++;
+    }
+    return { ...d, counts };
+  });
+  res.json(list);
+});
+
+app.post('/api/directories', (req, res) => {
+  const name = (req.body.name || '').trim();
+  const rawPath = (req.body.path || '').trim();
+  if (!name || !rawPath) return res.status(400).json({ error: 'name and path required' });
+  const resolvedPath = resolveCwd(os.homedir(), rawPath);
+  if (!fs.existsSync(resolvedPath)) {
+    return res.status(400).json({ error: `path does not exist: ${resolvedPath}` });
+  }
+  const id = crypto.randomUUID();
+  const dir = { id, name, path: resolvedPath, createdAt: new Date().toISOString() };
+  directories.set(id, dir);
+  saveDirectories();
+  res.json(dir);
+});
+
+app.patch('/api/directories/:id', (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  if (req.body.name) d.name = String(req.body.name).trim();
+  if (req.body.path) {
+    const resolved = resolveCwd(os.homedir(), String(req.body.path).trim());
+    if (!fs.existsSync(resolved)) return res.status(400).json({ error: `path does not exist: ${resolved}` });
+    d.path = resolved;
+  }
+  saveDirectories();
+  res.json(d);
+});
+
+app.delete('/api/directories/:id', (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  // Refuse to delete a non-empty directory unless ?force=1 is passed
+  const owned = [...persistedSessions.values()].filter(s => s.dirId === d.id);
+  if (owned.length > 0 && req.query.force !== '1') {
+    return res.status(400).json({ error: `directory has ${owned.length} session(s); pass ?force=1 to delete them too`, sessions: owned.map(s => s.id) });
+  }
+  // Kill + remove all sessions under this dir
+  for (const s of owned) {
+    const active = sessions.get(s.id);
+    if (active) { tmuxKillSession(s.id); sessions.delete(s.id); }
+    const chat = chatSessions.get(s.id);
+    if (chat) {
+      if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
+      chatSessions.delete(s.id);
+    }
+    persistedSessions.delete(s.id);
+  }
+  directories.delete(d.id);
+  saveDirectories();
+  savePersistedSessions();
+  res.json({ ok: true, removedSessions: owned.length });
+});
+
+app.get('/api/directories/:id/sessions', (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  const owned = [...persistedSessions.values()]
+    .filter(s => s.dirId === d.id)
+    .map(s => {
+      const active = sessions.get(s.id);
+      const activeChat = chatSessions.get(s.id);
+      return {
+        id: s.id, dirId: s.dirId, cli: s.cli, kind: s.kind,
+        cliSessionId: s.cliSessionId || null, label: s.label || null,
+        createdAt: s.createdAt,
+        active: s.kind === 'terminal' ? !!active : !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)),
+        clients: s.kind === 'terminal' ? (active?.clients.size || 0) : (activeChat?.clients.size || 0),
+      };
+    });
+  res.json({ directory: d, sessions: owned });
+});
+
+app.post('/api/directories/:id/sessions', (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  const cli = (req.body.cli || '').trim();
+  const kind = (req.body.kind || '').trim();
+  const label = (req.body.label || '').trim() || null;
+  if (!['claude', 'codex'].includes(cli)) return res.status(400).json({ error: 'cli must be claude or codex' });
+  if (!['terminal', 'chat'].includes(kind)) return res.status(400).json({ error: 'kind must be terminal or chat' });
+
+  // Generate a unique id. Use generateId() for short ids; append kind suffix for human readability.
+  let id;
+  let tries = 0;
+  do {
+    const base = generateId();
+    id = kind === 'chat' ? `${base}-chat` : base;
+    tries++;
+    if (tries > 10) return res.status(500).json({ error: 'could not allocate unique session id' });
+  } while (persistedSessions.has(id));
+
+  const session = {
+    id,
+    dirId: d.id,
+    cli, kind,
+    cliSessionId: null,   // claude gets one allocated on spawn; codex captures from first event
+    label,
+    createdAt: new Date().toISOString(),
+  };
+  persistedSessions.set(id, session);
+  savePersistedSessions();
+  res.json(session);
+});
+
+// PATCH a session — currently supports label edits
+app.patch('/api/sessions/:id', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  if (req.body.label !== undefined) s.label = (req.body.label || '').trim() || null;
+  savePersistedSessions();
+  res.json(s);
 });
 
 app.get('/api/sessions/:id', (req, res) => {
@@ -563,110 +1025,104 @@ app.get('/api/sessions/:id', (req, res) => {
 });
 
 app.delete('/api/sessions/:id', (req, res) => {
-  const session = sessions.get(req.params.id);
-  if (!session && !persistedSessions.has(req.params.id)) {
+  const id = req.params.id;
+  const session = sessions.get(id);
+  const chat = chatSessions.get(id);
+  if (!session && !chat && !persistedSessions.has(id)) {
     return res.status(404).json({ error: 'Session not found' });
   }
   if (session) {
     tmuxKillSession(session.id);
-    sessions.delete(req.params.id);
+    if (session.exitCheckTimer) clearInterval(session.exitCheckTimer);
+    if (session.captureTimer) clearInterval(session.captureTimer);
+    sessions.delete(id);
   }
-  persistedSessions.delete(req.params.id);
+  if (chat) {
+    if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
+    if (chat.pendingClassifyTimer) clearTimeout(chat.pendingClassifyTimer);
+    chatSessions.delete(id);
+  }
+  persistedSessions.delete(id);
   savePersistedSessions();
   res.json({ ok: true });
 });
 
+// Relocate: moves a session to a different directory. Caller passes the target dirId.
+// (Old "change cwd" semantics are gone — cwd lives on the directory now.)
 app.post('/api/sessions/:id/relocate', (req, res) => {
   const id = req.params.id;
-  const rawCwd = (req.body.cwd || '').trim();
-  if (!rawCwd) return res.status(400).json({ error: 'cwd required' });
-
-  const rawCurrentCwd = (sessions.get(id) || persistedSessions.get(id))?.cwd;
-  const currentCwd = (rawCurrentCwd && fs.existsSync(rawCurrentCwd)) ? rawCurrentCwd : os.homedir();
-  const resolvedCwd = resolveCwd(currentCwd, rawCwd);
-
-  if (!fs.existsSync(resolvedCwd)) {
-    return res.status(400).json({ error: `目录不存在: ${resolvedCwd}` });
-  }
+  const targetDirId = (req.body.dirId || '').trim();
+  if (!targetDirId) return res.status(400).json({ error: 'dirId required (cwd is now owned by the directory)' });
+  const targetDir = directories.get(targetDirId);
+  if (!targetDir) return res.status(404).json({ error: 'target directory not found' });
+  const persisted = persistedSessions.get(id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  if (!fs.existsSync(targetDir.path)) return res.status(400).json({ error: `directory path missing on disk: ${targetDir.path}` });
 
   const oldSession = sessions.get(id);
-
-  // Notify clients before killing so they can clear & prepare to reconnect
   if (oldSession) {
     for (const client of oldSession.clients) {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'relocate', cwd: resolvedCwd }));
+        client.send(JSON.stringify({ type: 'relocate', cwd: targetDir.path }));
       }
     }
-  }
-
-  // Remove from map first so the onExit guard skips the stale exit
-  sessions.delete(id);
-  if (oldSession) {
+    sessions.delete(id);
     tmuxKillSession(oldSession.id);
   }
 
-  // Persist new cwd
-  const p = persistedSessions.get(id);
-  if (p) {
-    p.cwd = resolvedCwd;
-  } else {
-    persistedSessions.set(id, { id, cwd: resolvedCwd, createdAt: new Date(), claudeSessionId: crypto.randomUUID() });
-  }
+  persisted.dirId = targetDirId;
+  // Clear cliSessionId so the new instance starts fresh in the new directory
+  persisted.cliSessionId = null;
   savePersistedSessions();
 
-  // Start fresh claude in the new directory
-  try {
-    createSession(id, resolvedCwd);
-    console.log(`[multicc] Session ${id} relocated → ${resolvedCwd}`);
-    res.json({ ok: true, cwd: resolvedCwd });
-  } catch (err) {
-    console.error('[multicc] Relocate failed:', err);
-    res.status(500).json({ error: err.message });
+  if (persisted.kind === 'terminal') {
+    try {
+      createSession(id);
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   }
+  res.json({ ok: true, cwd: targetDir.path });
 });
 
-// ── Restart session (kill tmux + respawn claude in same cwd) ──
+// ── Restart session (kill tmux + respawn CLI in same directory, fresh conversation) ──
 app.post('/api/sessions/:id/restart', (req, res) => {
   const id = req.params.id;
   const oldSession = sessions.get(id);
   const persisted = persistedSessions.get(id);
   if (!oldSession && !persisted) return res.status(404).json({ error: 'Session not found' });
+  if (persisted && persisted.kind && persisted.kind !== 'terminal') {
+    return res.status(400).json({ error: 'restart only applies to terminal sessions' });
+  }
 
-  const cwd = oldSession?.cwd || persisted?.cwd || os.homedir();
-
-  // Collect clients before teardown (they'll reconnect to the new session)
+  const cwd = cwdForSession(persisted);
   const oldClients = oldSession ? [...oldSession.clients] : [];
 
-  // Tear down old session
   sessions.delete(id);
   if (oldSession) {
     stopOutputCapture(oldSession);
     if (oldSession.exitCheckTimer) clearInterval(oldSession.exitCheckTimer);
+    if (oldSession.captureTimer) clearInterval(oldSession.captureTimer);
     cleanupPushMonitor(id);
     oldSession.clients.clear();
   }
   tmuxKillSession(id);
 
-  // Clear old claudeSessionId so createSession generates a fresh one (new conversation)
+  // Clear cliSessionId so a brand-new conversation starts (claude allocates a fresh UUID,
+  // codex generates a fresh thread on first turn).
   if (persisted) {
-    delete persisted.claudeSessionId;
-    persistedSessions.set(id, persisted);
+    persisted.cliSessionId = null;
     savePersistedSessions();
   }
 
-  // Start fresh claude in the same directory
   try {
-    createSession(id, cwd);
+    createSession(id);
     console.log(`[multicc] Session ${id} restarted in ${cwd}`);
-
-    // NOW notify old clients to reconnect (new session is ready)
     for (const client of oldClients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(JSON.stringify({ type: 'restart' }));
       }
     }
-
     res.json({ ok: true, cwd });
   } catch (err) {
     console.error('[multicc] Restart failed:', err);
@@ -1709,7 +2165,9 @@ const auxQueue = {
   prespawn() {
     if (this._warmProc) return; // already warming
     try {
-      const proc = spawn(CLAUDE_CMD, ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose'], {
+      // AuxQueue runs single-turn, stateless tasks (intent classify, voice refine) —
+      // Haiku is plenty and ~30× cheaper than the user's default Opus.
+      const proc = spawn(CLAUDE_CMD, ['-p', '--model', 'haiku', '--output-format', 'stream-json', '--max-turns', '1', '--verbose'], {
         cwd: __dirname,
         env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],  // stdin open — process blocks waiting for input
@@ -1832,7 +2290,7 @@ const auxQueue = {
       } else {
         // Fallback: cold spawn with prompt as CLI argument
         console.log('[multicc/aux] No warm process available, cold spawning');
-        proc = spawn(CLAUDE_CMD, ['-p', '--output-format', 'stream-json', '--max-turns', '1', '--verbose', task.prompt], {
+        proc = spawn(CLAUDE_CMD, ['-p', '--model', 'haiku', '--output-format', 'stream-json', '--max-turns', '1', '--verbose', task.prompt], {
           cwd: __dirname,
           env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -2092,43 +2550,45 @@ ${tail}`,
 // ── Chat mode: stream-json WebSocket ──
 function handleChatWs(ws, req, urlObj) {
   const sessionName = urlObj.searchParams.get('session') || '_default';
-  const sessionData = sessions.get(sessionName) || persistedSessions.get(sessionName);
-  let cwd = urlObj.searchParams.get('cwd') || '';
-  if (!cwd && sessionData?.cwd) cwd = sessionData.cwd;
-  if (!cwd) cwd = os.homedir();
+  const persisted = persistedSessions.get(sessionName);
+  if (!persisted) {
+    ws.send(JSON.stringify({ type: 'error', error:
+      `Chat session "${sessionName}" does not exist. Create it via the dashboard first.` }));
+    ws.close();
+    return;
+  }
+  if (persisted.kind && persisted.kind !== 'chat') {
+    ws.send(JSON.stringify({ type: 'error', error:
+      `Session "${sessionName}" is not a chat session (kind=${persisted.kind}).` }));
+    ws.close();
+    return;
+  }
+  const cli = persisted.cli || 'claude';
+  const cwd = cwdForSession(persisted);
 
   // Get or create session-level state
   let cs = chatSessions.get(sessionName);
   if (!cs) {
-    // Get or create a stable Claude session UUID for chat resume
-    // Use a SEPARATE field (chatClaudeSessionId) so terminal restarts don't nuke chat context
-    const existing = persistedSessions.get(sessionName);
-    let chatClaudeSessionId = existing?.chatClaudeSessionId;
-    if (!chatClaudeSessionId) {
-      chatClaudeSessionId = crypto.randomUUID();
-      if (existing) {
-        existing.chatClaudeSessionId = chatClaudeSessionId;
-      } else {
-        persistedSessions.set(sessionName, { id: sessionName, cwd, createdAt: new Date(), chatClaudeSessionId });
-      }
+    // For claude: pre-allocate the session UUID (needed for --session-id on first turn).
+    // For codex: leave null; captured from `thread.started` event on first turn.
+    if (cli === 'claude' && !persisted.cliSessionId) {
+      persisted.cliSessionId = crypto.randomUUID();
       savePersistedSessions();
     }
 
     const history = loadChatHistory(sessionName);
     cs = {
       clients: new Set(),
-      claudeProc: null,
+      claudeProc: null,   // (kept name for backwards compat in rest of handler; holds any cli child proc)
       lineBuf: '',
-      chatClaudeSessionId,
+      cli,
       chatTurnCount: history.filter(m => m.role === 'assistant').length,
       cwd,
       currentAssistantText: '',
       currentToolCalls: [],
       currentCost: null,
       isStreaming: false,
-      // Replay buffer: stream events from current turn, for reconnecting clients
       streamReplay: [],
-      // AuxQueue intent classification: 30s delayed trigger
       pendingClassifyTimer: null,
       pendingClassifyTaskId: null,
     };
@@ -2140,6 +2600,7 @@ function handleChatWs(ws, req, urlObj) {
   ws.send(JSON.stringify({
     type: 'system', subtype: 'init',
     cwd: cs.cwd, session: sessionName, session_id: sessionName,
+    cli: cs.cli,
     is_streaming: cs.isStreaming,
   }));
 
@@ -2182,7 +2643,8 @@ function handleChatWs(ws, req, urlObj) {
       if (msg.type === 'cancel') {
         cancelPendingClassify(cs);
         if (cs.claudeProc) {
-          console.log('[multicc/chat] Cancel requested, killing claude process');
+          console.log(`[multicc/chat] [${sessionName}] Cancel requested by user, killing claude pid=${cs.claudeProc.pid}`);
+          cs._killReason = 'user_cancel';
           try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
           cs.claudeProc = null;
           cs.lineBuf = '';
@@ -2206,13 +2668,16 @@ function handleChatWs(ws, req, urlObj) {
         const h = chatHistories.get(sessionName);
         if (h) h.length = 0;
         saveChatHistory(sessionName);
-        // Reset Claude session so next turn starts fresh
-        cs.chatClaudeSessionId = crypto.randomUUID();
+        // Reset the CLI session so next turn starts fresh:
+        //   claude: allocate a new UUID (will be used as --session-id)
+        //   codex:  clear so next exec allocates a fresh thread (will be captured from thread.started)
+        const pExisting = persistedSessions.get(sessionName);
+        if (pExisting) {
+          pExisting.cliSessionId = (cs.cli === 'claude') ? crypto.randomUUID() : null;
+          savePersistedSessions();
+        }
         cs.chatTurnCount = 0;
-        const existing = persistedSessions.get(sessionName);
-        if (existing) existing.chatClaudeSessionId = cs.chatClaudeSessionId;
-        savePersistedSessions();
-        console.log(`[multicc/chat] Cleared history and reset Claude session for ${sessionName}`);
+        console.log(`[multicc/chat] Cleared history and reset ${cs.cli} session for ${sessionName}`);
         return;
       }
 
@@ -2220,6 +2685,8 @@ function handleChatWs(ws, req, urlObj) {
         cancelPendingClassify(cs);
         // Kill previous process if still running
         if (cs.claudeProc) {
+          console.log(`[multicc/chat] [${sessionName}] New user_message while claude pid=${cs.claudeProc.pid} still running, killing previous turn`);
+          cs._killReason = 'new_user_message';
           try { cs.claudeProc.kill('SIGTERM'); } catch (_) {}
           cs.claudeProc = null;
           cs.lineBuf = '';
@@ -2249,33 +2716,155 @@ function handleChatWs(ws, req, urlObj) {
         cs.streamReplay = [];
         cs._resultSaved = false;
 
-        const args = [
-          '-p',
-          '--output-format', 'stream-json',
-          '--verbose',
-          '--include-partial-messages',
-          '--dangerously-skip-permissions',
-        ];
-
-        // Resume strategy: first turn starts a named session, subsequent turns resume it
-        if (cs.chatTurnCount > 0) {
-          args.push('--resume', cs.chatClaudeSessionId);
-        } else {
-          args.push('--session-id', cs.chatClaudeSessionId);
-        }
-
-        args.push(msg.text);
-
-        console.log(`[multicc/chat] Spawning (turn ${cs.chatTurnCount}): ${CLAUDE_CMD} ${args.join(' ').slice(0, 200)}...`);
+        const provider = cliProviders[cs.cli] || cliProviders.claude;
+        // For claude: first turn → --session-id <uuid>, subsequent → --resume <uuid>.
+        // For codex:  first turn → exec --json, subsequent → exec resume <id> --json.
+        const isFirstTurn = cs.chatTurnCount === 0 || !persisted.cliSessionId;
+        const args = provider.buildChatSpawnArgs(persisted, msg.text, { isFirstTurn });
+        console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
         const spawnChat = (spawnArgs, isRetry) => {
-          const proc = spawn(CLAUDE_CMD, spawnArgs, {
+          const proc = spawn(provider.cmd, spawnArgs, {
             cwd: cs.cwd,
             env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
             stdio: ['ignore', 'pipe', 'pipe'],
           });
 
+          const spawnTs = Date.now();
+          console.log(`[multicc/chat] [${sessionName}] ${cs.cli} spawned pid=${proc.pid} turn=${cs.chatTurnCount} isRetry=${!!isRetry} clients=${cs.clients.size}`);
           let stderrBuf = '';
+
+          // Normalize a single JSONL line into the claude-shaped event stream the frontend
+          // already consumes. Returns an array of events to forward (may be empty), or null
+          // to forward the original event as-is (claude path).
+          const handleLine = (line) => {
+            let evt;
+            try { evt = JSON.parse(line); } catch { return; }
+
+            if (cs.cli === 'codex') {
+              // ── Codex → claude-shaped events ──
+              if (evt.type === 'thread.started') {
+                if (evt.thread_id && !persisted.cliSessionId) {
+                  persisted.cliSessionId = evt.thread_id;
+                  savePersistedSessions();
+                  console.log(`[multicc/chat] [${sessionName}] captured codex thread_id=${evt.thread_id}`);
+                }
+                return;  // don't forward
+              }
+              if (evt.type === 'turn.started') return;  // noise, drop
+              if (evt.type === 'item.started') {
+                const it = evt.item || {};
+                if (it.type === 'command_execution') {
+                  // Emit an assistant event with a tool_use block so a tool card appears
+                  const mapped = {
+                    type: 'assistant',
+                    message: { content: [{ type: 'tool_use', name: 'Bash', id: it.id, input: { command: it.command } }] },
+                  };
+                  forward(mapped);
+                  cs.currentToolCalls.push({ name: 'Bash', input: { command: it.command }, id: it.id });
+                }
+                return;
+              }
+              if (evt.type === 'item.completed') {
+                const it = evt.item || {};
+                if (it.type === 'command_execution') {
+                  // Emit a tool_result event to fill in the existing tool card
+                  const resultText = it.aggregated_output || '';
+                  const mapped = {
+                    type: 'user',
+                    message: { content: [{ type: 'tool_result', tool_use_id: it.id, content: resultText, is_error: (it.exit_code && it.exit_code !== 0) || false }] },
+                  };
+                  forward(mapped);
+                  const tc = cs.currentToolCalls.find(t => t.id === it.id);
+                  if (tc) {
+                    tc.result = resultText.length > 1000 ? resultText.slice(0, 1000) + '...' : resultText;
+                    tc.is_error = (it.exit_code && it.exit_code !== 0) || false;
+                  }
+                  return;
+                }
+                if (it.type === 'agent_message') {
+                  const text = it.text || '';
+                  cs.currentAssistantText += (cs.currentAssistantText ? '\n\n' : '') + text;
+                  forward({ type: 'assistant', message: { content: [{ type: 'text', text: text + '\n\n' }] } });
+                  return;
+                }
+                if (it.type === 'reasoning') {
+                  // Emit as a collapsible thinking-style tool card so users can see but it
+                  // doesn't pollute the main assistant text stream.
+                  forward({
+                    type: 'assistant',
+                    message: { content: [{ type: 'tool_use', name: 'Thinking', id: it.id, input: { text: it.text || '' } }] },
+                  });
+                  cs.currentToolCalls.push({ name: 'Thinking', input: { text: it.text || '' }, id: it.id, result: it.text || '' });
+                  return;
+                }
+                return;
+              }
+              if (evt.type === 'turn.completed') {
+                cs.currentCost = null;  // codex doesn't report dollar cost
+                const usage = evt.usage || {};
+                if (cs.currentAssistantText || cs.currentToolCalls.length) {
+                  appendChatMessage(sessionName, {
+                    role: 'assistant', content: cs.currentAssistantText,
+                    tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+                    cost: null, usage, ts: Date.now(),
+                  });
+                  cs.chatTurnCount++;
+                  cs._resultSaved = true;
+                }
+                forward({ type: 'result', total_cost_usd: null, usage });
+                scheduleIntentClassify(cs, sessionName);
+                return;
+              }
+              return;  // unknown event type: drop
+            }
+
+            // ── Claude: unchanged path ──
+            if (evt.type === 'assistant' && evt.message?.content) {
+              for (const block of evt.message.content) {
+                if (block.type === 'text') cs.currentAssistantText += block.text;
+                if (block.type === 'tool_use') {
+                  cs.currentToolCalls.push({ name: block.name, input: block.input, id: block.id });
+                }
+              }
+            }
+            if (evt.type === 'user' && evt.message?.content) {
+              for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
+                if (r.type === 'tool_result') {
+                  const tc = cs.currentToolCalls.find(t => t.id === r.tool_use_id);
+                  if (tc) {
+                    tc.result = typeof r.content === 'string' ? r.content :
+                      Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
+                      JSON.stringify(r.content);
+                    tc.is_error = r.is_error || false;
+                    if (tc.result && tc.result.length > 1000) tc.result = tc.result.slice(0, 1000) + '...';
+                  }
+                }
+              }
+            }
+            if (evt.type === 'result') {
+              cs.currentCost = evt.total_cost_usd || null;
+              if (cs.currentAssistantText || cs.currentToolCalls.length) {
+                appendChatMessage(sessionName, {
+                  role: 'assistant', content: cs.currentAssistantText,
+                  tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+                  cost: cs.currentCost, ts: Date.now(),
+                });
+                cs.chatTurnCount++;
+                cs._resultSaved = true;
+              }
+              scheduleIntentClassify(cs, sessionName);
+            }
+            // Drop claude's `system init` — server already sent its own
+            if (evt.type === 'system' && evt.subtype === 'init') return;
+            forward(evt);
+          };
+
+          const forward = (evt) => {
+            cs.streamReplay.push(evt);
+            if (cs.streamReplay.length > 500) cs.streamReplay.shift();
+            chatBroadcast(sessionName, evt);
+          };
 
           proc.stdout.on('data', (chunk) => {
             cs.lineBuf += chunk.toString();
@@ -2283,70 +2872,7 @@ function handleChatWs(ws, req, urlObj) {
             cs.lineBuf = lines.pop();
             for (const line of lines) {
               if (!line.trim()) continue;
-              try {
-                const evt = JSON.parse(line);
-
-                // Accumulate for history
-                if (evt.type === 'assistant' && evt.message?.content) {
-                  for (const block of evt.message.content) {
-                    if (block.type === 'text') cs.currentAssistantText += block.text;
-                    if (block.type === 'tool_use') {
-                      cs.currentToolCalls.push({
-                        name: block.name,
-                        input: block.input,
-                        id: block.id,
-                      });
-                    }
-                  }
-                }
-                if (evt.type === 'user' && evt.message?.content) {
-                  for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
-                    if (r.type === 'tool_result') {
-                      const tc = cs.currentToolCalls.find(t => t.id === r.tool_use_id);
-                      if (tc) {
-                        tc.result = typeof r.content === 'string' ? r.content :
-                          Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
-                          JSON.stringify(r.content);
-                        tc.is_error = r.is_error || false;
-                        if (tc.result && tc.result.length > 1000) {
-                          tc.result = tc.result.slice(0, 1000) + '...';
-                        }
-                      }
-                    }
-                  }
-                }
-                if (evt.type === 'result') {
-                  cs.currentCost = evt.total_cost_usd || null;
-                  // Save assistant response immediately on result (don't wait for proc close)
-                  if (cs.currentAssistantText || cs.currentToolCalls.length) {
-                    appendChatMessage(sessionName, {
-                      role: 'assistant', content: cs.currentAssistantText,
-                      tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
-                      cost: cs.currentCost, ts: Date.now(),
-                    });
-                    cs.chatTurnCount++;
-                    cs._resultSaved = true;  // flag so proc.close doesn't double-save
-                  }
-                  // Schedule intent classification after 30s idle
-                  scheduleIntentClassify(cs, sessionName);
-                }
-
-                // Drop Claude CLI's own `system init` event — the server already
-                // sent its own `system init` on WS connect. Forwarding Claude's
-                // init (which has no `is_streaming` field) causes the client to
-                // spuriously fire the "completed while disconnected" warning and
-                // to insert extra "Session: …" dividers into the chat.
-                if (evt.type === 'system' && evt.subtype === 'init') {
-                  continue;
-                }
-
-                // Buffer for reconnect replay (keep last 500 events to avoid unbounded growth)
-                cs.streamReplay.push(evt);
-                if (cs.streamReplay.length > 500) cs.streamReplay.shift();
-
-                // Broadcast to all connected clients
-                chatBroadcast(sessionName, evt);
-              } catch (_) {}
+              try { handleLine(line); } catch (_) {}
             }
           });
 
@@ -2355,44 +2881,70 @@ function handleChatWs(ws, req, urlObj) {
             console.error(`[multicc/chat] stderr: ${chunk.toString().slice(0, 200)}`);
           });
 
-          proc.on('close', (code) => {
+          proc.on('error', (err) => {
+            console.error(`[multicc/chat] [${sessionName}] pid=${proc.pid} spawn error: ${err.message}`);
+          });
+
+          proc.on('close', (code, signal) => {
+            const durMs = Date.now() - spawnTs;
+            const killReason = cs._killReason || null;
+            cs._killReason = null;
+            const diag = {
+              session: sessionName, cli: cs.cli, pid: proc.pid, code, signal, durMs, killReason,
+              resultSaved: !!cs._resultSaved,
+              gotText: (cs.currentAssistantText || '').length,
+              toolCalls: cs.currentToolCalls.length,
+              liveClients: cs.clients.size,
+              isRetry: !!isRetry,
+              stderrTail: stderrBuf.slice(-300).trim(),
+            };
+            let kind = 'normal';
+            if (signal) kind = killReason ? `killed(${killReason})` : `signaled(${signal})`;
+            else if (code !== 0) kind = 'nonzero_exit';
+            else if (!cs._resultSaved && !cs.currentAssistantText) kind = 'empty_exit';
+            console.log(`[multicc/chat] [${sessionName}] close kind=${kind} ${JSON.stringify(diag)}`);
+
             if (cs.lineBuf.trim()) {
-              try {
-                const evt = JSON.parse(cs.lineBuf);
-                if (evt.type === 'result') cs.currentCost = evt.total_cost_usd || null;
-                cs.streamReplay.push(evt);
-                chatBroadcast(sessionName, evt);
-              } catch (_) {}
+              try { handleLine(cs.lineBuf); } catch (_) {}
             }
             cs.lineBuf = '';
             cs.isStreaming = false;
             cs.streamReplay = [];
 
-            // If resume failed (non-zero exit OR zero exit with no output), retry without resume
-            if (!isRetry && !cs.currentAssistantText && cs.chatTurnCount > 0) {
-              console.warn(`[multicc/chat] --resume failed (code ${code}), falling back to standalone. stderr: ${stderrBuf.slice(0, 300)}`);
-              cs.chatClaudeSessionId = crypto.randomUUID();
+            // If spawn yielded no assistant text and it's not a user-initiated kill, retry
+            // once with a fresh session id (covers resume-failed / session-id conflict cases).
+            if (!isRetry && !cs.currentAssistantText && !killReason) {
+              const stderrTail = stderrBuf.slice(-300).trim();
+              const reason = stderrTail.includes('already in use') ? 'session-id conflict'
+                : stderrTail.includes('No conversation found') || stderrTail.includes('session not found') ? 'resume target missing'
+                : `exit ${code}${signal ? '/' + signal : ''}`;
+              console.warn(`[multicc/chat] [${sessionName}] ${cs.cli} yielded no output (${reason}), retrying fresh. stderr: ${stderrTail.slice(0, 200)}`);
+              // Reset session id so the retry starts a brand-new conversation
+              if (cs.cli === 'claude') persisted.cliSessionId = crypto.randomUUID();
+              else persisted.cliSessionId = null;  // codex will allocate on first turn
+              savePersistedSessions();
               cs.chatTurnCount = 0;
               cs.isStreaming = true;
               cs.streamReplay = [];
-              const existing = persistedSessions.get(sessionName);
-              if (existing) existing.chatClaudeSessionId = cs.chatClaudeSessionId;
-              savePersistedSessions();
-
-              const fallbackArgs = [
-                '-p', '--output-format', 'stream-json', '--verbose',
-                '--include-partial-messages', '--dangerously-skip-permissions',
-                '--session-id', cs.chatClaudeSessionId,
-                msg.text,
-              ];
-              chatBroadcast(sessionName, { type: 'system', subtype: 'warning', message: 'Resume failed, starting fresh session' });
+              const fallbackArgs = provider.buildChatSpawnArgs(persisted, msg.text, { isFirstTurn: true });
+              chatBroadcast(sessionName, {
+                type: 'system', subtype: 'warning',
+                message: `${cs.cli} 启动失败（${reason}），已用新会话重试`,
+              });
               cs.claudeProc = spawnChat(fallbackArgs, true);
               return;
             }
 
+            if (isRetry && !cs.currentAssistantText) {
+              const stderrTail = stderrBuf.slice(-300).trim();
+              chatBroadcast(sessionName, {
+                type: 'error',
+                error: stderrTail ? `${cs.cli} 无响应：${stderrTail}` : `${cs.cli} 无响应（exit ${code}${signal ? '/' + signal : ''}）`,
+              });
+            }
+
             cs.claudeProc = null;
 
-            // Save assistant response to history (skip if already saved on 'result' event)
             if (!cs._resultSaved && (cs.currentAssistantText || cs.currentToolCalls.length)) {
               appendChatMessage(sessionName, {
                 role: 'assistant', content: cs.currentAssistantText,
@@ -2405,12 +2957,7 @@ function handleChatWs(ws, req, urlObj) {
             cs.currentToolCalls = [];
             cs._resultSaved = false;
 
-            // Notify clients that streaming is definitively over (safety net:
-            // if the 'result' event was missed due to buffering / disconnect,
-            // this ensures the cancel button goes away)
             chatBroadcast(sessionName, { type: 'stream_end' });
-
-            console.log(`[multicc/chat] claude exited with code ${code}`);
           });
 
           return proc;
@@ -2473,24 +3020,28 @@ wss.on('connection', (ws, req) => {
     session = sessions.get(sessionId);
     console.log(`[multicc] Client attached to session ${sessionId} (${session.clients.size + 1} total)`);
   } else {
-    const customId = urlObj.searchParams.get('newid');
-    if (!sessionId) sessionId = customId ? customId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) : generateId();
     const persisted = persistedSessions.get(sessionId);
-    const requestedCwd = urlObj.searchParams.get('cwd');
-    const cwd = requestedCwd ? resolveCwd(os.homedir(), requestedCwd)
-              : persisted    ? persisted.cwd
-              :                os.homedir();
-    if (persisted) {
-      console.log(`[multicc] Restoring session ${sessionId} (cwd: ${cwd})`);
-    } else {
-      console.log(`[multicc] Creating session ${sessionId}`);
+    if (!persisted) {
+      ws.send(JSON.stringify({ type: 'error', data:
+        `Session ${sessionId} does not exist.\r\n` +
+        `Create one in the dashboard first (Manage → pick a directory → + Terminal).\r\n` }));
+      ws.close();
+      return;
     }
+    if (persisted.kind && persisted.kind !== 'terminal') {
+      ws.send(JSON.stringify({ type: 'error', data:
+        `Session ${sessionId} is a ${persisted.kind} session, not a terminal.\r\n` }));
+      ws.close();
+      return;
+    }
+    console.log(`[multicc] Spawning terminal session ${sessionId}`);
     try {
-      session = createSession(sessionId, cwd);
+      session = createSession(sessionId);
     } catch (err) {
-      const msg = `Failed to launch Claude Code: ${err.message}\r\n` +
-        `Make sure "claude" is installed and available in PATH.\r\n` +
-        `You can also set the CLAUDE_CMD environment variable.\r\n`;
+      const cliLabel = (persisted.cli === 'codex') ? 'codex' : 'claude';
+      const msg = `Failed to launch ${cliLabel}: ${err.message}\r\n` +
+        `Make sure "${cliLabel}" is installed and available in PATH.\r\n` +
+        `You can also set the ${cliLabel.toUpperCase()}_CMD environment variable.\r\n`;
       ws.send(JSON.stringify({ type: 'error', data: msg }));
       ws.close();
       return;
@@ -2504,7 +3055,7 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', () => { ws.isAlive = true; });
 
   // Tell client its session ID
-  ws.send(JSON.stringify({ type: 'session_id', id: sessionId }));
+  ws.send(JSON.stringify({ type: 'session_id', id: sessionId, cli: session.cli || 'claude' }));
 
   // Don't replay buffered output — the toggle-resize trick below forces a full TUI
   // redraw at the client's actual dimensions, which is the only way to get correct layout.
@@ -2529,11 +3080,7 @@ wss.on('connection', (ws, req) => {
               const arg = (cdMatch[1] || '').trim().replace(/^["']|["']$/g, '');
               const newCwd = resolveCwd(session.cwd, arg);
               session.cwd = newCwd;
-              const p = persistedSessions.get(session.id);
-              if (p) {
-                p.cwd = newCwd;
-                savePersistedSessions();
-              }
+              // Note: directory path is NOT updated — cwd drift within a shell is local to the session.
               console.log(`[multicc] Session ${session.id} cwd → ${newCwd}`);
             }
             inputBuf = '';
@@ -2557,22 +3104,18 @@ wss.on('connection', (ws, req) => {
       } else if (msg.type === 'resize') {
         const cols = Math.max(1, msg.cols);
         const rows = Math.max(1, msg.rows);
+        ws._desiredCols = cols;
+        ws._desiredRows = rows;
 
-        // Resize ownership: first client to resize "owns" the terminal dimensions.
-        // Other clients are ignored until the owner disconnects.
-        // This prevents two windows (e.g. desktop + mobile) from fighting over size.
-        if (!session.resizeOwner || session.resizeOwner === ws) {
-          session.resizeOwner = ws;
-
-          if (firstResize) {
-            firstResize = false;
-            if (session.clients.size <= 1) {
-              tmuxResize(session.id, cols + 1, rows);
-            }
-          }
-          tmuxResize(session.id, cols, rows);
+        // Tmux pane = max across all attached clients. On a sole-client first
+        // resize, send a +1 toggle to force the TUI to redraw at the right size.
+        if (firstResize && session.clients.size <= 1) {
+          firstResize = false;
+          tmuxResize(session.id, cols + 1, rows);
+          session.appliedCols = cols + 1;
+          session.appliedRows = rows;
         }
-        // else: non-owner client — silently ignore resize
+        applyMaxClientSize(session);
       } else if (msg.type === 'upload') {
         const { tempId, name, mime, data } = msg;
         const origExt = (name && path.extname(name).replace(/^\./, '')) || '';
@@ -2592,7 +3135,9 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     session.clients.delete(ws);
     if (session.primaryClient === ws) session.primaryClient = null;
-    if (session.resizeOwner === ws) session.resizeOwner = null;
+    // The departing client may have been the widest/tallest — recompute and
+    // shrink tmux if the remaining clients all want a smaller pane.
+    applyMaxClientSize(session);
     console.log(`[multicc] Client left session ${sessionId} (${session.clients.size} remaining)`);
   });
 
@@ -2600,7 +3145,7 @@ wss.on('connection', (ws, req) => {
     console.error('[multicc] WebSocket error:', err.message);
     session.clients.delete(ws);
     if (session.primaryClient === ws) session.primaryClient = null;
-    if (session.resizeOwner === ws) session.resizeOwner = null;
+    applyMaxClientSize(session);
   });
 });
 

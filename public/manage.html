@@ -140,7 +140,98 @@
     }
     body.has-focus .refresh-info { display: none; }
 
-    /* ── Session Cards Grid ── */
+    /* ── Directory tree ── */
+    .dir-block {
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    body.has-focus .dir-block { padding: 10px 12px; }
+    .dir-header {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .dir-name {
+      font-size: 15px; font-weight: 600; color: #f0f6fc;
+      cursor: pointer; user-select: none;
+    }
+    .dir-name:hover { color: #58a6ff; }
+    .dir-path {
+      font-family: monospace; font-size: 11px; color: #79c0ff;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex: 1; min-width: 0;
+    }
+    body.has-focus .dir-name { font-size: 13px; }
+    body.has-focus .dir-path { font-size: 10px; }
+    .dir-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .dir-actions .btn { padding: 3px 9px; font-size: 11px; }
+    .dir-actions .btn.add-claude { color: #f78166; border-color: #f7816640; }
+    .dir-actions .btn.add-claude:hover { background: #f7816620; border-color: #f78166; }
+    .dir-actions .btn.add-codex { color: #a5d6a7; border-color: #2ea04340; }
+    .dir-actions .btn.add-codex:hover { background: #2ea04320; border-color: #2ea043; }
+    .dir-body { display: none; }
+    .dir-block.open .dir-body { display: block; }
+    .dir-block:not(.open) .dir-name::before { content: '▶ '; color: #6e7681; font-size: 10px; }
+    .dir-block.open .dir-name::before { content: '▼ '; color: #6e7681; font-size: 10px; }
+
+    .sess-group { margin-top: 8px; }
+    .sess-group-label {
+      font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .sess-group.claude .sess-group-label { color: #f78166; }
+    .sess-group.codex  .sess-group-label { color: #a5d6a7; }
+    .sess-group-empty { font-size: 11px; color: #484f58; font-style: italic; padding: 2px 0; }
+
+    /* Session row (compact, inside a directory) */
+    .sess-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      margin-bottom: 2px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.12s, border-color 0.12s;
+      border: 1px solid transparent;
+    }
+    .sess-row:hover { background: #161b22; border-color: #30363d; }
+    .sess-row.focused { background: #1f6feb15; border-color: #58a6ff; }
+    .sess-row .cli-chip {
+      flex-shrink: 0;
+      font-size: 9px; padding: 1px 6px; border-radius: 8px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .sess-row .cli-chip.claude { background: #f7816620; color: #f78166; border: 1px solid #f7816640; }
+    .sess-row .cli-chip.codex  { background: #2ea04320; color: #a5d6a7; border: 1px solid #2ea04340; }
+    .sess-row .kind-chip {
+      flex-shrink: 0;
+      font-size: 9px; padding: 1px 6px; border-radius: 8px;
+      background: #30363d; color: #c9d1d9; border: 1px solid #484f58;
+    }
+    .sess-row .sess-id {
+      font-family: monospace; font-size: 11px; color: #c9d1d9;
+      min-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .sess-row .sess-label {
+      color: #8b949e; font-size: 11px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex: 1; min-width: 0;
+    }
+    .sess-row .sess-status {
+      flex-shrink: 0;
+      font-size: 10px; padding: 1px 6px; border-radius: 8px;
+      background: #30363d40; color: #8b949e;
+    }
+    .sess-row .sess-status.active { background: #23863640; color: #3fb950; }
+    .sess-row .sess-status.waiting { background: #d2992240; color: #d29922; }
+    .sess-row .sess-status.completed { background: #23863640; color: #3fb950; }
+    .sess-row .sess-actions { display: flex; gap: 4px; opacity: 0.7; flex-shrink: 0; }
+    .sess-row:hover .sess-actions { opacity: 1; }
+    .sess-row .sess-actions .btn { padding: 2px 8px; font-size: 10px; }
+
+    /* ── Session Cards Grid (legacy — still used by aux section) ── */
     .session-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -460,15 +551,16 @@
     <!-- Sidebar: card grid / list -->
     <div id="sidebar">
       <div class="page-title">Dashboard</div>
-      <div class="page-subtitle">Manage all Claude Code sessions. Click a card to open inline.</div>
+      <div class="page-subtitle">Directories hold multiple Claude and Codex terminals/chats. Click a session to open it inline.</div>
 
       <div class="toolbar">
-        <button class="btn btn-green" onclick="newSession()">+ New Session</button>
-        <button class="btn" onclick="loadSessions()">Refresh</button>
+        <button class="btn btn-green" onclick="openNewDirectoryModal()">+ New Directory</button>
+        <button class="btn" onclick="loadDashboard()">Refresh</button>
         <span class="refresh-info" id="refresh-info">Auto-refresh 5s</span>
       </div>
 
-      <div id="session-list"></div>
+      <div id="aux-section"></div>
+      <div id="directory-list"></div>
 
       <!-- Voice Settings (collapsible) -->
       <details class="settings-section">
@@ -712,6 +804,22 @@
   <!-- Notification bar removed: status shown on card badges only -->
 
   <div id="toast"></div>
+
+  <!-- New Directory modal -->
+  <div id="newdir-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9998;align-items:center;justify-content:center;">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;width:460px;max-width:94vw;">
+      <h3 style="font-size:15px;color:#f0f6fc;margin-bottom:12px;">New directory</h3>
+      <label style="display:block;font-size:11px;color:#8b949e;margin-bottom:4px;">Name</label>
+      <input id="newdir-name" type="text" placeholder="My project" autocomplete="off" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:10px;" />
+      <label style="display:block;font-size:11px;color:#8b949e;margin-bottom:4px;">Path</label>
+      <input id="newdir-path" type="text" placeholder="/Users/you/code/my-project" autocomplete="off" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:monospace;padding:8px 10px;outline:none;margin-bottom:10px;" />
+      <div id="newdir-error" style="font-size:12px;color:#f85149;margin-bottom:8px;display:none;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" onclick="closeNewDirectoryModal()">Cancel</button>
+        <button class="btn btn-green" onclick="submitNewDirectory()">Create</button>
+      </div>
+    </div>
+  </div>
 
   <div id="qr-modal" onclick="hideQR(event)">
     <div class="qr-box" onclick="event.stopPropagation()">

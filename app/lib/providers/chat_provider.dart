@@ -28,6 +28,10 @@ class ChatProvider extends ChangeNotifier {
   String _cwd = '';
   String get cwd => _cwd;
 
+  /// CLI driving this chat — learned from the server's `system init` event.
+  SessionCli _cli = SessionCli.claude;
+  SessionCli get cli => _cli;
+
   String _statusText = 'Disconnected';
   String get statusText => _statusText;
 
@@ -93,9 +97,12 @@ class ChatProvider extends ChangeNotifier {
         final sid = (msg['session_id'] ?? msg['session'])?.toString();
         if (sid != null && sid.isNotEmpty) _sessionId = sid;
         if (msg['cwd'] != null) _cwd = msg['cwd'].toString();
+        if (msg['cli'] != null) {
+          _cli = msg['cli'].toString() == 'codex' ? SessionCli.codex : SessionCli.claude;
+        }
 
         final model = msg['model']?.toString();
-        _statusText = model != null ? 'Connected · $model' : 'Connected';
+        _statusText = model != null ? 'Connected · $model' : 'Connected · ${_cli.name}';
 
         final serverStreaming = msg['is_streaming'] == true;
         if (serverStreaming && _currentMsg == null) {

@@ -128,15 +128,23 @@ class _TerminalAppBar extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  session.id,
-                  style: const TextStyle(
-                    color: Color(0xFFf0f6fc),
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                    fontFamily: 'monospace',
-                  ),
-                  overflow: TextOverflow.ellipsis,
+                Row(
+                  children: [
+                    _cliBadge(session.cli),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        session.label?.isNotEmpty == true ? session.label! : session.id,
+                        style: const TextStyle(
+                          color: Color(0xFFf0f6fc),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          fontFamily: 'monospace',
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
                 Row(
                   children: [
@@ -166,6 +174,19 @@ class _TerminalAppBar extends StatelessWidget {
       ),
     );
   }
+}
+
+Widget _cliBadge(SessionCli cli) {
+  final color = cli == SessionCli.codex ? const Color(0xFF3fb950) : const Color(0xFFf78166);
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+    decoration: BoxDecoration(
+      color: color.withOpacity(0.15),
+      border: Border.all(color: color.withOpacity(0.4)),
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(cli.name, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w700)),
+  );
 }
 
 /// Mobile-friendly key bar for common terminal keys
