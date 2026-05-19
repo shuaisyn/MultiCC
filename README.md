@@ -65,7 +65,7 @@ It is designed around three observations:
 | Mode | UI | Backend |
 |------|----|---------|
 | **Terminal** (`/`) | Full `xterm.js` — scrollback, colors, input, resize | `tmux` session, `pipe-pane` + named FIFO for reliable output capture |
-| **Chat** (`/chat`) | Message bubbles with streaming tool cards | `claude --output-format stream-json` — events forwarded live over WebSocket |
+| **Chat** (`/chat`) | Message bubbles with streaming tool cards | `claude --output-format stream-json` — events forwarded live over WebSocket; `AskUserQuestion` is disabled by default so headless chat asks follow-up questions as normal text |
 
 Both modes share the same session registry, auth layer, and notification pipeline.
 
@@ -203,6 +203,7 @@ All configuration is environment-variable driven. Voice settings additionally ho
 | `ACCESS_TOKEN` | *(none)* | Gate all endpoints; localhost always bypassed |
 | `CLAUDE_CMD` | *(auto-detected)* | Override path to the `claude` binary |
 | `CLAUDE_ARGS` | *(none)* | Extra CLI args passed to every spawned `claude` |
+| `CLAUDE_CHAT_DISALLOWED_TOOLS` | `AskUserQuestion` | Comma-separated Claude tools disabled only in chat mode. Keep `AskUserQuestion` disabled unless you implement a custom ask bridge for headless chat. |
 
 ### Voice — LLM refinement
 

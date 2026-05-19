@@ -7,6 +7,7 @@ import '../providers/chat_provider.dart';
 import '../providers/session_manager.dart';
 import '../services/chat_service.dart';
 import '../services/settings_service.dart';
+import '../services/workspace_service.dart';
 import 'chat_screen.dart';
 import 'setup_screen.dart';
 import 'terminal_screen.dart';
@@ -14,6 +15,37 @@ import 'terminal_screen.dart';
 // Brand colors used to distinguish Claude vs Codex sessions.
 const _kClaudeColor = Color(0xFFf78166);
 const _kCodexColor = Color(0xFF3fb950);
+
+// Workspace status board: map a live agent status to a colour / label.
+Color _wbStatusColor(String? status) {
+  switch (status) {
+    case 'thinking':
+      return const Color(0xFF58a6ff);
+    case 'editing':
+      return const Color(0xFFd29922);
+    case 'running':
+      return const Color(0xFF3fb950);
+    case 'waiting':
+      return const Color(0xFFf78166);
+    default:
+      return const Color(0xFF6e7681);
+  }
+}
+
+String _wbStatusLabel(String? status) {
+  switch (status) {
+    case 'thinking':
+      return '思考中';
+    case 'editing':
+      return '编辑中';
+    case 'running':
+      return '运行中';
+    case 'waiting':
+      return '等待';
+    default:
+      return 'idle';
+  }
+}
 
 class MainShell extends StatefulWidget {
   final SettingsService settings;
@@ -38,7 +70,10 @@ class _MainShellState extends State<MainShell> {
       backgroundColor: const Color(0xFF0d1117),
       drawer: _DirectoryDrawer(settings: widget.settings),
       body: active == null
-          ? _DirectoryListBody(settings: widget.settings, onOpenDrawer: _openDrawer)
+          ? _DirectoryListBody(
+              settings: widget.settings,
+              onOpenDrawer: _openDrawer,
+            )
           : ChangeNotifierProvider<ChatProvider>.value(
               value: active,
               child: ChatView(
@@ -79,17 +114,29 @@ class _DirectoryDrawer extends StatelessWidget {
                 children: [
                   RichText(
                     text: const TextSpan(
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                       children: [
-                        TextSpan(text: 'Multi', style: TextStyle(color: Color(0xFFf78166))),
-                        TextSpan(text: 'CC', style: TextStyle(color: Color(0xFF79c0ff))),
+                        TextSpan(
+                          text: 'Multi',
+                          style: TextStyle(color: Color(0xFFf78166)),
+                        ),
+                        TextSpan(
+                          text: 'CC',
+                          style: TextStyle(color: Color(0xFF79c0ff)),
+                        ),
                       ],
                     ),
                   ),
                   const SizedBox(width: 8),
                   Text(
                     '${dirs.length} dirs',
-                    style: const TextStyle(color: Color(0xFF8b949e), fontSize: 12),
+                    style: const TextStyle(
+                      color: Color(0xFF8b949e),
+                      fontSize: 12,
+                    ),
                   ),
                   const Spacer(),
                   GestureDetector(
@@ -97,14 +144,24 @@ class _DirectoryDrawer extends StatelessWidget {
                       mgr.goToSessionList();
                       Navigator.pop(context);
                     },
-                    child: const Icon(Icons.list_rounded, color: Color(0xFF8b949e), size: 20),
+                    child: const Icon(
+                      Icons.list_rounded,
+                      color: Color(0xFF8b949e),
+                      size: 20,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   GestureDetector(
                     onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => SetupScreen(settings: settings)),
+                      MaterialPageRoute(
+                        builder: (_) => SetupScreen(settings: settings),
+                      ),
                     ),
-                    child: const Icon(Icons.settings_outlined, color: Color(0xFF8b949e), size: 20),
+                    child: const Icon(
+                      Icons.settings_outlined,
+                      color: Color(0xFF8b949e),
+                      size: 20,
+                    ),
                   ),
                 ],
               ),
@@ -114,13 +171,19 @@ class _DirectoryDrawer extends StatelessWidget {
             Expanded(
               child: dirs.isEmpty
                   ? const Center(
-                      child: Text('No directories', style: TextStyle(color: Color(0xFF6e7681))),
+                      child: Text(
+                        'No directories',
+                        style: TextStyle(color: Color(0xFF6e7681)),
+                      ),
                     )
                   : ListView(
                       padding: const EdgeInsets.symmetric(vertical: 4),
                       children: [
                         for (final d in dirs)
-                          _DrawerDirectoryBlock(directory: d, activeSessionId: activeId),
+                          _DrawerDirectoryBlock(
+                            directory: d,
+                            activeSessionId: activeId,
+                          ),
                       ],
                     ),
             ),
@@ -134,7 +197,10 @@ class _DirectoryDrawer extends StatelessWidget {
 class _DrawerDirectoryBlock extends StatefulWidget {
   final Directory directory;
   final String? activeSessionId;
-  const _DrawerDirectoryBlock({required this.directory, required this.activeSessionId});
+  const _DrawerDirectoryBlock({
+    required this.directory,
+    required this.activeSessionId,
+  });
 
   @override
   State<_DrawerDirectoryBlock> createState() => _DrawerDirectoryBlockState();
@@ -166,7 +232,9 @@ class _DrawerDirectoryBlockState extends State<_DrawerDirectoryBlock> {
             child: Row(
               children: [
                 Icon(
-                  _open ? Icons.keyboard_arrow_down_rounded : Icons.keyboard_arrow_right_rounded,
+                  _open
+                      ? Icons.keyboard_arrow_down_rounded
+                      : Icons.keyboard_arrow_right_rounded,
                   color: const Color(0xFF6e7681),
                   size: 18,
                 ),
@@ -184,7 +252,10 @@ class _DrawerDirectoryBlockState extends State<_DrawerDirectoryBlock> {
                 ),
                 Text(
                   '${widget.directory.totalSessions}',
-                  style: const TextStyle(color: Color(0xFF6e7681), fontSize: 11),
+                  style: const TextStyle(
+                    color: Color(0xFF6e7681),
+                    fontSize: 11,
+                  ),
                 ),
               ],
             ),
@@ -194,7 +265,14 @@ class _DrawerDirectoryBlockState extends State<_DrawerDirectoryBlock> {
           if (flat.isEmpty)
             const Padding(
               padding: EdgeInsets.fromLTRB(32, 2, 12, 4),
-              child: Text('(empty)', style: TextStyle(color: Color(0xFF484f58), fontSize: 11, fontStyle: FontStyle.italic)),
+              child: Text(
+                '(empty)',
+                style: TextStyle(
+                  color: Color(0xFF484f58),
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
             ),
           for (final s in flat)
             _DrawerSessionTile(
@@ -222,9 +300,12 @@ class _DrawerSessionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = mgr.allProviders[session.id];
-    final connected = provider != null &&
+    final connected =
+        provider != null &&
         provider.connectionState == ChatConnectionState.connected;
-    final cliColor = session.cli == SessionCli.codex ? _kCodexColor : _kClaudeColor;
+    final cliColor = session.cli == SessionCli.codex
+        ? _kCodexColor
+        : _kClaudeColor;
 
     return GestureDetector(
       onTap: () => _openFromDrawer(context),
@@ -235,7 +316,9 @@ class _DrawerSessionTile extends StatelessWidget {
         decoration: BoxDecoration(
           color: isActive ? const Color(0xFF21262d) : Colors.transparent,
           borderRadius: BorderRadius.circular(6),
-          border: isActive ? Border.all(color: const Color(0xFF388bfd), width: 1) : null,
+          border: isActive
+              ? Border.all(color: const Color(0xFF388bfd), width: 1)
+              : null,
         ),
         child: Row(
           children: [
@@ -245,7 +328,11 @@ class _DrawerSessionTile extends StatelessWidget {
               decoration: BoxDecoration(
                 color: session.active
                     ? const Color(0xFF3fb950)
-                    : (provider != null ? (connected ? const Color(0xFF3fb950) : const Color(0xFFd29922)) : const Color(0xFF6e7681)),
+                    : (provider != null
+                          ? (connected
+                                ? const Color(0xFF3fb950)
+                                : const Color(0xFFd29922))
+                          : const Color(0xFF6e7681)),
                 shape: BoxShape.circle,
               ),
             ),
@@ -253,18 +340,24 @@ class _DrawerSessionTile extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
               decoration: BoxDecoration(
-                color: cliColor.withOpacity(0.15),
-                border: Border.all(color: cliColor.withOpacity(0.4)),
+                color: cliColor.withValues(alpha: 0.15),
+                border: Border.all(color: cliColor.withValues(alpha: 0.4)),
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
                 session.cli.name,
-                style: TextStyle(color: cliColor, fontSize: 8, fontWeight: FontWeight.w700),
+                style: TextStyle(
+                  color: cliColor,
+                  fontSize: 8,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
             const SizedBox(width: 4),
             Icon(
-              session.isChat ? Icons.chat_bubble_outline_rounded : Icons.terminal_rounded,
+              session.isChat
+                  ? Icons.chat_bubble_outline_rounded
+                  : Icons.terminal_rounded,
               size: 11,
               color: const Color(0xFF8b949e),
             ),
@@ -273,7 +366,9 @@ class _DrawerSessionTile extends StatelessWidget {
               child: Text(
                 session.label?.isNotEmpty == true ? session.label! : session.id,
                 style: TextStyle(
-                  color: isActive ? const Color(0xFF58a6ff) : const Color(0xFFc9d1d9),
+                  color: isActive
+                      ? const Color(0xFF58a6ff)
+                      : const Color(0xFFc9d1d9),
                   fontSize: 12,
                   fontFamily: 'monospace',
                 ),
@@ -292,12 +387,12 @@ class _DrawerSessionTile extends StatelessWidget {
       mgr.openSession(session);
       mgr.switchToSession(session.id);
     } else {
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => TerminalScreen(
-          settings: mgr.settings,
-          session: session,
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              TerminalScreen(settings: mgr.settings, session: session),
         ),
-      ));
+      );
     }
   }
 }
@@ -332,15 +427,25 @@ class _DirectoryListBody extends StatelessWidget {
               text: const TextSpan(
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 children: [
-                  TextSpan(text: 'Multi', style: TextStyle(color: Color(0xFFf78166))),
-                  TextSpan(text: 'CC', style: TextStyle(color: Color(0xFF79c0ff))),
+                  TextSpan(
+                    text: 'Multi',
+                    style: TextStyle(color: Color(0xFFf78166)),
+                  ),
+                  TextSpan(
+                    text: 'CC',
+                    style: TextStyle(color: Color(0xFF79c0ff)),
+                  ),
                 ],
               ),
             ),
             const SizedBox(width: 8),
             Text(
               '${mgr.directories.length} dirs · ${mgr.sessions.where((s) => !s.isAux).length} sessions',
-              style: const TextStyle(color: Color(0xFF8b949e), fontSize: 12, fontWeight: FontWeight.normal),
+              style: const TextStyle(
+                color: Color(0xFF8b949e),
+                fontSize: 12,
+                fontWeight: FontWeight.normal,
+              ),
             ),
           ],
         ),
@@ -357,7 +462,9 @@ class _DirectoryListBody extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.settings_outlined, size: 20),
             onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => SetupScreen(settings: settings)),
+              MaterialPageRoute(
+                builder: (_) => SetupScreen(settings: settings),
+              ),
             ),
           ),
         ],
@@ -371,8 +478,12 @@ class _DirectoryListBody extends StatelessWidget {
   }
 
   Widget _buildBody(BuildContext context, SessionManager mgr) {
-    if (mgr.loadingSessions && mgr.directories.isEmpty && mgr.sessions.isEmpty) {
-      return const Center(child: CircularProgressIndicator(color: Color(0xFF58a6ff)));
+    if (mgr.loadingSessions &&
+        mgr.directories.isEmpty &&
+        mgr.sessions.isEmpty) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFF58a6ff)),
+      );
     }
 
     if (mgr.sessionsError != null && mgr.directories.isEmpty) {
@@ -382,11 +493,17 @@ class _DirectoryListBody extends StatelessWidget {
           children: [
             const Icon(Icons.error_outline, color: Color(0xFFf85149), size: 48),
             const SizedBox(height: 12),
-            Text(mgr.sessionsError!, style: const TextStyle(color: Color(0xFF8b949e)), textAlign: TextAlign.center),
+            Text(
+              mgr.sessionsError!,
+              style: const TextStyle(color: Color(0xFF8b949e)),
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 16),
             ElevatedButton(
               onPressed: mgr.loadDashboard,
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF21262d)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF21262d),
+              ),
               child: const Text('Retry'),
             ),
           ],
@@ -399,15 +516,25 @@ class _DirectoryListBody extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.folder_open_outlined, color: Color(0xFF6e7681), size: 48),
+            const Icon(
+              Icons.folder_open_outlined,
+              color: Color(0xFF6e7681),
+              size: 48,
+            ),
             const SizedBox(height: 12),
-            const Text('No directories yet', style: TextStyle(color: Color(0xFF6e7681), fontSize: 15)),
+            const Text(
+              'No directories yet',
+              style: TextStyle(color: Color(0xFF6e7681), fontSize: 15),
+            ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () => _showNewDirectoryDialog(context, mgr),
               icon: const Icon(Icons.add, size: 18),
               label: const Text('New directory'),
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF238636), foregroundColor: Colors.white),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF238636),
+                foregroundColor: Colors.white,
+              ),
             ),
           ],
         ),
@@ -432,7 +559,7 @@ class _DirectoryListBody extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  DIRECTORY CARD — one per directory, expanded by default
+//  PROJECT CARD — one per directory, expanded by default
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _DirectoryCard extends StatefulWidget {
@@ -440,7 +567,11 @@ class _DirectoryCard extends StatefulWidget {
   final SettingsService settings;
   final SessionManager mgr;
 
-  const _DirectoryCard({required this.directory, required this.settings, required this.mgr});
+  const _DirectoryCard({
+    required this.directory,
+    required this.settings,
+    required this.mgr,
+  });
 
   @override
   State<_DirectoryCard> createState() => _DirectoryCardState();
@@ -448,68 +579,153 @@ class _DirectoryCard extends StatefulWidget {
 
 class _DirectoryCardState extends State<_DirectoryCard> {
   bool _open = true;
+  late final WorkspaceService _workspace;
+
+  @override
+  void initState() {
+    super.initState();
+    _workspace = WorkspaceService(
+      settings: widget.settings,
+      dirId: widget.directory.id,
+    );
+    _workspace.addListener(_onStatusChange);
+    _workspace.connect();
+  }
+
+  @override
+  void dispose() {
+    _workspace.removeListener(_onStatusChange);
+    _workspace.dispose();
+    super.dispose();
+  }
+
+  void _onStatusChange() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     final groups = widget.mgr.sessionsByCliKind(widget.directory.id);
+    final claudeCount =
+        widget.directory.claudeTerminalCount + widget.directory.claudeChatCount;
+    final codexCount =
+        widget.directory.codexTerminalCount + widget.directory.codexChatCount;
+    final activeCount = groups.values
+        .expand((s) => s)
+        .where((s) => s.active)
+        .length;
+    final hasSessions = widget.directory.totalSessions > 0;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
-        color: const Color(0xFF0d1117),
-        border: Border.all(color: const Color(0xFF21262d)),
-        borderRadius: BorderRadius.circular(10),
+        color: const Color(0xFF161b22),
+        border: Border.all(color: const Color(0xFF30363d)),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.18),
+            blurRadius: 22,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header
           InkWell(
             onTap: () => setState(() => _open = !_open),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(10)),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
-              child: Row(
+              padding: const EdgeInsets.fromLTRB(14, 14, 10, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    _open ? Icons.keyboard_arrow_down_rounded : Icons.keyboard_arrow_right_rounded,
-                    color: const Color(0xFF6e7681),
-                    size: 20,
-                  ),
-                  const SizedBox(width: 4),
-                  Flexible(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.directory.name,
-                          style: const TextStyle(
-                            color: Color(0xFFf0f6fc),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 15,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0d1117),
+                          border: Border.all(color: const Color(0xFF30363d)),
+                          borderRadius: BorderRadius.circular(8),
                         ),
-                        const SizedBox(height: 2),
-                        Text(
-                          widget.directory.path,
-                          style: const TextStyle(
-                            color: Color(0xFF79c0ff),
-                            fontSize: 11,
-                            fontFamily: 'monospace',
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                        child: Icon(
+                          _open
+                              ? Icons.keyboard_arrow_down_rounded
+                              : Icons.keyboard_arrow_right_rounded,
+                          color: const Color(0xFF8b949e),
+                          size: 22,
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              widget.directory.name,
+                              style: const TextStyle(
+                                color: Color(0xFFf0f6fc),
+                                fontWeight: FontWeight.w700,
+                                fontSize: 16,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              widget.directory.path,
+                              style: const TextStyle(
+                                color: Color(0xFF79c0ff),
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline_rounded,
+                          size: 19,
+                          color: Color(0xFFf85149),
+                        ),
+                        tooltip: 'Delete directory',
+                        onPressed: () => _confirmDeleteDirectory(context),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFf85149)),
-                    tooltip: 'Delete directory',
-                    onPressed: () => _confirmDeleteDirectory(context),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _ProjectStatPill(
+                        label: 'sessions',
+                        value: widget.directory.totalSessions.toString(),
+                      ),
+                      _ProjectStatPill(
+                        label: 'active',
+                        value: activeCount.toString(),
+                      ),
+                      _ProjectStatPill(
+                        label: 'Claude',
+                        value: claudeCount.toString(),
+                        color: _kClaudeColor,
+                      ),
+                      _ProjectStatPill(
+                        label: 'Codex',
+                        value: codexCount.toString(),
+                        color: _kCodexColor,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -517,30 +733,93 @@ class _DirectoryCardState extends State<_DirectoryCard> {
           ),
           if (_open) ...[
             const Divider(height: 1, color: Color(0xFF21262d)),
-            // "+ session" toolbar
             Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
               child: Wrap(
                 spacing: 6,
                 runSpacing: 6,
                 children: [
-                  _AddSessionChip(label: '+ Claude Term', color: _kClaudeColor, onTap: () => _createSession(SessionCli.claude, SessionKind.terminal)),
-                  _AddSessionChip(label: '+ Claude Chat', color: _kClaudeColor, onTap: () => _createSession(SessionCli.claude, SessionKind.chat)),
-                  _AddSessionChip(label: '+ Codex Term',  color: _kCodexColor,  onTap: () => _createSession(SessionCli.codex,  SessionKind.terminal)),
-                  _AddSessionChip(label: '+ Codex Chat',  color: _kCodexColor,  onTap: () => _createSession(SessionCli.codex,  SessionKind.chat)),
+                  _AddSessionChip(
+                    label: '+ Claude Term',
+                    color: _kClaudeColor,
+                    onTap: () =>
+                        _createSession(SessionCli.claude, SessionKind.terminal),
+                  ),
+                  _AddSessionChip(
+                    label: '+ Claude Chat',
+                    color: _kClaudeColor,
+                    onTap: () =>
+                        _createSession(SessionCli.claude, SessionKind.chat),
+                  ),
+                  _AddSessionChip(
+                    label: '+ Codex Term',
+                    color: _kCodexColor,
+                    onTap: () =>
+                        _createSession(SessionCli.codex, SessionKind.terminal),
+                  ),
+                  _AddSessionChip(
+                    label: '+ Codex Chat',
+                    color: _kCodexColor,
+                    onTap: () =>
+                        _createSession(SessionCli.codex, SessionKind.chat),
+                  ),
                 ],
               ),
             ),
-            // Groups
-            _SessionGroup(title: 'Claude Terminals', color: _kClaudeColor,
-                sessions: groups['claude_terminal']!, mgr: widget.mgr, settings: widget.settings),
-            _SessionGroup(title: 'Claude Chats', color: _kClaudeColor,
-                sessions: groups['claude_chat']!, mgr: widget.mgr, settings: widget.settings),
-            _SessionGroup(title: 'Codex Terminals', color: _kCodexColor,
-                sessions: groups['codex_terminal']!, mgr: widget.mgr, settings: widget.settings),
-            _SessionGroup(title: 'Codex Chats', color: _kCodexColor,
-                sessions: groups['codex_chat']!, mgr: widget.mgr, settings: widget.settings),
-            const SizedBox(height: 8),
+            if (!hasSessions)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.fromLTRB(14, 10, 14, 14),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 16,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0d1117).withValues(alpha: 0.65),
+                  border: Border.all(color: const Color(0xFF30363d)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'No sessions yet',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF6e7681), fontSize: 12),
+                ),
+              )
+            else ...[
+              _SessionGroup(
+                title: 'Claude Terminals',
+                color: _kClaudeColor,
+                sessions: groups['claude_terminal']!,
+                mgr: widget.mgr,
+                settings: widget.settings,
+                statuses: _workspace.statuses,
+              ),
+              _SessionGroup(
+                title: 'Claude Chats',
+                color: _kClaudeColor,
+                sessions: groups['claude_chat']!,
+                mgr: widget.mgr,
+                settings: widget.settings,
+                statuses: _workspace.statuses,
+              ),
+              _SessionGroup(
+                title: 'Codex Terminals',
+                color: _kCodexColor,
+                sessions: groups['codex_terminal']!,
+                mgr: widget.mgr,
+                settings: widget.settings,
+                statuses: _workspace.statuses,
+              ),
+              _SessionGroup(
+                title: 'Codex Chats',
+                color: _kCodexColor,
+                sessions: groups['codex_chat']!,
+                mgr: widget.mgr,
+                settings: widget.settings,
+                statuses: _workspace.statuses,
+              ),
+              const SizedBox(height: 10),
+            ],
           ],
         ],
       ),
@@ -548,6 +827,8 @@ class _DirectoryCardState extends State<_DirectoryCard> {
   }
 
   Future<void> _createSession(SessionCli cli, SessionKind kind) async {
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
     try {
       final s = await widget.mgr.createSessionInDir(
         dirId: widget.directory.id,
@@ -560,25 +841,35 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         widget.mgr.openSession(s);
         widget.mgr.switchToSession(s.id);
       } else {
-        Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => TerminalScreen(settings: widget.settings, session: s),
-        ));
+        navigator.push(
+          MaterialPageRoute(
+            builder: (_) =>
+                TerminalScreen(settings: widget.settings, session: s),
+          ),
+        );
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed: $e'), backgroundColor: const Color(0xFFf85149)),
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Failed: $e'),
+          backgroundColor: const Color(0xFFf85149),
+        ),
       );
     }
   }
 
   Future<void> _confirmDeleteDirectory(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
     final hasSessions = widget.directory.totalSessions > 0;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: const Color(0xFF161b22),
-        title: Text('Delete directory', style: const TextStyle(color: Color(0xFFf0f6fc))),
+        title: Text(
+          'Delete directory',
+          style: const TextStyle(color: Color(0xFFf0f6fc)),
+        ),
         content: Text(
           hasSessions
               ? 'Delete "${widget.directory.name}" and ALL ${widget.directory.totalSessions} session(s)? This cannot be undone.'
@@ -588,11 +879,17 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF8b949e))),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Color(0xFF8b949e)),
+            ),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Color(0xFFf85149))),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Color(0xFFf85149)),
+            ),
           ),
         ],
       ),
@@ -602,15 +899,61 @@ class _DirectoryCardState extends State<_DirectoryCard> {
       await widget.mgr.deleteDirectory(widget.directory.id);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed: $e'), backgroundColor: const Color(0xFFf85149)),
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Failed: $e'),
+          backgroundColor: const Color(0xFFf85149),
+        ),
       );
     }
   }
 }
 
+class _ProjectStatPill extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color? color;
+  const _ProjectStatPill({
+    required this.label,
+    required this.value,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = color ?? const Color(0xFF8b949e);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0d1117),
+        border: Border.all(
+          color: color == null
+              ? const Color(0xFF30363d)
+              : c.withValues(alpha: 0.45),
+        ),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: RichText(
+        text: TextSpan(
+          style: TextStyle(color: c, fontSize: 11),
+          children: [
+            TextSpan(
+              text: value,
+              style: const TextStyle(
+                color: Color(0xFFf0f6fc),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            TextSpan(text: ' $label'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-//  SESSION GROUP + ROW
+//  SESSION GROUP + CARD
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _SessionGroup extends StatelessWidget {
@@ -619,6 +962,7 @@ class _SessionGroup extends StatelessWidget {
   final List<Session> sessions;
   final SessionManager mgr;
   final SettingsService settings;
+  final Map<String, SessionStatus> statuses;
 
   const _SessionGroup({
     required this.title,
@@ -626,105 +970,226 @@ class _SessionGroup extends StatelessWidget {
     required this.sessions,
     required this.mgr,
     required this.settings,
+    required this.statuses,
   });
 
   @override
   Widget build(BuildContext context) {
     if (sessions.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.only(bottom: 4, left: 2),
+            padding: const EdgeInsets.only(bottom: 8, left: 2),
             child: Text(
               '${title.toUpperCase()} · ${sessions.length}',
-              style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.6),
+              style: TextStyle(
+                color: color,
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+              ),
             ),
           ),
-          for (final s in sessions)
-            _SessionRow(session: s, mgr: mgr, settings: settings),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              const gap = 8.0;
+              final columns = constraints.maxWidth >= 520 ? 2 : 1;
+              final cardWidth =
+                  (constraints.maxWidth - gap * (columns - 1)) / columns;
+              return Wrap(
+                spacing: gap,
+                runSpacing: gap,
+                children: [
+                  for (final s in sessions)
+                    SizedBox(
+                      width: cardWidth,
+                      child: _SessionCard(
+                        session: s,
+                        mgr: mgr,
+                        settings: settings,
+                        liveStatus: statuses[s.id],
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
         ],
       ),
     );
   }
 }
 
-class _SessionRow extends StatelessWidget {
+class _SessionCard extends StatelessWidget {
   final Session session;
   final SessionManager mgr;
   final SettingsService settings;
-  const _SessionRow({required this.session, required this.mgr, required this.settings});
+  final SessionStatus? liveStatus;
+  const _SessionCard({
+    required this.session,
+    required this.mgr,
+    required this.settings,
+    this.liveStatus,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final cliColor = session.cli == SessionCli.codex ? _kCodexColor : _kClaudeColor;
-    final ago = timeago.format(session.createdAt, locale: 'en_short');
+    final cliColor = session.cli == SessionCli.codex
+        ? _kCodexColor
+        : _kClaudeColor;
+    final ago = timeago.format(
+      session.lastActivity ?? session.createdAt,
+      locale: 'en_short',
+    );
+    final live = liveStatus;
+    final statusColor = live != null
+        ? _wbStatusColor(live.status)
+        : (session.active ? const Color(0xFF3fb950) : const Color(0xFF6e7681));
+    final title = session.label?.isNotEmpty == true
+        ? session.label!
+        : session.id;
+    final subtitle = session.label?.isNotEmpty == true
+        ? session.id
+        : session.shortCwd;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 4),
       decoration: BoxDecoration(
-        color: const Color(0xFF161b22),
+        color: const Color(0xFF0d1117),
         border: Border.all(color: const Color(0xFF30363d)),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(8),
       ),
       child: InkWell(
         onTap: () => _open(context),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Row(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 6, height: 6,
-                decoration: BoxDecoration(
-                  color: session.active ? const Color(0xFF3fb950) : const Color(0xFF6e7681),
-                  shape: BoxShape.circle,
+              Row(
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: statusColor,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 7),
+                  _MiniBadge(label: session.cli.name, color: cliColor),
+                  const SizedBox(width: 6),
+                  _MiniBadge(
+                    label: session.kind.name,
+                    color: const Color(0xFF8b949e),
+                    icon: session.isChat
+                        ? Icons.chat_bubble_outline_rounded
+                        : Icons.terminal_rounded,
+                  ),
+                  if (live != null && live.status != 'idle') ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      _wbStatusLabel(live.status),
+                      style: TextStyle(
+                        color: statusColor,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  Text(
+                    ago,
+                    style: const TextStyle(
+                      color: Color(0xFF6e7681),
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 9),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Color(0xFFc9d1d9),
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.w600,
                 ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(
-                  color: cliColor.withOpacity(0.15),
-                  border: Border.all(color: cliColor.withOpacity(0.4)),
-                  borderRadius: BorderRadius.circular(4),
+              const SizedBox(height: 3),
+              Text(
+                subtitle,
+                style: const TextStyle(
+                  color: Color(0xFF6e7681),
+                  fontSize: 11,
+                  fontFamily: 'monospace',
                 ),
-                child: Text(
-                  session.cli.name,
-                  style: TextStyle(color: cliColor, fontSize: 8, fontWeight: FontWeight.w700),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (live?.currentFile != null) ...[
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.edit_outlined,
+                        size: 11, color: Color(0xFFd29922)),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        live!.currentFile!.split('/').last,
+                        style: const TextStyle(
+                          color: Color(0xFFd29922),
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                session.isChat ? Icons.chat_bubble_outline_rounded : Icons.terminal_rounded,
-                size: 13,
-                color: const Color(0xFF8b949e),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  session.label?.isNotEmpty == true ? session.label! : session.id,
-                  style: const TextStyle(color: Color(0xFFc9d1d9), fontSize: 12, fontFamily: 'monospace'),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              Text(ago, style: const TextStyle(color: Color(0xFF6e7681), fontSize: 10)),
-              const SizedBox(width: 4),
-              IconButton(
-                icon: const Icon(Icons.restart_alt_rounded, size: 15, color: Color(0xFF8b949e)),
-                tooltip: 'Restart',
-                onPressed: session.isTerminal ? () => _restart(context) : null,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline_rounded, size: 15, color: Color(0xFFf85149)),
-                tooltip: 'Delete',
-                onPressed: () => _confirmDelete(context),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+              ],
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  IconButton(
+                    icon: const Icon(
+                      Icons.restart_alt_rounded,
+                      size: 16,
+                      color: Color(0xFF8b949e),
+                    ),
+                    tooltip: 'Restart',
+                    onPressed: session.isTerminal
+                        ? () => _restart(context)
+                        : null,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 30,
+                      minHeight: 28,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      size: 16,
+                      color: Color(0xFFf85149),
+                    ),
+                    tooltip: 'Delete',
+                    onPressed: () => _confirmDelete(context),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 30,
+                      minHeight: 28,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -738,9 +1203,11 @@ class _SessionRow extends StatelessWidget {
       mgr.openSession(session);
       mgr.switchToSession(session.id);
     } else {
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => TerminalScreen(settings: settings, session: session),
-      ));
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => TerminalScreen(settings: settings, session: session),
+        ),
+      );
     }
   }
 
@@ -749,13 +1216,19 @@ class _SessionRow extends StatelessWidget {
       await mgr.restartSession(session.id);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Session restarted'), backgroundColor: Color(0xFF238636)),
+          const SnackBar(
+            content: Text('Session restarted'),
+            backgroundColor: Color(0xFF238636),
+          ),
         );
       }
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed: $e'), backgroundColor: const Color(0xFFf85149)),
+          SnackBar(
+            content: Text('Failed: $e'),
+            backgroundColor: const Color(0xFFf85149),
+          ),
         );
       }
     }
@@ -766,11 +1239,29 @@ class _SessionRow extends StatelessWidget {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: const Color(0xFF161b22),
-        title: const Text('Delete Session', style: TextStyle(color: Color(0xFFf0f6fc))),
-        content: Text('Delete "${session.id}"?', style: const TextStyle(color: Color(0xFFc9d1d9))),
+        title: const Text(
+          'Delete Session',
+          style: TextStyle(color: Color(0xFFf0f6fc)),
+        ),
+        content: Text(
+          'Delete "${session.id}"?',
+          style: const TextStyle(color: Color(0xFFc9d1d9)),
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel', style: TextStyle(color: Color(0xFF8b949e)))),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete', style: TextStyle(color: Color(0xFFf85149)))),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Color(0xFF8b949e)),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text(
+              'Delete',
+              style: TextStyle(color: Color(0xFFf85149)),
+            ),
+          ),
         ],
       ),
     );
@@ -778,11 +1269,51 @@ class _SessionRow extends StatelessWidget {
   }
 }
 
+class _MiniBadge extends StatelessWidget {
+  final String label;
+  final Color color;
+  final IconData? icon;
+  const _MiniBadge({required this.label, required this.color, this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        border: Border.all(color: color.withValues(alpha: 0.38)),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 10, color: color),
+            const SizedBox(width: 3),
+          ],
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _AddSessionChip extends StatelessWidget {
   final String label;
   final Color color;
   final VoidCallback onTap;
-  const _AddSessionChip({required this.label, required this.color, required this.onTap});
+  const _AddSessionChip({
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -792,11 +1323,18 @@ class _AddSessionChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          border: Border.all(color: color.withOpacity(0.4)),
+          color: color.withValues(alpha: 0.1),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
           borderRadius: BorderRadius.circular(6),
         ),
-        child: Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ),
     );
   }
@@ -806,7 +1344,10 @@ class _AddSessionChip extends StatelessWidget {
 //  NEW DIRECTORY DIALOG
 // ═══════════════════════════════════════════════════════════════════════════════
 
-Future<void> _showNewDirectoryDialog(BuildContext context, SessionManager mgr) async {
+Future<void> _showNewDirectoryDialog(
+  BuildContext context,
+  SessionManager mgr,
+) async {
   final nameCtrl = TextEditingController();
   final pathCtrl = TextEditingController();
   String? error;
@@ -816,12 +1357,18 @@ Future<void> _showNewDirectoryDialog(BuildContext context, SessionManager mgr) a
     builder: (dialogCtx) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
         backgroundColor: const Color(0xFF161b22),
-        title: const Text('New directory', style: TextStyle(color: Color(0xFFf0f6fc))),
+        title: const Text(
+          'New directory',
+          style: TextStyle(color: Color(0xFFf0f6fc)),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Name', style: TextStyle(color: Color(0xFF8b949e), fontSize: 11)),
+            const Text(
+              'Name',
+              style: TextStyle(color: Color(0xFF8b949e), fontSize: 11),
+            ),
             const SizedBox(height: 4),
             TextField(
               controller: nameCtrl,
@@ -830,23 +1377,36 @@ Future<void> _showNewDirectoryDialog(BuildContext context, SessionManager mgr) a
               decoration: _inputDec(hint: 'My project'),
             ),
             const SizedBox(height: 10),
-            const Text('Path', style: TextStyle(color: Color(0xFF8b949e), fontSize: 11)),
+            const Text(
+              'Path',
+              style: TextStyle(color: Color(0xFF8b949e), fontSize: 11),
+            ),
             const SizedBox(height: 4),
             TextField(
               controller: pathCtrl,
-              style: const TextStyle(color: Color(0xFFc9d1d9), fontSize: 13, fontFamily: 'monospace'),
+              style: const TextStyle(
+                color: Color(0xFFc9d1d9),
+                fontSize: 13,
+                fontFamily: 'monospace',
+              ),
               decoration: _inputDec(hint: '/Users/you/code/my-project'),
             ),
             if (error != null) ...[
               const SizedBox(height: 10),
-              Text(error!, style: const TextStyle(color: Color(0xFFf85149), fontSize: 12)),
+              Text(
+                error!,
+                style: const TextStyle(color: Color(0xFFf85149), fontSize: 12),
+              ),
             ],
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogCtx),
-            child: const Text('Cancel', style: TextStyle(color: Color(0xFF8b949e))),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Color(0xFF8b949e)),
+            ),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -864,7 +1424,9 @@ Future<void> _showNewDirectoryDialog(BuildContext context, SessionManager mgr) a
                 await mgr.createDirectory(name: name, path: p);
                 if (dialogCtx.mounted) Navigator.pop(dialogCtx);
               } catch (e) {
-                setState(() => error = e.toString().replaceFirst('Exception: ', ''));
+                setState(
+                  () => error = e.toString().replaceFirst('Exception: ', ''),
+                );
               }
             },
             child: const Text('Create'),
@@ -876,22 +1438,22 @@ Future<void> _showNewDirectoryDialog(BuildContext context, SessionManager mgr) a
 }
 
 InputDecoration _inputDec({String? hint}) => InputDecoration(
-      isDense: true,
-      filled: true,
-      fillColor: const Color(0xFF0d1117),
-      hintText: hint,
-      hintStyle: const TextStyle(color: Color(0xFF484f58), fontSize: 13),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-      border: OutlineInputBorder(
-        borderSide: const BorderSide(color: Color(0xFF30363d)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderSide: const BorderSide(color: Color(0xFF30363d)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderSide: const BorderSide(color: Color(0xFF58a6ff)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-    );
+  isDense: true,
+  filled: true,
+  fillColor: const Color(0xFF0d1117),
+  hintText: hint,
+  hintStyle: const TextStyle(color: Color(0xFF484f58), fontSize: 13),
+  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+  border: OutlineInputBorder(
+    borderSide: const BorderSide(color: Color(0xFF30363d)),
+    borderRadius: BorderRadius.circular(6),
+  ),
+  enabledBorder: OutlineInputBorder(
+    borderSide: const BorderSide(color: Color(0xFF30363d)),
+    borderRadius: BorderRadius.circular(6),
+  ),
+  focusedBorder: OutlineInputBorder(
+    borderSide: const BorderSide(color: Color(0xFF58a6ff)),
+    borderRadius: BorderRadius.circular(6),
+  ),
+);
