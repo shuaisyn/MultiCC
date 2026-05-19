@@ -1227,6 +1227,7 @@ app.delete('/api/directories/:id', (req, res) => {
       chatSessions.delete(s.id);
     }
     if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
+    purgeNotesForSession(s.id);
     persistedSessions.delete(s.id);
     invalidSessions.delete(s.id);
     workspaceStatus.delete(s.id);
@@ -1310,6 +1311,7 @@ app.post('/api/directories/:id/sessions', (req, res) => {
   };
   persistedSessions.set(id, session);
   savePersistedSessions();
+  appendEvent(d.id, 'session_created', `${cli} ${kind}`, id);
   res.json(session);
 });
 
@@ -1358,6 +1360,8 @@ app.delete('/api/sessions/:id', (req, res) => {
     const dir = directories.get(persisted.dirId);
     if (dir) gitWorktreeRemove(dir.path, persisted.worktreePath, persisted.branch);
   }
+  if (persisted) appendEvent(persisted.dirId, 'session_deleted', persisted.label || persisted.id, null);
+  purgeNotesForSession(id);
   persistedSessions.delete(id);
   invalidSessions.delete(id);
   workspaceStatus.delete(id);
@@ -1500,7 +1504,47 @@ app.post('/api/sessions/:id/merge', (req, res) => {
   }
   console.log(`[multicc] merge ${persisted.branch} → ${dir.baseBranch}: ` +
     (result.merged ? `${result.commits} commit(s)` : 'nothing to merge'));
+  appendEvent(dir.id, 'merged',
+    result.merged ? `${result.commits} 个提交 → ${dir.baseBranch}` : '无新提交', id);
   res.json(result);
+});
+
+// ── Inter-agent notes ──
+app.post('/api/sessions/:id/notes', (req, res) => {
+  const from = persistedSessions.get(req.params.id);
+  if (!from) return res.status(404).json({ error: 'session not found' });
+  const toId = (req.body.toSessionId || '').trim();
+  const body = (req.body.body || '').trim();
+  if (!toId || !body) return res.status(400).json({ error: 'toSessionId 和 body 必填' });
+  const to = persistedSessions.get(toId);
+  if (!to) return res.status(404).json({ error: 'target session not found' });
+  if (to.dirId !== from.dirId) return res.status(400).json({ error: '只能给同一目录下的会话留言' });
+
+  const note = {
+    id: crypto.randomUUID(), dirId: from.dirId,
+    fromSessionId: from.id, fromLabel: from.label || from.id,
+    toSessionId: to.id, body: body.slice(0, 4000),
+    ts: Date.now(), delivered: false, deliveredAt: null,
+  };
+  notes.push(note);
+  saveNotes();
+  appendEvent(from.dirId, 'note', `→ ${to.label || to.id}`, from.id);
+  workspaceBroadcast(from.dirId, { type: 'note_pending', sessionId: to.id, count: pendingNotesFor(to.id).length });
+  res.json(note);
+});
+
+// Inbox + outbox for a session.
+app.get('/api/sessions/:id/notes', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  res.json(notes.filter(n => n.toSessionId === s.id || n.fromSessionId === s.id));
+});
+
+// Directory event log.
+app.get('/api/directories/:id/events', (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  res.json({ events: recentEvents(d.id) });
 });
 
 // ── File Browser API ──
@@ -2917,6 +2961,7 @@ function workspaceSnapshot(dirId) {
       branch: s.branch || null, invalid: invalidSessions.get(s.id) || null,
       status: st.status, currentFile: st.currentFile, lastActivity: st.lastActivity,
       clients: s.kind === 'chat' ? (chat?.clients.size || 0) : (active?.clients.size || 0),
+      pendingNotes: pendingNotesFor(s.id).length,
     });
   }
   return out;
@@ -2934,11 +2979,84 @@ function handleWorkspaceWs(ws, req, urlObj) {
   set.add(ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  ws.send(JSON.stringify({ type: 'snapshot', dirId, sessions: workspaceSnapshot(dirId) }));
+  ws.send(JSON.stringify({
+    type: 'snapshot', dirId,
+    sessions: workspaceSnapshot(dirId),
+    events: recentEvents(dirId),
+  }));
   ws.on('close', () => {
     set.delete(ws);
     if (set.size === 0) workspaceClients.delete(dirId);
   });
+}
+
+// ── Event log + passive inter-agent notes ──
+// Each directory has an append-only event log (events/<dirId>.jsonl) and a shared
+// pool of notes. A note left for another agent is delivered passively — prepended
+// to that agent's next chat turn.
+const EVENTS_DIR = path.join(__dirname, 'events');
+try { fs.mkdirSync(EVENTS_DIR, { recursive: true }); } catch (_) {}
+const NOTES_FILE = path.join(__dirname, 'notes.json');
+const eventRing = new Map();   // dirId → event[] (last 200, lazy-loaded)
+let notes = [];                // [{ id, dirId, fromSessionId, fromLabel, toSessionId, body, ts, delivered, deliveredAt }]
+
+function loadNotes() {
+  try {
+    if (fs.existsSync(NOTES_FILE)) notes = JSON.parse(fs.readFileSync(NOTES_FILE, 'utf8'));
+  } catch (e) {
+    console.error('[multicc] load notes.json failed:', e.message);
+    notes = [];
+  }
+}
+function saveNotes() {
+  try { fs.writeFileSync(NOTES_FILE, JSON.stringify(notes, null, 2)); }
+  catch (e) { console.error('[multicc] save notes.json failed:', e.message); }
+}
+loadNotes();
+
+// Lazy-load a directory's recent events from disk into the ring buffer.
+function recentEvents(dirId) {
+  if (eventRing.has(dirId)) return eventRing.get(dirId);
+  const ring = [];
+  try {
+    const file = path.join(EVENTS_DIR, `${dirId}.jsonl`);
+    if (fs.existsSync(file)) {
+      for (const l of fs.readFileSync(file, 'utf8').trim().split('\n').slice(-200)) {
+        try { ring.push(JSON.parse(l)); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  eventRing.set(dirId, ring);
+  return ring;
+}
+
+// Append an event to a directory's log + ring buffer, and broadcast it live.
+function appendEvent(dirId, type, detail, sessionId) {
+  if (!dirId) return;
+  const session = sessionId ? persistedSessions.get(sessionId) : null;
+  const evt = {
+    ts: Date.now(), type,
+    sessionId: sessionId || null,
+    sessionLabel: session ? (session.label || session.id) : (sessionId || null),
+    detail: detail || null,
+  };
+  const ring = recentEvents(dirId);
+  ring.push(evt);
+  if (ring.length > 200) ring.shift();
+  try { fs.appendFileSync(path.join(EVENTS_DIR, `${dirId}.jsonl`), JSON.stringify(evt) + '\n'); }
+  catch (_) {}
+  workspaceBroadcast(dirId, { type: 'event', event: evt });
+}
+
+function pendingNotesFor(sessionId) {
+  return notes.filter(n => n.toSessionId === sessionId && !n.delivered);
+}
+
+// Drop all notes referencing a session (called when it is deleted).
+function purgeNotesForSession(sessionId) {
+  const before = notes.length;
+  notes = notes.filter(n => n.toSessionId !== sessionId && n.fromSessionId !== sessionId);
+  if (notes.length !== before) saveNotes();
 }
 
 // ── Chat intent classification: 30s delayed trigger ──
@@ -3176,7 +3294,31 @@ function handleChatWs(ws, req, urlObj) {
         // For claude: first turn → --session-id <uuid>, subsequent → --resume <uuid>.
         // For codex:  first turn → exec --json, subsequent → exec resume <id> --json.
         const isFirstTurn = cs.chatTurnCount === 0 || !persisted.cliSessionId;
-        const args = provider.buildChatSpawnArgs(persisted, msg.text, { isFirstTurn });
+
+        // Passive inter-agent notes: prepend any pending notes addressed to this
+        // session onto the prompt, then mark them delivered.
+        let promptText = msg.text;
+        const pendingNotes = pendingNotesFor(sessionName).slice(0, 10);
+        if (pendingNotes.length) {
+          let block = '[multicc 跨 agent 留言 — 来自同目录下的其他 agent]\n';
+          for (const n of pendingNotes) block += `- 来自「${n.fromLabel}」：${n.body}\n`;
+          block += '[留言结束]\n\n';
+          if (block.length > 4000) block = block.slice(0, 4000) + '\n…(截断)\n\n';
+          promptText = block + msg.text;
+          const now = Date.now();
+          for (const n of pendingNotes) { n.delivered = true; n.deliveredAt = now; }
+          saveNotes();
+          appendEvent(persisted.dirId, 'note_delivered', `${pendingNotes.length} 条留言已送达`, sessionName);
+          workspaceBroadcast(persisted.dirId, {
+            type: 'note_pending', sessionId: sessionName, count: pendingNotesFor(sessionName).length,
+          });
+          chatBroadcast(sessionName, {
+            type: 'system', subtype: 'agent_notes',
+            notes: pendingNotes.map(n => ({ from: n.fromLabel, body: n.body })),
+          });
+        }
+
+        const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn });
         console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
         const spawnChat = (spawnArgs, isRetry) => {
@@ -3397,7 +3539,7 @@ function handleChatWs(ws, req, urlObj) {
               cs.chatTurnCount = 0;
               cs.isStreaming = true;
               cs.streamReplay = [];
-              const fallbackArgs = provider.buildChatSpawnArgs(persisted, msg.text, { isFirstTurn: true });
+              const fallbackArgs = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn: true });
               chatBroadcast(sessionName, {
                 type: 'system', subtype: 'warning',
                 message: `${cs.cli} 启动失败（${reason}），已用新会话重试`,

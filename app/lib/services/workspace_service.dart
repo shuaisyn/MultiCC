@@ -32,6 +32,8 @@ class WorkspaceService extends ChangeNotifier {
   bool _disposed = false;
 
   final Map<String, SessionStatus> statuses = {};
+  final Map<String, int> pendingNotes = {};   // sessionId → pending note count
+  final List<Map<String, dynamic>> events = []; // newest last, capped at 200
 
   WorkspaceService({required this.settings, required this.dirId});
 
@@ -95,18 +97,40 @@ class WorkspaceService extends ChangeNotifier {
     }
     if (msg is! Map) return;
 
-    if (msg['type'] == 'snapshot') {
+    final type = msg['type'];
+    if (type == 'snapshot') {
       statuses.clear();
+      pendingNotes.clear();
       for (final s in (msg['sessions'] as List? ?? const [])) {
         if (s is Map && s['id'] is String) {
-          statuses[s['id'] as String] = _parse(s);
+          final id = s['id'] as String;
+          statuses[id] = _parse(s);
+          pendingNotes[id] = (s['pendingNotes'] ?? 0) as int;
         }
       }
+      events
+        ..clear()
+        ..addAll((msg['events'] as List? ?? const [])
+            .whereType<Map>()
+            .map((e) => e.cast<String, dynamic>()));
       notifyListeners();
-    } else if (msg['type'] == 'status') {
+    } else if (type == 'status') {
       final id = msg['sessionId'];
       if (id is String) {
         statuses[id] = _parse(msg);
+        notifyListeners();
+      }
+    } else if (type == 'event') {
+      final e = msg['event'];
+      if (e is Map) {
+        events.add(e.cast<String, dynamic>());
+        if (events.length > 200) events.removeAt(0);
+        notifyListeners();
+      }
+    } else if (type == 'note_pending') {
+      final id = msg['sessionId'];
+      if (id is String) {
+        pendingNotes[id] = (msg['count'] ?? 0) as int;
         notifyListeners();
       }
     }

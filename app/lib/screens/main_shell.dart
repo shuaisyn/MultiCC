@@ -6,6 +6,7 @@ import '../models/message.dart';
 import '../providers/chat_provider.dart';
 import '../providers/session_manager.dart';
 import '../services/chat_service.dart';
+import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/workspace_service.dart';
 import 'chat_screen.dart';
@@ -766,6 +767,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                 ],
               ),
             ),
+            _EventTimeline(events: _workspace.events),
             if (!hasSessions)
               Container(
                 width: double.infinity,
@@ -793,6 +795,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                 mgr: widget.mgr,
                 settings: widget.settings,
                 statuses: _workspace.statuses,
+                pendingNotes: _workspace.pendingNotes,
               ),
               _SessionGroup(
                 title: 'Claude Chats',
@@ -801,6 +804,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                 mgr: widget.mgr,
                 settings: widget.settings,
                 statuses: _workspace.statuses,
+                pendingNotes: _workspace.pendingNotes,
               ),
               _SessionGroup(
                 title: 'Codex Terminals',
@@ -809,6 +813,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                 mgr: widget.mgr,
                 settings: widget.settings,
                 statuses: _workspace.statuses,
+                pendingNotes: _workspace.pendingNotes,
               ),
               _SessionGroup(
                 title: 'Codex Chats',
@@ -817,6 +822,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                 mgr: widget.mgr,
                 settings: widget.settings,
                 statuses: _workspace.statuses,
+                pendingNotes: _workspace.pendingNotes,
               ),
               const SizedBox(height: 10),
             ],
@@ -909,6 +915,71 @@ class _DirectoryCardState extends State<_DirectoryCard> {
   }
 }
 
+// Compact per-directory event timeline for the status board.
+class _EventTimeline extends StatelessWidget {
+  final List<Map<String, dynamic>> events;
+  const _EventTimeline({required this.events});
+
+  @override
+  Widget build(BuildContext context) {
+    if (events.isEmpty) return const SizedBox.shrink();
+    final recent = events.reversed.take(8).toList();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0d1117),
+        border: Border.all(color: const Color(0xFF21262d)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '活动',
+            style: TextStyle(
+              color: Color(0xFF6e7681),
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(height: 4),
+          for (final e in recent)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 1),
+              child: Text(
+                _eventLabel(e),
+                style: const TextStyle(color: Color(0xFF8b949e), fontSize: 11),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+String _eventLabel(Map<String, dynamic> e) {
+  final who = (e['sessionLabel'] ?? e['sessionId'] ?? '') as String;
+  final detail = (e['detail'] ?? '') as String;
+  switch (e['type']) {
+    case 'session_created':
+      return '🆕 新建会话 $who（$detail）';
+    case 'session_deleted':
+      return '🗑 删除会话 ${detail.isNotEmpty ? detail : who}';
+    case 'merged':
+      return '🔀 $who 合并：$detail';
+    case 'note':
+      return '📨 $who 留言 $detail';
+    case 'note_delivered':
+      return '📬 $who：$detail';
+    default:
+      return '· ${e['type']} $who';
+  }
+}
+
 class _ProjectStatPill extends StatelessWidget {
   final String label;
   final String value;
@@ -963,6 +1034,7 @@ class _SessionGroup extends StatelessWidget {
   final SessionManager mgr;
   final SettingsService settings;
   final Map<String, SessionStatus> statuses;
+  final Map<String, int> pendingNotes;
 
   const _SessionGroup({
     required this.title,
@@ -971,6 +1043,7 @@ class _SessionGroup extends StatelessWidget {
     required this.mgr,
     required this.settings,
     required this.statuses,
+    required this.pendingNotes,
   });
 
   @override
@@ -1011,6 +1084,7 @@ class _SessionGroup extends StatelessWidget {
                         mgr: mgr,
                         settings: settings,
                         liveStatus: statuses[s.id],
+                        pendingNotes: pendingNotes[s.id] ?? 0,
                       ),
                     ),
                 ],
@@ -1028,11 +1102,13 @@ class _SessionCard extends StatelessWidget {
   final SessionManager mgr;
   final SettingsService settings;
   final SessionStatus? liveStatus;
+  final int pendingNotes;
   const _SessionCard({
     required this.session,
     required this.mgr,
     required this.settings,
     this.liveStatus,
+    this.pendingNotes = 0,
   });
 
   @override
@@ -1100,6 +1176,16 @@ class _SessionCard extends StatelessWidget {
                       ),
                     ),
                   ],
+                  if (pendingNotes > 0) ...[
+                    const SizedBox(width: 6),
+                    Text(
+                      '📨$pendingNotes',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Color(0xFFd29922),
+                      ),
+                    ),
+                  ],
                   const Spacer(),
                   Text(
                     ago,
@@ -1161,6 +1247,20 @@ class _SessionCard extends StatelessWidget {
                 children: [
                   IconButton(
                     icon: const Icon(
+                      Icons.mail_outline_rounded,
+                      size: 16,
+                      color: Color(0xFF8b949e),
+                    ),
+                    tooltip: '给同目录 agent 留言',
+                    onPressed: () => _leaveNote(context),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(
+                      minWidth: 30,
+                      minHeight: 28,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(
                       Icons.restart_alt_rounded,
                       size: 16,
                       color: Color(0xFF8b949e),
@@ -1196,6 +1296,100 @@ class _SessionCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _leaveNote(BuildContext context) async {
+    final siblings = mgr.sessions
+        .where((x) => x.dirId == session.dirId && x.id != session.id)
+        .toList();
+    if (siblings.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('该目录下没有其他会话可留言')),
+      );
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    var targetId = siblings.first.id;
+    final bodyCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          backgroundColor: const Color(0xFF161b22),
+          title: const Text('留言',
+              style: TextStyle(fontSize: 15, color: Color(0xFFf0f6fc))),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '留言会在对方下一轮对话开始时送达。',
+                style: TextStyle(color: Color(0xFF8b949e), fontSize: 11),
+              ),
+              const SizedBox(height: 10),
+              DropdownButton<String>(
+                value: targetId,
+                isExpanded: true,
+                dropdownColor: const Color(0xFF161b22),
+                style: const TextStyle(color: Color(0xFFc9d1d9), fontSize: 13),
+                items: [
+                  for (final s in siblings)
+                    DropdownMenuItem(
+                      value: s.id,
+                      child: Text(
+                        '${s.label?.isNotEmpty == true ? s.label : s.id}'
+                        ' (${s.cli.name}/${s.kind.name})',
+                      ),
+                    ),
+                ],
+                onChanged: (v) => setLocal(() => targetId = v ?? targetId),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: bodyCtrl,
+                autofocus: true,
+                maxLines: 4,
+                style: const TextStyle(color: Color(0xFFc9d1d9), fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: '留言内容…',
+                  hintStyle: const TextStyle(color: Color(0xFF484f58)),
+                  filled: true,
+                  fillColor: const Color(0xFF0d1117),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(6)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消',
+                  style: TextStyle(color: Color(0xFF8b949e))),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('发送',
+                  style: TextStyle(
+                      color: Color(0xFF58a6ff), fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final body = bodyCtrl.text.trim();
+    if (body.isEmpty) return;
+    try {
+      await SessionService(settings: settings).postNote(
+        fromSessionId: session.id,
+        toSessionId: targetId,
+        body: body,
+      );
+      messenger.showSnackBar(const SnackBar(content: Text('留言已发送')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('发送失败：$e')));
+    }
   }
 
   void _open(BuildContext context) {

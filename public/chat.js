@@ -276,6 +276,8 @@ function handleEvent(msg) {
           addSystemMsg('⚠️ Response completed while disconnected. Check history above.');
           updateUI();
         }
+      } else if (msg.subtype === 'agent_notes' && Array.isArray(msg.notes)) {
+        addAgentNotes(msg.notes);
       } else if (msg.message) {
         addSystemMsg(msg.message);
       }
@@ -556,6 +558,18 @@ function addUserMsg(text) {
   const div = document.createElement('div');
   div.className = 'msg user';
   div.textContent = text;
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
+
+function addAgentNotes(notes) {
+  const div = document.createElement('div');
+  div.className = 'msg system-msg';
+  div.style.cssText = 'background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.4);' +
+    'color:#d29922;border-radius:6px;padding:6px 10px;font-size:12px;text-align:left;align-self:stretch;';
+  const lines = notes.map(n => `📨 来自「${n.from}」：${n.body}`).join('\n');
+  div.textContent = '已注入跨 agent 留言到本轮上下文：\n' + lines;
+  div.style.whiteSpace = 'pre-wrap';
   messagesEl.appendChild(div);
   scrollToBottom();
 }

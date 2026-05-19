@@ -402,6 +402,7 @@ function renderDirectoryBlock(dir, dirSessions) {
         <button class="btn add-codex" title="New Codex chat" onclick="newSessionInDir('${escapeHtml(id)}','codex','chat')">+ Codex Chat</button>
       </div>
       <div class="dir-body">
+        ${renderEventTimeline(id)}
         ${bodyHtml}
       </div>
     </div>`;
@@ -419,6 +420,7 @@ function renderSessionRow(s) {
   // Live workspace status (from /ws/workspace) takes precedence when available.
   const wb = _workspaceStatus.get(s.id);
   if (wb) { const info = wbStatusInfo(wb.status); statusText = info.text; statusCls = info.cls; }
+  const pendingNotes = _workspaceNotes.get(s.id) || 0;
 
   const openBtn = s.kind === 'chat'
     ? `<button class="btn" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}')">Open</button>`
@@ -430,6 +432,7 @@ function renderSessionRow(s) {
         <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
         <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
         <span class="sess-status ${statusCls}" id="sess-status-${escapeHtml(s.id)}">${statusText}</span>
+        <span class="sess-notes" id="sess-notes-${escapeHtml(s.id)}" style="font-size:10px;color:#d29922;${pendingNotes > 0 ? '' : 'display:none'}">${pendingNotes > 0 ? '📨 ' + pendingNotes : ''}</span>
       </div>
       <div class="sess-id">#${escapeHtml(s.id)}</div>
       <div class="sess-label">${escapeHtml(s.label || s.cwd || '')}</div>
@@ -438,6 +441,7 @@ function renderSessionRow(s) {
         <span class="sess-label">${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
         <span class="sess-actions">
           ${openBtn}
+          <button class="btn" onclick="event.stopPropagation(); openNoteModal('${escapeHtml(s.id)}')" title="给同目录其他 agent 留言">留言</button>
           <button class="btn" onclick="event.stopPropagation(); mergeSession('${escapeHtml(s.id)}')" title="把 worktree 合并回基分支">合并</button>
           <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
         </span>
@@ -691,8 +695,10 @@ async function mergeSession(id) {
 }
 
 /* ── Workspace status board (live agent statuses per directory) ── */
-const _workspaceWs = new Map();      // dirId → WebSocket
-const _workspaceStatus = new Map();  // sessionId → { status, currentFile, lastActivity }
+const _workspaceWs = new Map();        // dirId → WebSocket
+const _workspaceStatus = new Map();    // sessionId → { status, currentFile, lastActivity }
+const _workspaceEvents = new Map();    // dirId → event[]
+const _workspaceNotes = new Map();     // sessionId → pending note count
 
 function wbStatusInfo(status) {
   switch (status) {
@@ -717,11 +723,24 @@ function connectWorkspace(dirId) {
     if (msg.type === 'snapshot') {
       for (const s of msg.sessions) {
         _workspaceStatus.set(s.id, { status: s.status, currentFile: s.currentFile, lastActivity: s.lastActivity });
+        _workspaceNotes.set(s.id, s.pendingNotes || 0);
         updateSessionStatusDom(s.id);
+        updateSessionNotesDom(s.id);
       }
+      _workspaceEvents.set(dirId, msg.events || []);
+      updateEventTimelineDom(dirId);
     } else if (msg.type === 'status') {
       _workspaceStatus.set(msg.sessionId, { status: msg.status, currentFile: msg.currentFile, lastActivity: msg.lastActivity });
       updateSessionStatusDom(msg.sessionId);
+    } else if (msg.type === 'event') {
+      const arr = _workspaceEvents.get(dirId) || [];
+      arr.push(msg.event);
+      if (arr.length > 200) arr.shift();
+      _workspaceEvents.set(dirId, arr);
+      updateEventTimelineDom(dirId);
+    } else if (msg.type === 'note_pending') {
+      _workspaceNotes.set(msg.sessionId, msg.count || 0);
+      updateSessionNotesDom(msg.sessionId);
     }
   };
   ws.onclose = () => { if (_workspaceWs.get(dirId) === ws) _workspaceWs.delete(dirId); };
@@ -747,6 +766,89 @@ function updateSessionStatusDom(sessionId) {
     fileEl.textContent = st.currentFile ? '✎ ' + st.currentFile.split('/').pop() : '';
     fileEl.style.display = st.currentFile ? '' : 'none';
   }
+}
+
+function eventLabel(evt) {
+  const who = evt.sessionLabel || evt.sessionId || '';
+  switch (evt.type) {
+    case 'session_created': return `🆕 新建会话 ${who}（${evt.detail || ''}）`;
+    case 'session_deleted': return `🗑 删除会话 ${evt.detail || who}`;
+    case 'merged':          return `🔀 ${who} 合并：${evt.detail || ''}`;
+    case 'note':            return `📨 ${who} 留言 ${evt.detail || ''}`;
+    case 'note_delivered':  return `📬 ${who}：${evt.detail || ''}`;
+    default:                return `· ${evt.type} ${who}`;
+  }
+}
+
+function renderEventTimeline(dirId) {
+  const events = (_workspaceEvents.get(dirId) || []).slice(-12).reverse();
+  const rows = events.length
+    ? events.map(e => {
+        const t = new Date(e.ts).toLocaleTimeString();
+        return `<div class="wb-event-row"><span style="color:#6e7681">${t}</span> ${escapeHtml(eventLabel(e))}</div>`;
+      }).join('')
+    : '<div class="wb-event-row" style="color:#6e7681">暂无活动</div>';
+  return `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}"
+    style="margin:8px 14px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:11px;line-height:1.7;max-height:160px;overflow-y:auto;">${rows}</div>`;
+}
+
+function updateEventTimelineDom(dirId) {
+  const el = document.getElementById(`wb-events-${dirId}`);
+  if (el) el.outerHTML = renderEventTimeline(dirId);
+}
+
+function updateSessionNotesDom(sessionId) {
+  const el = document.getElementById(`sess-notes-${sessionId}`);
+  if (!el) return;
+  const n = _workspaceNotes.get(sessionId) || 0;
+  el.textContent = n > 0 ? `📨 ${n}` : '';
+  el.style.display = n > 0 ? '' : 'none';
+}
+
+/* ── Leave-a-note modal ── */
+function openNoteModal(fromId) {
+  const from = _cachedSessions.find(s => s.id === fromId);
+  if (!from) return;
+  const siblings = _cachedSessions.filter(s =>
+    s.dirId === from.dirId && s.id !== fromId && s.type !== 'aux');
+  if (!siblings.length) { showToast('该目录下没有其他会话可留言', true); return; }
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:#000000bb;z-index:20000;display:flex;align-items:center;justify-content:center;';
+  const opts = siblings.map(s =>
+    `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label || s.id)} (${escapeHtml(s.cli)}/${escapeHtml(s.kind)})</option>`).join('');
+  overlay.innerHTML = `
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px;width:440px;max-width:92vw;">
+      <div style="font-size:14px;font-weight:600;color:#f0f6fc;margin-bottom:4px;">给同目录 agent 留言</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:12px;">来自 ${escapeHtml(from.label || from.id)}。留言会在对方下一轮对话开始时送达。</div>
+      <select id="note-target" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 9px;margin-bottom:10px;">${opts}</select>
+      <textarea id="note-body" rows="4" placeholder="留言内容…" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;resize:vertical;outline:none;"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+        <button class="btn" id="note-cancel">取消</button>
+        <button class="btn btn-green" id="note-send">发送</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  overlay.querySelector('#note-cancel').onclick = close;
+  overlay.querySelector('#note-send').onclick = async () => {
+    const toId = overlay.querySelector('#note-target').value;
+    const body = overlay.querySelector('#note-body').value.trim();
+    if (!body) { showToast('留言内容不能为空', true); return; }
+    try {
+      const res = await fetch(`/api/sessions/${fromId}/notes` + tokenQS('?'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toSessionId: toId, body }),
+      });
+      const data = await res.json();
+      if (res.ok) { showToast('留言已发送'); close(); }
+      else showToast(`发送失败：${data.error || res.status}`, true);
+    } catch (err) {
+      showToast(`Error: ${err.message}`, true);
+    }
+  };
 }
 
 function newSession() {

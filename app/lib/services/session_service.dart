@@ -60,6 +60,26 @@ class SessionService {
     return map;
   }
 
+  /// Leave a passive note for another session in the same directory. The note
+  /// is delivered to the target agent at the start of its next chat turn.
+  Future<void> postNote({
+    required String fromSessionId,
+    required String toSessionId,
+    required String body,
+  }) async {
+    final res = await http
+        .post(
+          Uri.parse(_url('/api/sessions/$fromSessionId/notes')),
+          headers: _headers,
+          body: jsonEncode({'toSessionId': toSessionId, 'body': body}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   Future<void> updateSessionLabel(String id, String? label) async {
     final res = await http
         .patch(
