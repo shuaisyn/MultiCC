@@ -44,6 +44,22 @@ class SessionService {
     if (res.statusCode >= 400) throw Exception('${res.statusCode}');
   }
 
+  /// Merge a session's worktree branch back into the directory's base branch.
+  /// Returns the parsed server response. On conflict (409) the result map
+  /// contains `ok: false` and a `conflicts` list.
+  Future<Map<String, dynamic>> mergeSession(String id) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/sessions/$id/merge')), headers: _headers)
+        .timeout(const Duration(seconds: 30));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['ok'] = false;
+      map['error'] ??= '${res.statusCode}';
+    }
+    return map;
+  }
+
   Future<void> updateSessionLabel(String id, String? label) async {
     final res = await http
         .patch(

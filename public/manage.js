@@ -351,34 +351,53 @@ function renderDirectoryBlock(dir, dirSessions) {
     if (groups[key]) groups[key].push(s);
   }
 
+  const total = dirSessions.length;
+  const active = dirSessions.filter(s => s.active).length;
+  const claudeCount = groups.claude_terminal.length + groups.claude_chat.length;
+  const codexCount = groups.codex_terminal.length + groups.codex_chat.length;
+
   const renderGroup = (cli, kind, label) => {
     const ss = groups[`${cli}_${kind}`];
-    const rows = ss.length ? ss.map(s => renderSessionRow(s)).join('') : `<div class="sess-group-empty">none</div>`;
+    if (!ss.length) return '';
+    const rows = ss.map(s => renderSessionRow(s)).join('');
     return `
       <div class="sess-group ${cli}">
         <div class="sess-group-label">${label} (${ss.length})</div>
-        ${rows}
+        <div class="sess-card-grid">${rows}</div>
       </div>`;
   };
+
+  const bodyHtml = [
+    renderGroup('claude', 'terminal', 'Claude Terminals'),
+    renderGroup('claude', 'chat', 'Claude Chats'),
+    renderGroup('codex',  'terminal', 'Codex Terminals'),
+    renderGroup('codex',  'chat', 'Codex Chats'),
+  ].filter(Boolean).join('') || '<div class="dir-empty">No sessions yet</div>';
 
   return `
     <div class="dir-block${openClass}" data-dir-id="${escapeHtml(id)}">
       <div class="dir-header">
-        <span class="dir-name" onclick="toggleDirectory('${escapeHtml(id)}')">${escapeHtml(dir.name)}</span>
-        <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
-        <span class="dir-actions">
-          <button class="btn add-claude" title="New Claude terminal" onclick="newSessionInDir('${escapeHtml(id)}','claude','terminal')">+ Claude Term</button>
-          <button class="btn add-claude" title="New Claude chat" onclick="newSessionInDir('${escapeHtml(id)}','claude','chat')">+ Claude Chat</button>
-          <button class="btn add-codex" title="New Codex terminal" onclick="newSessionInDir('${escapeHtml(id)}','codex','terminal')">+ Codex Term</button>
-          <button class="btn add-codex" title="New Codex chat" onclick="newSessionInDir('${escapeHtml(id)}','codex','chat')">+ Codex Chat</button>
-          <button class="btn btn-danger" title="Delete directory" onclick="deleteDirectory('${escapeHtml(id)}')">Del</button>
-        </span>
+        <button class="dir-toggle" title="Expand project" onclick="toggleDirectory('${escapeHtml(id)}')"></button>
+        <div class="dir-main">
+          <span class="dir-name" onclick="toggleDirectory('${escapeHtml(id)}')">${escapeHtml(dir.name)}</span>
+          <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
+          <div class="dir-stats">
+            <span class="stat-pill"><strong>${total}</strong> sessions</span>
+            <span class="stat-pill"><strong>${active}</strong> active</span>
+            <span class="stat-pill claude"><strong>${claudeCount}</strong> Claude</span>
+            <span class="stat-pill codex"><strong>${codexCount}</strong> Codex</span>
+          </div>
+        </div>
+        <button class="btn btn-danger dir-danger" title="Delete directory" onclick="deleteDirectory('${escapeHtml(id)}')">Del</button>
+      </div>
+      <div class="dir-actions">
+        <button class="btn add-claude" title="New Claude terminal" onclick="newSessionInDir('${escapeHtml(id)}','claude','terminal')">+ Claude Term</button>
+        <button class="btn add-claude" title="New Claude chat" onclick="newSessionInDir('${escapeHtml(id)}','claude','chat')">+ Claude Chat</button>
+        <button class="btn add-codex" title="New Codex terminal" onclick="newSessionInDir('${escapeHtml(id)}','codex','terminal')">+ Codex Term</button>
+        <button class="btn add-codex" title="New Codex chat" onclick="newSessionInDir('${escapeHtml(id)}','codex','chat')">+ Codex Chat</button>
       </div>
       <div class="dir-body">
-        ${renderGroup('claude', 'terminal', 'Claude Terminals')}
-        ${renderGroup('claude', 'chat', 'Claude Chats')}
-        ${renderGroup('codex',  'terminal', 'Codex Terminals')}
-        ${renderGroup('codex',  'chat', 'Codex Chats')}
+        ${bodyHtml}
       </div>
     </div>`;
 }
@@ -399,15 +418,21 @@ function renderSessionRow(s) {
 
   return `
     <div class="sess-row${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="openSessionInline('${escapeHtml(s.id)}','${escapeHtml(s.kind || 'terminal')}')">
-      <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
-      <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
-      <span class="sess-id">#${escapeHtml(s.id)}</span>
-      <span class="sess-label">${escapeHtml(s.label || '')}</span>
-      <span class="sess-status ${statusCls}">${statusText}</span>
-      <span class="sess-actions">
-        ${openBtn}
-        <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
-      </span>
+      <div class="sess-row-top">
+        <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
+        <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
+        <span class="sess-status ${statusCls}">${statusText}</span>
+      </div>
+      <div class="sess-id">#${escapeHtml(s.id)}</div>
+      <div class="sess-label">${escapeHtml(s.label || s.cwd || '')}</div>
+      <div class="sess-row-bottom">
+        <span class="sess-label">${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
+        <span class="sess-actions">
+          ${openBtn}
+          <button class="btn" onclick="event.stopPropagation(); mergeSession('${escapeHtml(s.id)}')" title="把 worktree 合并回基分支">合并</button>
+          <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
+        </span>
+      </div>
     </div>`;
 }
 
@@ -634,6 +659,23 @@ async function deleteSession(id) {
     if (cachedFrame) { cachedFrame.remove(); _iframeCache.delete(id); }
     if (_focusedSessionId === id) closeFocusPanel();
     loadSessions();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+async function mergeSession(id) {
+  if (!confirm(`把会话 ${id} 的 worktree 合并回基分支？\n未提交的改动会先自动提交。`)) return;
+  try {
+    const res = await fetch(`/api/sessions/${id}/merge` + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(data.merged ? `已合并 ${data.commits} 个提交回基分支` : (data.message || '没有新提交需要合并'));
+    } else if (res.status === 409) {
+      showToast(`合并冲突，已 abort：${(data.conflicts || []).join(', ')}`, true);
+    } else {
+      showToast(`合并失败：${data.error || res.status}`, true);
+    }
   } catch (err) {
     showToast(`Error: ${err.message}`, true);
   }

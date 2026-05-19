@@ -562,6 +562,33 @@ if (restartBtn) {
   });
 }
 
+const mergeBtn = document.getElementById('merge-btn');
+if (mergeBtn) {
+  mergeBtn.addEventListener('click', async () => {
+    if (!currentSessionId) return;
+    if (!confirm('把此会话 worktree 的改动合并回基分支？\n未提交的改动会先自动提交。')) return;
+    mergeBtn.disabled = true;
+    term.write('\r\n\x1b[36m[正在合并 worktree...]\x1b[0m\r\n');
+    try {
+      const res = await fetch(withToken(`/api/sessions/${currentSessionId}/merge`), { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        term.write(data.merged
+          ? `\x1b[32m[✓ 已合并 ${data.commits} 个提交回基分支]\x1b[0m\r\n`
+          : `\x1b[32m[✓ ${data.message || '没有新提交需要合并'}]\x1b[0m\r\n`);
+      } else if (res.status === 409) {
+        term.write(`\x1b[31m[⚠️ 合并冲突，已 abort。冲突文件: ${(data.conflicts || []).join(', ')}]\x1b[0m\r\n`);
+      } else {
+        term.write(`\x1b[31m[合并失败: ${data.error || res.status}]\x1b[0m\r\n`);
+      }
+    } catch (err) {
+      term.write(`\x1b[31m[合并请求失败: ${err.message}]\x1b[0m\r\n`);
+    } finally {
+      mergeBtn.disabled = false;
+    }
+  });
+}
+
 function sendResize() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));

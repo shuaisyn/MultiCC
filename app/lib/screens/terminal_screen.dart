@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
 import '../models/message.dart';
+import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/terminal_service.dart';
 
@@ -39,6 +40,54 @@ class _TerminalScreenState extends State<TerminalScreen> {
     super.dispose();
   }
 
+  Future<void> _confirmMerge() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF161b22),
+        title: const Text('合并 worktree',
+            style: TextStyle(fontSize: 15, color: Color(0xFFf0f6fc))),
+        content: const Text(
+          '把此会话 worktree 的改动合并回基分支？\n未提交的改动会先自动提交。',
+          style: TextStyle(color: Color(0xFFc9d1d9)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消', style: TextStyle(color: Color(0xFF8b949e))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('合并',
+                style: TextStyle(color: Color(0xFF58a6ff), fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('正在合并 worktree...')));
+    try {
+      final result = await SessionService(settings: widget.settings)
+          .mergeSession(widget.session.id);
+      String msg;
+      if (result['ok'] == true) {
+        msg = result['merged'] == true
+            ? '✓ 已合并 ${result['commits']} 个提交回基分支'
+            : '✓ ${result['message'] ?? '没有新提交需要合并'}';
+      } else if (result['conflicts'] != null) {
+        msg = '⚠️ 合并冲突，已 abort：${(result['conflicts'] as List).join(', ')}';
+      } else {
+        msg = '合并失败：${result['error'] ?? ''}';
+      }
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('合并请求失败：$e')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -49,6 +98,7 @@ class _TerminalScreenState extends State<TerminalScreen> {
           session: widget.session,
           connState: _connState,
           onReconnect: _svc.manualReconnect,
+          onMerge: _confirmMerge,
         ),
       ),
       body: SafeArea(
@@ -83,11 +133,13 @@ class _TerminalAppBar extends StatelessWidget {
   final Session session;
   final TerminalConnectionState connState;
   final VoidCallback onReconnect;
+  final VoidCallback onMerge;
 
   const _TerminalAppBar({
     required this.session,
     required this.connState,
     required this.onReconnect,
+    required this.onMerge,
   });
 
   @override
@@ -163,6 +215,16 @@ class _TerminalAppBar extends StatelessWidget {
                   ],
                 ),
               ],
+            ),
+          ),
+          Tooltip(
+            message: '合并 worktree',
+            child: GestureDetector(
+              onTap: onMerge,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: Icon(Icons.merge_type, color: Color(0xFFc9d1d9), size: 20),
+              ),
             ),
           ),
           if (connState == TerminalConnectionState.disconnected)

@@ -220,6 +220,10 @@ function resolveClaude() {
 
 const CLAUDE_CMD = resolveClaude();
 const CLAUDE_ARGS = process.env.CLAUDE_ARGS ? process.env.CLAUDE_ARGS.split(' ') : [];
+const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?? 'AskUserQuestion')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
 // ── Codex CLI binary resolution (mirrors claude lookup) ──
@@ -271,6 +275,9 @@ const cliProviders = {
         '-p', '--output-format', 'stream-json', '--verbose',
         '--include-partial-messages', '--dangerously-skip-permissions',
       ];
+      if (CLAUDE_CHAT_DISALLOWED_TOOLS.length) {
+        args.push('--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(','));
+      }
       if (opts.isFirstTurn) args.push('--session-id', session.cliSessionId);
       else args.push('--resume', session.cliSessionId);
       args.push(prompt);
@@ -479,6 +486,11 @@ function recoverTmuxSessions() {
       // are left alone — user can kill them via `tmux kill-session` if unwanted.
       const persisted = persistedSessions.get(id);
       if (!persisted || persisted.kind !== 'terminal') continue;
+      // Sessions whose directory is invalid ($HOME / duplicate path) are not recovered.
+      if (invalidSessions.has(id)) {
+        console.warn(`[multicc] skipping recovery of ${id}: ${invalidSessions.get(id)}`);
+        continue;
+      }
       console.log(`[multicc] Recovering tmux session: ${id} (${persisted.cli})`);
       try {
         createSession(id);
@@ -491,10 +503,190 @@ function recoverTmuxSessions() {
   }
 }
 
+// ── git worktree helpers ──
+// Every session runs in an isolated git worktree under <dir>/.multicc-worktrees/<sessionId>
+// on its own branch `multicc/<sessionId>`. Work is collected back via an explicit merge.
+const WORKTREE_SUBDIR = '.multicc-worktrees';
+const gitReadyDirs = new Set();          // dir.id once its repo is verified/initialised
+const invalidSessions = new Map();       // sessionId → reason; recovery is skipped for these
+
+function gitRun(cwd, args) {
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function gitIsRepo(dirPath) {
+  try { return gitRun(dirPath, ['rev-parse', '--is-inside-work-tree']) === 'true'; }
+  catch { return false; }
+}
+
+function gitHasCommit(dirPath) {
+  try { gitRun(dirPath, ['rev-parse', 'HEAD']); return true; }
+  catch { return false; }
+}
+
+function gitBaseBranch(dirPath) {
+  try {
+    const b = gitRun(dirPath, ['symbolic-ref', '--short', 'HEAD']);
+    if (b) return b;
+  } catch (_) {}
+  try {
+    const b = gitRun(dirPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (b && b !== 'HEAD') return b;
+  } catch (_) {}
+  return 'main';
+}
+
+// Add `.multicc-worktrees/` to .git/info/exclude (does not touch the user's tracked .gitignore).
+function gitEnsureExcluded(dirPath) {
+  try {
+    const gitDir = gitRun(dirPath, ['rev-parse', '--git-dir']);
+    const absGitDir = path.isAbsolute(gitDir) ? gitDir : path.join(dirPath, gitDir);
+    const excludeFile = path.join(absGitDir, 'info', 'exclude');
+    let content = '';
+    try { content = fs.readFileSync(excludeFile, 'utf8'); } catch (_) {}
+    if (!content.split('\n').some(l => l.trim() === WORKTREE_SUBDIR + '/')) {
+      fs.mkdirSync(path.dirname(excludeFile), { recursive: true });
+      fs.appendFileSync(excludeFile, (content && !content.endsWith('\n') ? '\n' : '') + WORKTREE_SUBDIR + '/\n');
+    }
+  } catch (e) {
+    console.warn('[multicc] gitEnsureExcluded failed:', e.message);
+  }
+}
+
+// True if the path is the home directory, an ancestor of it, or a filesystem root.
+function isHomeOrAbove(p) {
+  const real = (x) => { try { return fs.realpathSync(x); } catch { return path.resolve(x); } };
+  const rp = real(p);
+  const rh = real(os.homedir());
+  if (rp === rh) return true;
+  if (rh === rp || rh.startsWith(rp + path.sep)) return true;  // rp is an ancestor of home
+  if (rp === path.parse(rp).root) return true;
+  return false;
+}
+
+function realPathOf(p) {
+  try { return fs.realpathSync(p); } catch { return path.resolve(p); }
+}
+
+// Find an already-registered directory whose physical path matches `resolvedPath`.
+function findDirByPath(resolvedPath, excludeId) {
+  const target = realPathOf(resolvedPath);
+  for (const d of directories.values()) {
+    if (excludeId && d.id === excludeId) continue;
+    if (realPathOf(d.path) === target) return d;
+  }
+  return null;
+}
+
+// Make sure a directory is a usable git repo; refuses $HOME and missing paths.
+function ensureDirGitReady(dir) {
+  if (gitReadyDirs.has(dir.id)) return { ok: true };
+  if (isHomeOrAbove(dir.path)) return { ok: false, reason: 'home-or-above' };
+  if (!fs.existsSync(dir.path)) return { ok: false, reason: 'path-missing' };
+  try {
+    if (!gitIsRepo(dir.path)) {
+      console.log(`[multicc] git init: ${dir.path}`);
+      gitRun(dir.path, ['init']);
+    }
+    gitEnsureExcluded(dir.path);
+    if (!gitHasCommit(dir.path)) {
+      try { gitRun(dir.path, ['add', '-A']); } catch (_) {}
+      gitRun(dir.path, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
+        'commit', '--allow-empty', '-m', 'multicc: initial commit']);
+    }
+    dir.baseBranch = gitBaseBranch(dir.path);
+    dir.gitInitialized = true;
+    gitReadyDirs.add(dir.id);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: 'git-error: ' + e.message };
+  }
+}
+
+// Create (or re-attach) the worktree for a session. Returns { worktreePath, branch }.
+function gitWorktreeAdd(dirPath, sessionId, baseBranch) {
+  const wtPath = path.join(dirPath, WORKTREE_SUBDIR, sessionId);
+  const branch = `multicc/${sessionId}`;
+  fs.mkdirSync(path.join(dirPath, WORKTREE_SUBDIR), { recursive: true });
+  try { gitRun(dirPath, ['worktree', 'prune']); } catch (_) {}
+  if (fs.existsSync(wtPath)) return { worktreePath: wtPath, branch };  // already there
+  let branchExists = false;
+  try { gitRun(dirPath, ['rev-parse', '--verify', branch]); branchExists = true; } catch (_) {}
+  if (branchExists) {
+    gitRun(dirPath, ['worktree', 'add', wtPath, branch]);
+  } else {
+    gitRun(dirPath, ['worktree', 'add', wtPath, '-b', branch, baseBranch]);
+  }
+  return { worktreePath: wtPath, branch };
+}
+
+function gitWorktreeRemove(dirPath, worktreePath, branch) {
+  try { gitRun(dirPath, ['worktree', 'remove', '--force', worktreePath]); }
+  catch (e) { console.warn('[multicc] worktree remove failed:', e.message); }
+  if (branch) { try { gitRun(dirPath, ['branch', '-D', branch]); } catch (_) {} }
+  try { gitRun(dirPath, ['worktree', 'prune']); } catch (_) {}
+}
+
+// Stage + commit everything in a worktree. Returns true if a commit was actually made.
+function gitWorktreeCommitAll(worktreePath, message) {
+  gitRun(worktreePath, ['add', '-A']);
+  try {
+    gitRun(worktreePath, ['diff', '--cached', '--quiet']);
+    return false;  // exit 0 → nothing staged
+  } catch (_) { /* exit 1 → there are staged changes */ }
+  gitRun(worktreePath, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
+    'commit', '-m', message]);
+  return true;
+}
+
+// Commit pending work in the worktree, then merge its branch into the base branch.
+function gitMergeBack(dir, session) {
+  const dirPath = dir.path;
+  const branch = session.branch;
+  const baseBranch = dir.baseBranch || gitBaseBranch(dirPath);
+  const wtPath = session.worktreePath;
+  if (!branch || !wtPath) return { ok: false, error: 'session has no worktree' };
+
+  let committed = false;
+  if (fs.existsSync(wtPath)) {
+    try {
+      committed = gitWorktreeCommitAll(wtPath,
+        `multicc: session ${session.id} @ ${new Date().toISOString()}`);
+    } catch (e) {
+      return { ok: false, error: `commit failed: ${e.message}` };
+    }
+  }
+
+  const curBranch = gitBaseBranch(dirPath);
+  if (curBranch !== baseBranch) {
+    return { ok: false, error:
+      `base branch '${baseBranch}' is not checked out in the main directory (currently on '${curBranch}'); merge manually` };
+  }
+
+  let ahead = 0;
+  try { ahead = parseInt(gitRun(dirPath, ['rev-list', '--count', `${baseBranch}..${branch}`]) || '0', 10); }
+  catch (_) {}
+  if (ahead === 0) return { ok: true, merged: false, committed, message: '没有新提交需要合并' };
+
+  try {
+    gitRun(dirPath, ['merge', '--no-ff', '-m', `multicc: merge ${branch}`, branch]);
+    return { ok: true, merged: true, committed, commits: ahead };
+  } catch (e) {
+    let conflicts = [];
+    try {
+      conflicts = gitRun(dirPath, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+    } catch (_) {}
+    try { gitRun(dirPath, ['merge', '--abort']); } catch (_) {}
+    return { ok: false, conflicts, error: '合并冲突 — 已 abort，基分支未改动' };
+  }
+}
+
 // ── Directory + session persistence ──
 // Schema:
-//   directories.json: [{ id, name, path, createdAt }]
-//   sessions.json:    [{ id, dirId, cli, kind, cliSessionId, label?, createdAt }]  (+ __aux__ special record)
+//   directories.json: [{ id, name, path, createdAt, baseBranch?, gitInitialized? }]
+//   sessions.json:    [{ id, dirId, cli, kind, cliSessionId, label?, createdAt, worktreePath?, branch? }]  (+ __aux__)
 //
 // On first load, we auto-migrate the old flat { id, cwd, claudeSessionId, chatClaudeSessionId } schema
 // into directories.json + split each paired session into a terminal + optional chat record.
@@ -628,10 +820,65 @@ if (_state.needsSave) {
   console.log(`[multicc] Migration complete: ${directories.size} directories, ${persistedSessions.size} sessions`);
 }
 
-// Helper: resolve a session's cwd by looking up its directory.
+// Startup: ensure every session has an isolated worktree. Legacy sessions (created
+// before worktree isolation) get one built here. Sessions whose directory is invalid
+// ($HOME, or a duplicate physical path) are marked invalid and skipped at recovery.
+function initWorktrees() {
+  // Detect directories that point at the same physical path — keep the earliest as
+  // canonical, mark sessions under the rest invalid.
+  const seenPaths = new Map();   // realpath → canonical dir id
+  const dupDirIds = new Set();
+  const sortedDirs = [...directories.values()]
+    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  for (const d of sortedDirs) {
+    const rp = realPathOf(d.path);
+    if (seenPaths.has(rp)) dupDirIds.add(d.id);
+    else seenPaths.set(rp, d.id);
+  }
+
+  let built = 0;
+  for (const s of persistedSessions.values()) {
+    if (s.type === 'aux' || s.id === AUX_SESSION_ID) continue;
+    const dir = directories.get(s.dirId);
+    if (!dir) { invalidSessions.set(s.id, 'no directory'); continue; }
+    if (dupDirIds.has(dir.id)) { invalidSessions.set(s.id, 'duplicate directory path'); continue; }
+    if (isHomeOrAbove(dir.path)) { invalidSessions.set(s.id, 'directory is $HOME or above'); continue; }
+    if (s.worktreePath && fs.existsSync(s.worktreePath)) continue;  // already isolated
+
+    const ready = ensureDirGitReady(dir);
+    if (!ready.ok) { invalidSessions.set(s.id, 'git not ready: ' + ready.reason); continue; }
+    try {
+      const { worktreePath, branch } = gitWorktreeAdd(dir.path, s.id, dir.baseBranch);
+      s.worktreePath = worktreePath;
+      s.branch = branch;
+      built++;
+      // Legacy terminal session still running in the old (non-worktree) tmux pane:
+      // kill it so recovery recreates the session inside its worktree.
+      if (s.kind === 'terminal' && tmuxHasSession(s.id)) {
+        console.log(`[multicc] migrating terminal ${s.id} into worktree — discarding old tmux pane`);
+        tmuxKillSession(s.id);
+      }
+    } catch (e) {
+      invalidSessions.set(s.id, 'worktree create failed: ' + e.message);
+      console.error(`[multicc] worktree creation failed for session ${s.id}: ${e.message}`);
+    }
+  }
+  if (built > 0 || invalidSessions.size > 0) {
+    saveDirectories();
+    savePersistedSessions();
+  }
+  console.log(`[multicc] worktrees: ${built} built, ${invalidSessions.size} session(s) invalid`);
+  for (const [id, reason] of invalidSessions) {
+    console.warn(`[multicc]   invalid session ${id}: ${reason}`);
+  }
+}
+
+// Helper: resolve a session's cwd. Isolated sessions run inside their git worktree;
+// fall back to the directory path if the worktree is somehow missing.
 function cwdForSession(session) {
   if (!session) return os.homedir();
   if (session.type === 'aux') return session.cwd || __dirname;
+  if (session.worktreePath && fs.existsSync(session.worktreePath)) return session.worktreePath;
   const dir = directories.get(session.dirId);
   if (dir && dir.path) return dir.path;
   return session.cwd || os.homedir();
@@ -661,6 +908,9 @@ function createSession(id) {
   }
   if (persisted.kind && persisted.kind !== 'terminal') {
     throw new Error(`Session ${id} is kind=${persisted.kind}, not a terminal`);
+  }
+  if (invalidSessions.has(id)) {
+    throw new Error(`Session ${id} is invalid: ${invalidSessions.get(id)}`);
   }
 
   let cwd = cwdForSession(persisted);
@@ -907,9 +1157,22 @@ app.post('/api/directories', (req, res) => {
   if (!fs.existsSync(resolvedPath)) {
     return res.status(400).json({ error: `path does not exist: ${resolvedPath}` });
   }
+  if (isHomeOrAbove(resolvedPath)) {
+    return res.status(400).json({ error: '不允许选择 $HOME 或更高层目录' });
+  }
+  const dup = findDirByPath(resolvedPath);
+  if (dup) {
+    return res.status(400).json({ error: `该路径已被目录 "${dup.name}" 登记，不允许重复` });
+  }
   const id = crypto.randomUUID();
   const dir = { id, name, path: resolvedPath, createdAt: new Date().toISOString() };
   directories.set(id, dir);
+  // Force the directory to be a usable git repo (worktree isolation depends on it).
+  const ready = ensureDirGitReady(dir);
+  if (!ready.ok) {
+    directories.delete(id);
+    return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
+  }
   saveDirectories();
   res.json(dir);
 });
@@ -921,7 +1184,18 @@ app.patch('/api/directories/:id', (req, res) => {
   if (req.body.path) {
     const resolved = resolveCwd(os.homedir(), String(req.body.path).trim());
     if (!fs.existsSync(resolved)) return res.status(400).json({ error: `path does not exist: ${resolved}` });
-    d.path = resolved;
+    if (isHomeOrAbove(resolved)) {
+      return res.status(400).json({ error: '不允许选择 $HOME 或更高层目录' });
+    }
+    const dup = findDirByPath(resolved, d.id);
+    if (dup) return res.status(400).json({ error: `该路径已被目录 "${dup.name}" 登记，不允许重复` });
+    if (realPathOf(resolved) !== realPathOf(d.path)) {
+      d.path = resolved;
+      // Path changed → re-verify git readiness for the new location.
+      gitReadyDirs.delete(d.id);
+      const ready = ensureDirGitReady(d);
+      if (!ready.ok) return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
+    }
   }
   saveDirectories();
   res.json(d);
@@ -944,7 +1218,9 @@ app.delete('/api/directories/:id', (req, res) => {
       if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
       chatSessions.delete(s.id);
     }
+    if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
     persistedSessions.delete(s.id);
+    invalidSessions.delete(s.id);
   }
   directories.delete(d.id);
   saveDirectories();
@@ -964,6 +1240,9 @@ app.get('/api/directories/:id/sessions', (req, res) => {
         id: s.id, dirId: s.dirId, cli: s.cli, kind: s.kind,
         cliSessionId: s.cliSessionId || null, label: s.label || null,
         createdAt: s.createdAt,
+        branch: s.branch || null,
+        worktreePath: s.worktreePath || null,
+        invalid: invalidSessions.get(s.id) || null,
         active: s.kind === 'terminal' ? !!active : !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)),
         clients: s.kind === 'terminal' ? (active?.clients.size || 0) : (activeChat?.clients.size || 0),
       };
@@ -990,6 +1269,19 @@ app.post('/api/directories/:id/sessions', (req, res) => {
     if (tries > 10) return res.status(500).json({ error: 'could not allocate unique session id' });
   } while (persistedSessions.has(id));
 
+  // Every session is isolated — make sure the directory is a git repo, then give the
+  // session its own worktree + branch.
+  const ready = ensureDirGitReady(d);
+  if (!ready.ok) {
+    return res.status(400).json({ error: `目录无法用于隔离会话（git 未就绪: ${ready.reason}）` });
+  }
+  let worktreePath, branch;
+  try {
+    ({ worktreePath, branch } = gitWorktreeAdd(d.path, id, d.baseBranch));
+  } catch (e) {
+    return res.status(500).json({ error: 'worktree 创建失败: ' + e.message });
+  }
+
   const session = {
     id,
     dirId: d.id,
@@ -997,6 +1289,8 @@ app.post('/api/directories/:id/sessions', (req, res) => {
     cliSessionId: null,   // claude gets one allocated on spawn; codex captures from first event
     label,
     createdAt: new Date().toISOString(),
+    worktreePath,
+    branch,
   };
   persistedSessions.set(id, session);
   savePersistedSessions();
@@ -1042,7 +1336,14 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (chat.pendingClassifyTimer) clearTimeout(chat.pendingClassifyTimer);
     chatSessions.delete(id);
   }
+  // Remove the session's git worktree + branch.
+  const persisted = persistedSessions.get(id);
+  if (persisted && persisted.worktreePath && persisted.branch) {
+    const dir = directories.get(persisted.dirId);
+    if (dir) gitWorktreeRemove(dir.path, persisted.worktreePath, persisted.branch);
+  }
   persistedSessions.delete(id);
+  invalidSessions.delete(id);
   savePersistedSessions();
   res.json({ ok: true });
 });
@@ -1059,6 +1360,14 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
   if (!persisted) return res.status(404).json({ error: 'session not found' });
   if (!fs.existsSync(targetDir.path)) return res.status(400).json({ error: `directory path missing on disk: ${targetDir.path}` });
 
+  // The session's worktree belongs to the OLD directory's repo — relocate means
+  // a fresh worktree in the target directory.
+  const oldDir = directories.get(persisted.dirId);
+  const readyTarget = ensureDirGitReady(targetDir);
+  if (!readyTarget.ok) {
+    return res.status(400).json({ error: `目标目录 git 未就绪: ${readyTarget.reason}` });
+  }
+
   const oldSession = sessions.get(id);
   if (oldSession) {
     for (const client of oldSession.clients) {
@@ -1070,9 +1379,21 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
     tmuxKillSession(oldSession.id);
   }
 
+  if (oldDir && persisted.worktreePath && persisted.branch) {
+    gitWorktreeRemove(oldDir.path, persisted.worktreePath, persisted.branch);
+  }
+  try {
+    const { worktreePath, branch } = gitWorktreeAdd(targetDir.path, id, targetDir.baseBranch);
+    persisted.worktreePath = worktreePath;
+    persisted.branch = branch;
+  } catch (e) {
+    return res.status(500).json({ error: 'worktree 创建失败: ' + e.message });
+  }
+
   persisted.dirId = targetDirId;
   // Clear cliSessionId so the new instance starts fresh in the new directory
   persisted.cliSessionId = null;
+  invalidSessions.delete(id);
   savePersistedSessions();
 
   if (persisted.kind === 'terminal') {
@@ -1109,9 +1430,23 @@ app.post('/api/sessions/:id/restart', (req, res) => {
   tmuxKillSession(id);
 
   // Clear cliSessionId so a brand-new conversation starts (claude allocates a fresh UUID,
-  // codex generates a fresh thread on first turn).
+  // codex generates a fresh thread on first turn). The worktree is kept across restarts;
+  // only recreate it if it has gone missing.
   if (persisted) {
     persisted.cliSessionId = null;
+    const dir = directories.get(persisted.dirId);
+    if (dir && (!persisted.worktreePath || !fs.existsSync(persisted.worktreePath))) {
+      const ready = ensureDirGitReady(dir);
+      if (ready.ok) {
+        try {
+          const { worktreePath, branch } = gitWorktreeAdd(dir.path, id, dir.baseBranch);
+          persisted.worktreePath = worktreePath;
+          persisted.branch = branch;
+        } catch (e) {
+          console.warn(`[multicc] restart: worktree recreate failed for ${id}: ${e.message}`);
+        }
+      }
+    }
     savePersistedSessions();
   }
 
@@ -1128,6 +1463,27 @@ app.post('/api/sessions/:id/restart', (req, res) => {
     console.error('[multicc] Restart failed:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Merge a session's worktree branch back into the directory's base branch ──
+app.post('/api/sessions/:id/merge', (req, res) => {
+  const id = req.params.id;
+  const persisted = persistedSessions.get(id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  if (!persisted.worktreePath || !persisted.branch) {
+    return res.status(400).json({ error: '该会话没有 worktree，无需合并' });
+  }
+  const dir = directories.get(persisted.dirId);
+  if (!dir) return res.status(404).json({ error: 'directory not found' });
+
+  const result = gitMergeBack(dir, persisted);
+  if (!result.ok) {
+    // conflict → 409 with file list; other failures → 400
+    return res.status(result.conflicts ? 409 : 400).json(result);
+  }
+  console.log(`[multicc] merge ${persisted.branch} → ${dir.baseBranch}: ` +
+    (result.merged ? `${result.commits} commit(s)` : 'nothing to merge'));
+  res.json(result);
 });
 
 // ── File Browser API ──
@@ -2563,6 +2919,12 @@ function handleChatWs(ws, req, urlObj) {
     ws.close();
     return;
   }
+  if (invalidSessions.has(sessionName)) {
+    ws.send(JSON.stringify({ type: 'error', error:
+      `会话已失效（${invalidSessions.get(sessionName)}），请删除后重建。` }));
+    ws.close();
+    return;
+  }
   const cli = persisted.cli || 'claude';
   const cwd = cwdForSession(persisted);
 
@@ -3160,7 +3522,8 @@ const wsPingInterval = setInterval(() => {
 
 wss.on('close', () => clearInterval(wsPingInterval));
 
-// Recover existing tmux sessions on startup
+// Build worktrees for any session that lacks one, then recover tmux sessions.
+initWorktrees();
 recoverTmuxSessions();
 
 // Initialize AuxQueue (loads history, registers __aux__ session)

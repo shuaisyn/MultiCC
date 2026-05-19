@@ -78,6 +78,7 @@ let currentTextContent = '';
 let currentToolCards = new Map();
 let activeContentType = null;
 let activeContentIndex = -1;
+let currentCli = 'claude';
 
 /* ── Debug panel ──
    Records every WS event and every thinking/streaming state transition so the
@@ -239,6 +240,7 @@ function handleEvent(msg) {
         if (msg.cwd) updateCwdDisplay(msg.cwd);
         // Update CLI badge in the header (Claude orange / Codex green)
         if (msg.cli) {
+          currentCli = msg.cli;
           const badge = document.querySelector('.badge');
           if (badge) {
             badge.textContent = msg.cli === 'codex' ? 'Codex · Chat' : 'Claude · Chat';
@@ -413,6 +415,13 @@ function handleToolResult(msg) {
   scrollToBottom();
 }
 
+function findCurrentToolCardById(id) {
+  for (const [, tc] of currentToolCards) {
+    if (tc.id === id) return tc;
+  }
+  return null;
+}
+
 function finalizeAssistantMsg(message) {
   if (!message?.content) return;
   // Real assistant content arrived — the thinking bubble must go away now.
@@ -420,10 +429,33 @@ function finalizeAssistantMsg(message) {
   // bubble for Claude), so without this the bubble lingers until `result`.
   hideThinking();
   for (const block of message.content) {
-    if (block.type === 'text' && block.text && !currentTextContent) {
-      currentTextContent = block.text;
+    if (block.type === 'text' && block.text) {
       if (!currentMsgEl) currentMsgEl = createAssistantBubble();
+      if (currentCli === 'codex') {
+        currentTextContent += block.text;
+      } else if (!currentTextContent) {
+        currentTextContent = block.text;
+      }
       renderCurrentText();
+      scrollToBottom();
+    } else if (currentCli === 'codex' && block.type === 'tool_use' && block.id) {
+      if (!currentMsgEl) currentMsgEl = createAssistantBubble();
+      let tc = findCurrentToolCardById(block.id);
+      if (!tc) {
+        const card = createToolCard(block.name || 'Tool', block.id);
+        tc = {
+          card,
+          inputJson: block.input ? JSON.stringify(block.input) : '',
+          name: block.name || 'Tool',
+          id: block.id,
+        };
+        currentToolCards.set(`id:${block.id}`, tc);
+        currentMsgEl.querySelector('.msg-content').appendChild(card);
+      } else if (block.input) {
+        tc.inputJson = JSON.stringify(block.input);
+      }
+      updateToolInput(tc);
+      scrollToBottom();
     }
   }
 }
@@ -806,6 +838,29 @@ sendBtn.addEventListener('touchend', (e) => { e.preventDefault(); send(); });
 // Cancel button
 cancelBtn.addEventListener('click', cancelStreaming);
 cancelBtn.addEventListener('touchend', (e) => { e.preventDefault(); cancelStreaming(); });
+
+/* ── Merge worktree button ── */
+document.getElementById('merge-btn').addEventListener('click', async () => {
+  if (!_sessionName) { addSystemMsg('无 session id，无法合并 worktree'); return; }
+  if (!confirm('把此会话 worktree 的改动合并回基分支？\n未提交的改动会先自动提交。')) return;
+  addSystemMsg('正在合并 worktree...');
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/merge`), { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      addSystemMsg(data.merged
+        ? `✓ 已合并 ${data.commits} 个提交回基分支${data.committed ? '（含本次自动提交）' : ''}`
+        : `✓ ${data.message || '没有新提交需要合并'}`);
+    } else if (res.status === 409) {
+      addSystemMsg('⚠️ 合并冲突，已 abort，基分支未改动。冲突文件：' + (data.conflicts || []).join(', '));
+      addSystemMsg('请打开一个该目录的终端会话手动解决冲突。');
+    } else {
+      addSystemMsg('合并失败：' + (data.error || `HTTP ${res.status}`));
+    }
+  } catch (e) {
+    addSystemMsg('合并请求失败：' + e.message);
+  }
+});
 
 /* ── Clear context button ── */
 document.getElementById('clear-ctx-btn').addEventListener('click', () => {
