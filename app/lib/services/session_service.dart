@@ -143,6 +143,33 @@ class SessionService {
     return Directory.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
   }
 
+  /// List subdirectories for the directory picker. If [path] is a partial (its
+  /// parent exists but the full path doesn't), the server returns the parent's
+  /// children whose name prefix-matches the trailing segment.
+  Future<List<Map<String, String>>> fetchFsList(String path) async {
+    try {
+      final res = await http
+          .get(
+            Uri.parse(_url('/api/fs/list?path=${Uri.encodeQueryComponent(path)}')),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return [];
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final entries = (data['entries'] as List? ?? []);
+      return entries
+          .map<Map<String, String>>(
+            (e) => {
+              'name': (e['name'] ?? '').toString(),
+              'path': (e['path'] ?? '').toString(),
+            },
+          )
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   Future<void> deleteDirectory(String id, {bool force = true}) async {
     final qs = force ? '?force=1' : '';
     final res = await http

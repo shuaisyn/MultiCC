@@ -1386,6 +1386,52 @@ app.get('/api/sessions', (req, res) => {
 });
 
 // ── Directory REST API ──
+// Browse / autocomplete filesystem directories for the "new directory" picker.
+// No root restriction (local dev tool, localhost + optional ACCESS_TOKEN). Given
+// ?path=, returns that directory's subdirectories; if path is a partial (parent
+// exists but the full path doesn't), returns the parent's subdirectories whose
+// name prefix-matches the trailing segment — shell-style tab completion.
+app.get('/api/fs/list', (req, res) => {
+  try {
+    let raw = (req.query.path || '').toString().trim();
+    if (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')) {
+      raw = path.join(os.homedir(), raw.slice(1));
+    }
+    let baseDir, prefix = '';
+    const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
+    if (!raw) {
+      baseDir = os.homedir();
+    } else if (isDir(raw)) {
+      baseDir = raw;
+    } else {
+      baseDir = path.dirname(raw);
+      prefix = path.basename(raw).toLowerCase();
+      if (!isDir(baseDir)) {
+        return res.json({ base: baseDir, parent: null, entries: [] });
+      }
+    }
+    let dirents;
+    try { dirents = fs.readdirSync(baseDir, { withFileTypes: true }); }
+    catch (e) { return res.status(400).json({ error: `无法读取目录：${e.message}` }); }
+    const entries = dirents
+      .filter(d => {
+        let dir = d.isDirectory();
+        if (!dir && d.isSymbolicLink()) dir = isDir(path.join(baseDir, d.name));
+        if (!dir) return false;
+        if (d.name.startsWith('.') && !prefix.startsWith('.')) return false;
+        if (prefix && !d.name.toLowerCase().startsWith(prefix)) return false;
+        return true;
+      })
+      .map(d => ({ name: d.name, path: path.join(baseDir, d.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 200);
+    const root = path.parse(baseDir).root;
+    res.json({ base: baseDir, parent: baseDir === root ? null : path.dirname(baseDir), entries });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/directories', (req, res) => {
   // Annotate each directory with counts per (cli, kind)
   const list = [...directories.values()].map(d => {
@@ -3760,13 +3806,19 @@ function runChatTurn(sessionName, text, opts = {}) {
       chatBroadcast(sessionName, { type: 'stream_end' });
 
       // Auto-回流: turn was dispatched on the gateway's behalf → push result back.
-      if (cs.originDispatchId) {
-        const did = cs.originDispatchId;
-        cs.originDispatchId = null;
-        finalizeDispatch(did, sessionName, finalText);
-      } else if (persisted.type === 'gateway') {
-        // Gateway's own turn: detect a dispatch marker → stage pending confirmation.
-        handleGatewayTurnComplete(finalText);
+      // Guarded: this runs inside a child-process 'close' handler, so an uncaught
+      // throw here would crash the whole server (no global handler).
+      try {
+        if (cs.originDispatchId) {
+          const did = cs.originDispatchId;
+          cs.originDispatchId = null;
+          finalizeDispatch(did, sessionName, finalText);
+        } else if (persisted.type === 'gateway') {
+          // Gateway's own turn: detect a dispatch marker → stage pending confirmation.
+          handleGatewayTurnComplete(finalText);
+        }
+      } catch (e) {
+        console.error('[multicc/dispatch] post-turn hook failed:', e.message);
       }
     });
 

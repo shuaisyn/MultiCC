@@ -960,7 +960,8 @@
       <label style="display:block;font-size:11px;color:#8b949e;margin-bottom:4px;">Name</label>
       <input id="newdir-name" type="text" placeholder="My project" autocomplete="off" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:10px;" />
       <label style="display:block;font-size:11px;color:#8b949e;margin-bottom:4px;">Path</label>
-      <input id="newdir-path" type="text" placeholder="/Users/you/code/my-project" autocomplete="off" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:monospace;padding:8px 10px;outline:none;margin-bottom:10px;" />
+      <input id="newdir-path" type="text" placeholder="/Users/you/code/my-project" autocomplete="off" oninput="onNewDirPathInput()" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:monospace;padding:8px 10px;outline:none;margin-bottom:6px;" />
+      <div id="newdir-suggest" style="display:none;max-height:200px;overflow-y:auto;background:#0d1117;border:1px solid #30363d;border-radius:6px;margin-bottom:10px;"></div>
       <div id="newdir-error" style="font-size:12px;color:#f85149;margin-bottom:8px;display:none;"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button class="btn" onclick="closeNewDirectoryModal()">Cancel</button>

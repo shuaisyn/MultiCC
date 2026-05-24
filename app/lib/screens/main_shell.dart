@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
@@ -1713,6 +1715,8 @@ Future<void> _showNewDirectoryDialog(
   final nameCtrl = TextEditingController();
   final pathCtrl = TextEditingController();
   String? error;
+  List<Map<String, String>> suggestions = [];
+  Timer? debounce;
 
   await showDialog<void>(
     context: context,
@@ -1752,7 +1756,63 @@ Future<void> _showNewDirectoryDialog(
                 fontFamily: 'monospace',
               ),
               decoration: _inputDec(hint: '/Users/you/code/my-project'),
+              onChanged: (_) {
+                debounce?.cancel();
+                debounce = Timer(const Duration(milliseconds: 200), () async {
+                  final res = await mgr.service.fetchFsList(pathCtrl.text);
+                  setState(() => suggestions = res);
+                });
+              },
             ),
+            if (suggestions.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.only(top: 6),
+                constraints: const BoxConstraints(maxHeight: 180),
+                decoration: BoxDecoration(
+                  border: Border.all(color: const Color(0xFF30363d)),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  itemCount: suggestions.length,
+                  itemBuilder: (_, i) {
+                    final e = suggestions[i];
+                    return InkWell(
+                      onTap: () {
+                        pathCtrl.text = '${e['path']}/';
+                        if (nameCtrl.text.trim().isEmpty) {
+                          nameCtrl.text = e['name'] ?? '';
+                        }
+                        debounce?.cancel();
+                        debounce = Timer(
+                          const Duration(milliseconds: 200),
+                          () async {
+                            final res = await mgr.service.fetchFsList(
+                              pathCtrl.text,
+                            );
+                            setState(() => suggestions = res);
+                          },
+                        );
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 7,
+                        ),
+                        child: Text(
+                          '📁 ${e['name']}',
+                          style: const TextStyle(
+                            color: Color(0xFFc9d1d9),
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
             if (error != null) ...[
               const SizedBox(height: 10),
               Text(

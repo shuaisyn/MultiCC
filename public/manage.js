@@ -484,7 +484,49 @@ function openNewDirectoryModal() {
   document.getElementById('newdir-name').value = '';
   document.getElementById('newdir-path').value = '';
   document.getElementById('newdir-error').style.display = 'none';
+  const sg = document.getElementById('newdir-suggest');
+  if (sg) { sg.style.display = 'none'; sg.innerHTML = ''; }
+  _newDirEntries = [];
   setTimeout(() => document.getElementById('newdir-name').focus(), 50);
+}
+
+// Filesystem path autocomplete for the "new directory" path field.
+let _newDirSuggestTimer = null;
+let _newDirEntries = [];
+function onNewDirPathInput() {
+  clearTimeout(_newDirSuggestTimer);
+  _newDirSuggestTimer = setTimeout(fetchNewDirSuggestions, 180);
+}
+async function fetchNewDirSuggestions() {
+  const val = document.getElementById('newdir-path').value;
+  const box = document.getElementById('newdir-suggest');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/fs/list?path=' + encodeURIComponent(val) + tokenQS('&'));
+    if (!res.ok) { box.style.display = 'none'; return; }
+    const data = await res.json();
+    renderNewDirSuggestions(data.entries || []);
+  } catch (_) { box.style.display = 'none'; }
+}
+function renderNewDirSuggestions(entries) {
+  _newDirEntries = entries;
+  const box = document.getElementById('newdir-suggest');
+  if (!box) return;
+  if (!entries.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = entries.map((e, i) =>
+    `<div onclick="pickNewDirSuggestion(${i})" onmouseover="this.style.background='#161b22'" onmouseout="this.style.background='transparent'" style="padding:6px 10px;cursor:pointer;font-family:monospace;font-size:12px;color:#c9d1d9;border-bottom:1px solid #21262d;">📁 ${escapeHtml(e.name)}</div>`
+  ).join('');
+  box.style.display = 'block';
+}
+function pickNewDirSuggestion(i) {
+  const e = _newDirEntries[i];
+  if (!e) return;
+  const pathEl = document.getElementById('newdir-path');
+  pathEl.value = e.path + '/';
+  const nameEl = document.getElementById('newdir-name');
+  if (!nameEl.value.trim()) nameEl.value = e.name;
+  pathEl.focus();
+  fetchNewDirSuggestions();   // drill into the chosen directory
 }
 
 function closeNewDirectoryModal() {
