@@ -204,6 +204,11 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     return d;
   }
 
+  Future<void> renameDirectory(String id, String name) async {
+    await _sessionService.updateDirectoryName(id, name);
+    await loadDashboard();
+  }
+
   Future<void> deleteDirectory(String id) async {
     await _sessionService.deleteDirectory(id, force: true);
     // Drop any chat providers whose session lived in this directory

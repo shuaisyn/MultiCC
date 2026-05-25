@@ -392,6 +392,7 @@ function renderDirectoryBlock(dir, dirSessions) {
             <span class="stat-pill codex"><strong>${codexCount}</strong> Codex</span>
           </div>
         </div>
+        <button class="btn dir-rename" title="Rename directory" onclick="renameDirectory('${escapeHtml(id)}')">改名</button>
         <button class="btn btn-danger dir-danger" title="Delete directory" onclick="deleteDirectory('${escapeHtml(id)}')">Del</button>
       </div>
       <div class="dir-actions">
@@ -567,6 +568,28 @@ async function submitNewDirectory() {
   } catch (err) {
     errEl.textContent = err.message;
     errEl.style.display = 'block';
+  }
+}
+
+async function renameDirectory(id) {
+  const dir = _cachedDirectories.find(d => d.id === id);
+  if (!dir) return;
+  const next = prompt('重命名目录', dir.name || '');
+  if (next === null) return;
+  const name = next.trim();
+  if (!name) { showToast('名称不能为空', true); return; }
+  if (name.length > 80) { showToast('名称过长（最多 80 字）', true); return; }
+  try {
+    const res = await fetch(`/api/directories/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) { const err = await res.json(); showToast(`Error: ${err.error || res.status}`, true); return; }
+    showToast(`已重命名为 ${name}`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
   }
 }
 

@@ -699,6 +699,20 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                       ),
                       IconButton(
                         icon: const Icon(
+                          Icons.drive_file_rename_outline_rounded,
+                          size: 19,
+                          color: Color(0xFF8b949e),
+                        ),
+                        tooltip: 'Rename directory',
+                        onPressed: () => _confirmRenameDirectory(context),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(
                           Icons.delete_outline_rounded,
                           size: 19,
                           color: Color(0xFFf85149),
@@ -869,6 +883,62 @@ class _DirectoryCardState extends State<_DirectoryCard> {
       messenger.showSnackBar(
         SnackBar(
           content: Text('Failed: $e'),
+          backgroundColor: const Color(0xFFf85149),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmRenameDirectory(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final ctrl = TextEditingController(text: widget.directory.name);
+    final next = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF161b22),
+        title: const Text(
+          'Rename directory',
+          style: TextStyle(color: Color(0xFFf0f6fc)),
+        ),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          style: const TextStyle(color: Color(0xFFc9d1d9), fontSize: 14),
+          decoration: _inputDec(hint: 'Directory name'),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Color(0xFF8b949e)),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, ctrl.text),
+            child: const Text(
+              'Rename',
+              style: TextStyle(color: Color(0xFF58a6ff)),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (next == null) return;
+    final name = next.trim();
+    if (name.isEmpty) return;
+    try {
+      await widget.mgr.renameDirectory(widget.directory.id, name);
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Directory renamed')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Rename failed: $e'),
           backgroundColor: const Color(0xFFf85149),
         ),
       );

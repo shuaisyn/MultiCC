@@ -170,6 +170,20 @@ class SessionService {
     }
   }
 
+  Future<void> updateDirectoryName(String id, String name) async {
+    final res = await http
+        .patch(
+          Uri.parse(_url('/api/directories/$id')),
+          headers: _headers,
+          body: jsonEncode({'name': name}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   Future<void> deleteDirectory(String id, {bool force = true}) async {
     final qs = force ? '?force=1' : '';
     final res = await http
