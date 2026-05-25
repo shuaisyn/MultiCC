@@ -632,6 +632,12 @@ function ensureDirGitReady(dir) {
   if (gitReadyDirs.has(dir.id)) return { ok: true };
   if (isHomeOrAbove(dir.path)) return { ok: false, reason: 'home-or-above' };
   if (!fs.existsSync(dir.path)) return { ok: false, reason: 'path-missing' };
+  // Reject pathological dirs BEFORE any git command. `git add -A` / `git worktree
+  // add` on a huge working tree (e.g. ~/Downloads, 57GB) freeze the event loop.
+  // Runs unconditionally — even a stray .git left by a prior failed attempt must
+  // not bypass this. Measures working-tree content, excluding .git/worktrees.
+  const fit = dirSuitability(dir.path);
+  if (!fit.ok) return { ok: false, reason: 'unsuitable: ' + fit.reason };
   try {
     if (!gitIsRepo(dir.path)) {
       console.log(`[multicc] git init: ${dir.path}`);
@@ -639,9 +645,6 @@ function ensureDirGitReady(dir) {
     }
     gitEnsureExcluded(dir.path);
     if (!gitHasCommit(dir.path)) {
-      // Only an uncommitted dir triggers the heavy `git add -A`; guard it first.
-      const fit = dirSuitability(dir.path);
-      if (!fit.ok) return { ok: false, reason: 'unsuitable: ' + fit.reason };
       try { gitRun(dir.path, ['add', '-A']); } catch (_) {}
       gitRun(dir.path, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
         'commit', '--allow-empty', '-m', 'multicc: initial commit']);
