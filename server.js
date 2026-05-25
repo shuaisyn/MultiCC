@@ -580,6 +580,53 @@ function findDirByPath(resolvedPath, excludeId) {
   return null;
 }
 
+// Reject directories that are far too large/heavy to be a session workspace.
+// The initial `git add -A` (below) is run synchronously and would otherwise hash
+// the whole tree, freezing the event loop for minutes (e.g. picking ~/Downloads).
+const DIR_MAX_FILES = 50000;                       // > this many files → unsuitable
+const DIR_MAX_BYTES = 2 * 1024 * 1024 * 1024;      // > 2 GB of content → unsuitable
+const DIR_SCAN_TIME_MS = 3000;                     // hard ceiling on the scan itself
+function dirSuitability(dirPath) {
+  let files = 0, bytes = 0, exceeded = null;
+  const deadline = Date.now() + DIR_SCAN_TIME_MS;
+  const walk = (dir) => {
+    if (exceeded) return;
+    let ents;
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (exceeded) return;
+      if (Date.now() > deadline) { exceeded = 'scan-timeout'; return; }
+      if (e.name === '.git' || e.name === WORKTREE_SUBDIR) continue;
+      if (e.isSymbolicLink()) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isFile()) {
+        files++;
+        try { bytes += fs.statSync(full).size; } catch {}
+        if (files > DIR_MAX_FILES) { exceeded = 'too-many-files'; return; }
+        if (bytes > DIR_MAX_BYTES) { exceeded = 'too-large'; return; }
+      }
+    }
+  };
+  walk(dirPath);
+  if (exceeded === 'too-many-files')
+    return { ok: false, reason: `该目录文件过多（超过 ${DIR_MAX_FILES} 个），不适合作为 session 目录，请选择具体的项目目录` };
+  if (exceeded === 'too-large')
+    return { ok: false, reason: `该目录体积过大（超过 ${Math.round(DIR_MAX_BYTES / (1024 ** 3))}GB），不适合作为 session 目录，请选择具体的项目目录` };
+  if (exceeded === 'scan-timeout')
+    return { ok: false, reason: '该目录过大（扫描超时），不适合作为 session 目录，请选择具体的项目目录' };
+  return { ok: true };
+}
+
+// Turn an ensureDirGitReady reason code into a user-facing message.
+function friendlyDirReason(reason) {
+  if (!reason) return '目录初始化失败';
+  if (reason.startsWith('unsuitable: ')) return reason.slice('unsuitable: '.length);
+  if (reason === 'home-or-above') return '不允许选择 $HOME 或更高层目录';
+  if (reason === 'path-missing') return '目录不存在';
+  return '无法将目录初始化为 git 仓库: ' + reason;
+}
+
 // Make sure a directory is a usable git repo; refuses $HOME and missing paths.
 function ensureDirGitReady(dir) {
   if (gitReadyDirs.has(dir.id)) return { ok: true };
@@ -592,6 +639,9 @@ function ensureDirGitReady(dir) {
     }
     gitEnsureExcluded(dir.path);
     if (!gitHasCommit(dir.path)) {
+      // Only an uncommitted dir triggers the heavy `git add -A`; guard it first.
+      const fit = dirSuitability(dir.path);
+      if (!fit.ok) return { ok: false, reason: 'unsuitable: ' + fit.reason };
       try { gitRun(dir.path, ['add', '-A']); } catch (_) {}
       gitRun(dir.path, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
         'commit', '--allow-empty', '-m', 'multicc: initial commit']);
@@ -1449,13 +1499,20 @@ app.get('/api/directories', (req, res) => {
 app.post('/api/directories', (req, res) => {
   const name = (req.body.name || '').trim();
   const rawPath = (req.body.path || '').trim();
+  const wantCreate = req.body.create === true || req.body.create === 'true';
   if (!name || !rawPath) return res.status(400).json({ error: 'name and path required' });
   const resolvedPath = resolveCwd(os.homedir(), rawPath);
-  if (!fs.existsSync(resolvedPath)) {
-    return res.status(400).json({ error: `path does not exist: ${resolvedPath}` });
-  }
   if (isHomeOrAbove(resolvedPath)) {
     return res.status(400).json({ error: '不允许选择 $HOME 或更高层目录' });
+  }
+  if (!fs.existsSync(resolvedPath)) {
+    if (!wantCreate) {
+      return res.status(400).json({ error: `path does not exist: ${resolvedPath}` });
+    }
+    try { fs.mkdirSync(resolvedPath, { recursive: true }); }
+    catch (e) { return res.status(400).json({ error: `无法创建目录: ${e.message}` }); }
+  } else if (!fs.statSync(resolvedPath).isDirectory()) {
+    return res.status(400).json({ error: `路径不是目录: ${resolvedPath}` });
   }
   const dup = findDirByPath(resolvedPath);
   if (dup) {
@@ -1468,7 +1525,7 @@ app.post('/api/directories', (req, res) => {
   const ready = ensureDirGitReady(dir);
   if (!ready.ok) {
     directories.delete(id);
-    return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
+    return res.status(400).json({ error: friendlyDirReason(ready.reason) });
   }
   saveDirectories();
   res.json(dir);
@@ -1571,7 +1628,7 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
   // Every session is isolated — make sure the directory is a git repo, then give the
   // session its own worktree + branch.
   const ready = ensureDirGitReady(dir);
-  if (!ready.ok) return { ok: false, error: `目录无法用于隔离会话（git 未就绪: ${ready.reason}）` };
+  if (!ready.ok) return { ok: false, error: friendlyDirReason(ready.reason) };
   let worktreePath, branch;
   try {
     ({ worktreePath, branch } = gitWorktreeAdd(dir.path, sid, dir.baseBranch));

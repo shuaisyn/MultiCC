@@ -486,6 +486,8 @@ function openNewDirectoryModal() {
   document.getElementById('newdir-error').style.display = 'none';
   const sg = document.getElementById('newdir-suggest');
   if (sg) { sg.style.display = 'none'; sg.innerHTML = ''; }
+  const cc = document.getElementById('newdir-create');
+  if (cc) cc.checked = false;
   _newDirEntries = [];
   setTimeout(() => document.getElementById('newdir-name').focus(), 50);
 }
@@ -537,6 +539,7 @@ function closeNewDirectoryModal() {
 async function submitNewDirectory() {
   const name = document.getElementById('newdir-name').value.trim();
   const dirPath = document.getElementById('newdir-path').value.trim();
+  const create = !!document.getElementById('newdir-create')?.checked;
   const errEl = document.getElementById('newdir-error');
   errEl.style.display = 'none';
   if (!name || !dirPath) {
@@ -548,7 +551,7 @@ async function submitNewDirectory() {
     const res = await fetch('/api/directories' + tokenQS('?'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, path: dirPath }),
+      body: JSON.stringify({ name, path: dirPath, create }),
     });
     if (!res.ok) {
       const err = await res.json();
