@@ -1,8 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../models/message.dart';
 import 'tool_card.dart';
+
+/// Copy a message's text to the clipboard with a brief confirmation.
+void _copyMessage(BuildContext context, String text) {
+  final t = text.trim();
+  if (t.isEmpty) return;
+  Clipboard.setData(ClipboardData(text: t));
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('已复制'),
+      duration: Duration(milliseconds: 1200),
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+}
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
@@ -29,22 +44,25 @@ class _UserBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     return Align(
       alignment: Alignment.centerRight,
-      child: Container(
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: const BoxDecoration(
-          color: Color(0xFF1f6feb),
-          borderRadius: BorderRadius.only(
-            topLeft: Radius.circular(12),
-            topRight: Radius.circular(12),
-            bottomLeft: Radius.circular(12),
-            bottomRight: Radius.circular(4),
+      child: GestureDetector(
+        onLongPress: () => _copyMessage(context, message.content),
+        child: Container(
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: const BoxDecoration(
+            color: Color(0xFF1f6feb),
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(12),
+              topRight: Radius.circular(12),
+              bottomLeft: Radius.circular(12),
+              bottomRight: Radius.circular(4),
+            ),
           ),
-        ),
-        child: Text(
-          message.content,
-          style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.5),
+          child: Text(
+            message.content,
+            style: const TextStyle(color: Colors.white, fontSize: 14, height: 1.5),
+          ),
         ),
       ),
     );
@@ -62,33 +80,36 @@ class _AssistantBubble extends StatelessWidget {
 
     return Align(
       alignment: Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.92),
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF161b22),
-          border: Border.all(color: const Color(0xFF30363d)),
-          borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(12),
-            topRight: Radius.circular(12),
-            bottomRight: Radius.circular(12),
-            bottomLeft: Radius.circular(4),
+      child: GestureDetector(
+        onLongPress: () => _copyMessage(context, message.content),
+        child: Container(
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.92),
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF161b22),
+            border: Border.all(color: const Color(0xFF30363d)),
+            borderRadius: const BorderRadius.only(
+              topLeft: Radius.circular(12),
+              topRight: Radius.circular(12),
+              bottomRight: Radius.circular(12),
+              bottomLeft: Radius.circular(4),
+            ),
           ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (hasText)
-              _MarkdownContent(
-                text: message.content,
-                isStreaming: message.isStreaming,
-              ),
-            if (hasTools)
-              ...message.toolCalls.map((tc) => ToolCardWidget(toolCall: tc)),
-            if (!hasText && !hasTools && message.isStreaming)
-              const _StreamingDot(),
-          ],
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (hasText)
+                _MarkdownContent(
+                  text: message.content,
+                  isStreaming: message.isStreaming,
+                ),
+              if (hasTools)
+                ...message.toolCalls.map((tc) => ToolCardWidget(toolCall: tc)),
+              if (!hasText && !hasTools && message.isStreaming)
+                const _StreamingDot(),
+            ],
+          ),
         ),
       ),
     );
@@ -193,12 +214,15 @@ class _SystemBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Text(
-          message.content,
-          style: const TextStyle(color: Color(0xFF6e7681), fontSize: 12),
-          textAlign: TextAlign.center,
+      child: GestureDetector(
+        onLongPress: () => _copyMessage(context, message.content),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            message.content,
+            style: const TextStyle(color: Color(0xFF6e7681), fontSize: 12),
+            textAlign: TextAlign.center,
+          ),
         ),
       ),
     );
