@@ -340,6 +340,77 @@ function renderDashboard(directories, sessions) {
   }
 }
 
+// ── Popover menu (kebab ⋯ buttons) ──
+let _openPopover = null;
+function _closePopover() {
+  if (_openPopover) { _openPopover.remove(); _openPopover = null; }
+  document.removeEventListener('mousedown', _closePopover, true);
+  document.removeEventListener('keydown', _popoverKeydown, true);
+  window.removeEventListener('resize', _closePopover);
+  window.removeEventListener('scroll', _closePopover, true);
+}
+function _popoverKeydown(e) { if (e.key === 'Escape') _closePopover(); }
+function showPopoverMenu(triggerEl, items) {
+  _closePopover();
+  const menu = document.createElement('div');
+  menu.className = 'popover-menu';
+  menu.addEventListener('mousedown', e => e.stopPropagation());
+  for (const item of items) {
+    if (item.sep) {
+      const s = document.createElement('div'); s.className = 'sep'; menu.appendChild(s); continue;
+    }
+    const btn = document.createElement('button');
+    btn.textContent = item.label;
+    if (item.danger) btn.classList.add('danger');
+    if (item.ready) btn.classList.add('ready');
+    btn.onclick = (e) => { e.stopPropagation(); _closePopover(); item.onclick(); };
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = triggerEl.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let top = rect.bottom + 4;
+  let left = rect.right - menuRect.width;
+  if (left < 4) left = 4;
+  if (top + menuRect.height > window.innerHeight - 4) top = Math.max(4, rect.top - menuRect.height - 4);
+  menu.style.top = top + 'px';
+  menu.style.left = left + 'px';
+  _openPopover = menu;
+  setTimeout(() => {
+    document.addEventListener('mousedown', _closePopover, true);
+    document.addEventListener('keydown', _popoverKeydown, true);
+    window.addEventListener('resize', _closePopover);
+    window.addEventListener('scroll', _closePopover, true);
+  }, 0);
+}
+
+function showDirMenu(ev, dirId) {
+  ev.stopPropagation();
+  showPopoverMenu(ev.currentTarget, [
+    { label: '改名', onclick: () => renameDirectory(dirId) },
+    { sep: true },
+    { label: '删除目录', danger: true, onclick: () => deleteDirectory(dirId) },
+  ]);
+}
+
+function showSessionMenu(ev, sessionId) {
+  ev.stopPropagation();
+  const st = _workspaceStatus.get(sessionId);
+  const s = _cachedSessions.find(x => x.id === sessionId);
+  const ms = st?.mergeState || s?.mergeState || {};
+  const mergeReady = !!ms.mergeReady;
+  const mergeLabel = mergeReady
+    ? `✓ 合并到 ${ms.baseBranch || 'main'}${ms.ahead ? `（${ms.ahead} 个提交）` : ''}`
+    : `合并到 ${ms.baseBranch || 'main'}`;
+  showPopoverMenu(ev.currentTarget, [
+    { label: '改名', onclick: () => renameSession(sessionId) },
+    { label: '留言', onclick: () => openNoteModal(sessionId) },
+    { label: 'Diff', onclick: () => showDiff(sessionId) },
+    { sep: true },
+    { label: mergeLabel, ready: mergeReady, onclick: () => mergeSession(sessionId) },
+  ]);
+}
+
 function renderDirectoryBlock(dir, dirSessions) {
   const openClass = _expandedDirs.has(dir.id) ? ' open' : '';
   const id = dir.id;
@@ -385,18 +456,17 @@ function renderDirectoryBlock(dir, dirSessions) {
         <div class="dir-main">
           <span class="dir-name" onclick="toggleDirectory('${escapeHtml(id)}')">${escapeHtml(dir.name)}</span>
           <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
-          <div class="dir-stats">
-            <span class="stat-pill"><strong>${total}</strong> sessions</span>
-            <span class="stat-pill"><strong>${active}</strong> active</span>
-            <span class="stat-pill claude"><strong>${claudeCount}</strong> Claude</span>
-            <span class="stat-pill codex"><strong>${codexCount}</strong> Codex</span>
+          <div class="dir-meta">
+            <span><strong>${total}</strong> sessions</span>
+            ${active > 0 ? `<span class="sep">·</span><span><strong>${active}</strong> active</span>` : ''}
+            ${claudeCount > 0 ? `<span class="cli-mini claude">${claudeCount} Claude</span>` : ''}
+            ${codexCount > 0 ? `<span class="cli-mini codex">${codexCount} Codex</span>` : ''}
           </div>
         </div>
-        <button class="btn dir-rename" title="Rename directory" onclick="renameDirectory('${escapeHtml(id)}')">改名</button>
-        <button class="btn btn-danger dir-danger" title="Delete directory" onclick="deleteDirectory('${escapeHtml(id)}')">Del</button>
+        <button class="btn-icon" title="项目备忘 (multicc.memo.md)" onclick="event.stopPropagation(); openMemo('${escapeHtml(id)}')">📝</button>
+        <button class="btn-icon" title="更多操作" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>
       </div>
       <div class="dir-actions">
-        <button class="btn" title="项目备忘（multicc.memo.md）" onclick="openMemo('${escapeHtml(id)}')">📝 备忘</button>
         <button class="btn add-claude" title="New Claude terminal" onclick="newSessionInDir('${escapeHtml(id)}','claude','terminal')">+ Claude Term</button>
         <button class="btn add-claude" title="New Claude chat" onclick="newSessionInDir('${escapeHtml(id)}','claude','chat')">+ Claude Chat</button>
         <button class="btn add-codex" title="New Codex terminal" onclick="newSessionInDir('${escapeHtml(id)}','codex','terminal')">+ Codex Term</button>
@@ -449,11 +519,8 @@ function renderSessionRow(s) {
         <span class="sess-label">${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
         <span class="sess-actions">
           ${openBtn}
-          <button class="btn" onclick="event.stopPropagation(); renameSession('${escapeHtml(s.id)}')" title="Rename session">改名</button>
-          <button class="btn" onclick="event.stopPropagation(); openNoteModal('${escapeHtml(s.id)}')" title="给同目录其他 agent 留言">留言</button>
-          <button class="btn" onclick="event.stopPropagation(); showDiff('${escapeHtml(s.id)}')" title="查看 worktree 相对 ${escapeHtml(mergeState.baseBranch || 'base')} 的 diff">Diff</button>
-          <button class="btn${mergeReady ? ' merge-ready' : ''}" id="merge-btn-${escapeHtml(s.id)}" onclick="event.stopPropagation(); mergeSession('${escapeHtml(s.id)}')" title="${escapeHtml(mergeTitle)}">合并</button>
-          <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
+          <button class="btn-icon${mergeReady ? ' merge-ready' : ''}" id="sess-menu-${escapeHtml(s.id)}" title="${escapeHtml(mergeReady ? mergeTitle + '\n（点击展开更多）' : '更多操作（改名/留言/Diff/合并）')}" onclick="event.stopPropagation(); showSessionMenu(event, '${escapeHtml(s.id)}')">⋯</button>
+          <button class="btn-icon danger" title="Delete session" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">×</button>
         </span>
       </div>
     </div>`;
@@ -1104,14 +1171,30 @@ function eventLabel(evt) {
 
 function renderEventTimeline(dirId) {
   const events = (_workspaceEvents.get(dirId) || []).slice(-12).reverse();
-  const rows = events.length
-    ? events.map(e => {
-        const t = new Date(e.ts).toLocaleTimeString();
-        return `<div class="wb-event-row"><span style="color:#6e7681">${t}</span> ${escapeHtml(eventLabel(e))}</div>`;
-      }).join('')
-    : '<div class="wb-event-row" style="color:#6e7681">暂无活动</div>';
-  return `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}"
-    style="margin:8px 14px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:11px;line-height:1.7;max-height:160px;overflow-y:auto;">${rows}</div>`;
+  const wrap = (inner) => `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}"
+    style="margin:8px 14px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:11px;line-height:1.7;max-height:260px;overflow-y:auto;">${inner}</div>`;
+  if (!events.length) {
+    return wrap('<div class="wb-event-row" style="color:#6e7681">暂无活动</div>');
+  }
+  const row = (e) => {
+    const t = new Date(e.ts).toLocaleTimeString();
+    return `<div class="wb-event-row"><span style="color:#6e7681">${t}</span> ${escapeHtml(eventLabel(e))}</div>`;
+  };
+  const head = events.slice(0, 2).map(row).join('');
+  const rest = events.slice(2);
+  if (!rest.length) return wrap(head);
+  const restHtml = `<div class="event-extra">${rest.map(row).join('')}</div>
+    <button class="events-toggle" onclick="event.stopPropagation(); toggleEventsBlock(this, ${rest.length})">查看全部 (${rest.length}) ▾</button>`;
+  return wrap(head + restHtml);
+}
+
+function toggleEventsBlock(btn, restCount) {
+  const wrap = btn.closest('.wb-events');
+  if (!wrap) return;
+  const extra = wrap.querySelector('.event-extra');
+  if (!extra) return;
+  const open = extra.classList.toggle('open');
+  btn.textContent = open ? '收起 ▴' : `查看全部 (${restCount}) ▾`;
 }
 
 function updateEventTimelineDom(dirId) {
@@ -1128,7 +1211,7 @@ function updateSessionNotesDom(sessionId) {
 }
 
 function updateSessionMergeDom(sessionId) {
-  const btn = document.getElementById(`merge-btn-${sessionId}`);
+  const btn = document.getElementById(`sess-menu-${sessionId}`);
   if (!btn) return;
   const st = _workspaceStatus.get(sessionId);
   const ms = st?.mergeState || {};

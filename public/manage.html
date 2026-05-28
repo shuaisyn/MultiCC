@@ -663,7 +663,72 @@
     .diff-hunk { color: #79c0ff; background: #161b22; }
     .diff-head { color: #d2a8ff; }
     .diff-meta { color: #6e7681; }
+    .dir-meta {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-top: 6px; font-size: 11px; color: #8b949e;
+    }
+    body.has-focus .dir-meta { display: none; }
+    .dir-meta strong { color: #f0f6fc; font-weight: 600; }
+    .dir-meta .sep { color: #30363d; }
+    .cli-mini {
+      display: inline-flex; align-items: center; padding: 1px 6px;
+      border-radius: 999px; font-size: 10px; line-height: 1.5;
+      border: 1px solid currentColor;
+    }
+    .cli-mini.claude { color: #f78166; }
+    .cli-mini.codex { color: #a5d6a7; }
+
+    .btn-icon {
+      flex: 0 0 auto; width: 30px; height: 30px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid #30363d; border-radius: 8px;
+      background: #0d1117; color: #8b949e;
+      cursor: pointer; font-size: 14px; padding: 0;
+      transition: color .15s, border-color .15s, background .15s;
+    }
+    .btn-icon:hover { color: #58a6ff; border-color: #58a6ff; background: #1f6feb16; }
+    .btn-icon.merge-ready { color: #3fb950; border-color: #3fb95066; }
+    .btn-icon.merge-ready:hover { color: #56d364; border-color: #3fb950; background: #2ea04318; }
+    .btn-icon.danger { color: #f85149; border-color: #f8514944; }
+    .btn-icon.danger:hover { color: #ff7b72; border-color: #ff7b72; background: #f8514920; }
+
+    /* Override flex layout: 2-col grid so the 4 add buttons line up cleanly. */
+    .dir-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 12px 16px 0; }
+    body.has-focus .dir-actions { padding: 10px 12px 0; grid-template-columns: 1fr 1fr; }
+    .dir-actions .btn { padding: 6px 10px; font-size: 11px; text-align: left; border-left-width: 2px; }
+    .dir-actions .btn.add-claude { color: #f78166; border-color: #30363d; border-left-color: #f78166; }
+    .dir-actions .btn.add-claude:hover { background: #f7816618; border-color: #f78166; border-left-color: #f78166; }
+    .dir-actions .btn.add-codex { color: #a5d6a7; border-color: #30363d; border-left-color: #2ea043; }
+    .dir-actions .btn.add-codex:hover { background: #2ea04318; border-color: #2ea043; border-left-color: #2ea043; }
+
+    .popover-menu {
+      position: fixed; z-index: 10001;
+      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.5);
+      display: flex; flex-direction: column; min-width: 140px; padding: 4px;
+    }
+    .popover-menu button {
+      background: transparent; border: 0; color: #c9d1d9;
+      text-align: left; padding: 7px 10px; font-size: 12px;
+      cursor: pointer; border-radius: 4px;
+    }
+    .popover-menu button:hover { background: #21262d; }
+    .popover-menu button.danger { color: #f85149; }
+    .popover-menu button.danger:hover { background: #f8514920; }
+    .popover-menu button.ready { color: #3fb950; }
+    .popover-menu .sep { height: 1px; background: #21262d; margin: 4px 2px; }
+
+    .events-toggle {
+      background: transparent; border: 0; color: #58a6ff;
+      cursor: pointer; font-size: 11px; padding: 4px 2px; margin-top: 2px;
+    }
+    .events-toggle:hover { text-decoration: underline; }
+    .event-extra { display: none; }
+    .event-extra.open { display: block; }
+
+    .sess-row .sess-actions .btn-icon { width: 26px; height: 26px; font-size: 13px; border-radius: 6px; }
   </style>
+
 
 </head>
 <body>
