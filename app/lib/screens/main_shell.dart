@@ -12,6 +12,7 @@ import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/workspace_service.dart';
 import 'chat_screen.dart';
+import 'memo_screen.dart';
 import 'setup_screen.dart';
 import 'terminal_screen.dart';
 
@@ -695,6 +696,28 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.sticky_note_2_outlined,
+                          size: 19,
+                          color: Color(0xFF8b949e),
+                        ),
+                        tooltip: '项目备忘 (multicc.memo.md)',
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute<void>(
+                            builder: (_) => MemoScreen(
+                              directory: widget.directory,
+                              mgr: widget.mgr,
+                            ),
+                          ),
+                        ),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
                         ),
                       ),
                       IconButton(

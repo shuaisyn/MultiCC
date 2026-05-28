@@ -170,6 +170,45 @@ class SessionService {
     }
   }
 
+  Future<Map<String, dynamic>> fetchMemo(String dirId) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/directories/$dirId/memo')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<void> saveMemo(String dirId, String text) async {
+    final res = await http
+        .put(
+          Uri.parse(_url('/api/directories/$dirId/memo')),
+          headers: _headers,
+          body: jsonEncode({'text': text}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
+  Future<void> sendMemoLine(String dirId, String sessionId, String text) async {
+    final res = await http
+        .post(
+          Uri.parse(_url('/api/directories/$dirId/memo/send')),
+          headers: _headers,
+          body: jsonEncode({'sessionId': sessionId, 'text': text}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   Future<void> updateDirectoryName(String id, String name) async {
     final res = await http
         .patch(
