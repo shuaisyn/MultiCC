@@ -1701,6 +1701,48 @@ app.get('/api/sessions/:id', (req, res) => {
 app.get('/api/sessions/:id/merge-status', (req, res) => {
   const persisted = persistedSessions.get(req.params.id);
   if (!persisted) return res.status(404).json({ error: 'session not found' });
+
+app.get('/api/sessions/:id/diff', (req, res) => {
+  const persisted = persistedSessions.get(req.params.id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  const dir = directories.get(persisted.dirId);
+  if (!dir) return res.status(404).json({ error: 'directory not found' });
+  if (!persisted.worktreePath || !fs.existsSync(persisted.worktreePath)) {
+    return res.status(400).json({ error: 'worktree missing' });
+  }
+  const baseBranch = dir.baseBranch || gitBaseBranch(dir.path);
+  const wt = persisted.worktreePath;
+  const MAX_DIFF = 1024 * 1024;   // 1 MiB cap; keep UI snappy
+  let diff = '', stat = '', truncated = false, error = null;
+  try {
+    diff = execFileSync('git', ['diff', '--no-color', baseBranch], {
+      cwd: wt, encoding: 'utf8', maxBuffer: MAX_DIFF + 16 * 1024,
+    });
+    if (diff.length > MAX_DIFF) { diff = diff.slice(0, MAX_DIFF); truncated = true; }
+  } catch (e) {
+    if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      truncated = true;
+      diff = '(diff exceeds 1MB cap — too large to display in browser)';
+    } else {
+      error = e.stderr ? String(e.stderr).slice(0, 400) : e.message;
+    }
+  }
+  try {
+    stat = execFileSync('git', ['diff', '--stat', '--no-color', baseBranch], {
+      cwd: wt, encoding: 'utf8', maxBuffer: 256 * 1024,
+    });
+  } catch (_) { /* stat is best-effort */ }
+  res.json({
+    baseBranch,
+    branch: persisted.branch,
+    stat,
+    diff,
+    truncated,
+    mergeState: gitWorktreeMergeState(dir, persisted),
+    error,
+  });
+});
+
   const dir = directories.get(persisted.dirId);
   if (!dir) return res.status(404).json({ error: 'directory not found' });
   res.json(gitWorktreeMergeState(dir, persisted));

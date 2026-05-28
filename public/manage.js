@@ -450,6 +450,7 @@ function renderSessionRow(s) {
           ${openBtn}
           <button class="btn" onclick="event.stopPropagation(); renameSession('${escapeHtml(s.id)}')" title="Rename session">改名</button>
           <button class="btn" onclick="event.stopPropagation(); openNoteModal('${escapeHtml(s.id)}')" title="给同目录其他 agent 留言">留言</button>
+          <button class="btn" onclick="event.stopPropagation(); showDiff('${escapeHtml(s.id)}')" title="查看 worktree 相对 ${escapeHtml(mergeState.baseBranch || 'base')} 的 diff">Diff</button>
           <button class="btn${mergeReady ? ' merge-ready' : ''}" id="merge-btn-${escapeHtml(s.id)}" onclick="event.stopPropagation(); mergeSession('${escapeHtml(s.id)}')" title="${escapeHtml(mergeTitle)}">合并</button>
           <button class="btn btn-danger" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">Del</button>
         </span>
@@ -778,6 +779,76 @@ async function deleteSession(id) {
   } catch (err) {
     showToast(`Error: ${err.message}`, true);
   }
+}
+
+async function showDiff(sessionId) {
+  const modal = document.getElementById('diff-modal');
+  const titleEl = document.getElementById('diff-title');
+  const subEl = document.getElementById('diff-subtitle');
+  const statEl = document.getElementById('diff-stat');
+  const contentEl = document.getElementById('diff-content');
+  if (!modal) return;
+  titleEl.textContent = `Diff · ${sessionId}`;
+  subEl.textContent = '加载中…';
+  statEl.textContent = '';
+  contentEl.innerHTML = '';
+  modal.style.display = 'flex';
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/diff${tokenQS('?')}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      subEl.textContent = `错误：${err.error || res.status}`;
+      return;
+    }
+    const data = await res.json();
+    const ms = data.mergeState || {};
+    const parts = [];
+    if (data.branch) parts.push(`${data.branch} → ${data.baseBranch || ''}`);
+    parts.push(`${ms.ahead || 0} 个提交领先`);
+    if (ms.dirty) parts.push('含未提交改动');
+    if (data.truncated) parts.push('已截断到 1MB');
+    subEl.textContent = parts.join(' · ');
+    statEl.textContent = (data.stat || '').trim() || '(无变更)';
+    contentEl.innerHTML = renderDiffLines(data.diff || '');
+    if (data.error) {
+      const errLine = document.createElement('div');
+      errLine.className = 'diff-line diff-del';
+      errLine.textContent = `错误：${data.error}`;
+      contentEl.appendChild(errLine);
+    }
+  } catch (e) {
+    subEl.textContent = `请求失败：${e.message}`;
+  }
+}
+
+function closeDiffModal() {
+  const modal = document.getElementById('diff-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function renderDiffLines(text) {
+  if (!text || !text.trim()) {
+    return '<div class="diff-line diff-meta" style="text-align:center;padding:24px;">（无变更）</div>';
+  }
+  const MAX_LINES = 5000;
+  const lines = text.split('\n');
+  const truncated = lines.length > MAX_LINES;
+  const arr = truncated ? lines.slice(0, MAX_LINES) : lines;
+  const parts = [];
+  for (const raw of arr) {
+    let cls = 'diff-line';
+    if (raw.startsWith('diff --git') || raw.startsWith('index ') || raw.startsWith('+++ ') || raw.startsWith('--- ') || raw.startsWith('new file') || raw.startsWith('deleted file') || raw.startsWith('rename ') || raw.startsWith('similarity ')) {
+      cls += ' diff-head';
+    } else if (raw.startsWith('@@')) cls += ' diff-hunk';
+    else if (raw.startsWith('+')) cls += ' diff-add';
+    else if (raw.startsWith('-')) cls += ' diff-del';
+    const safe = escapeHtml(raw);
+    parts.push(`<span class="${cls}">${safe || '&nbsp;'}</span>`);
+  }
+  if (truncated) {
+    parts.push(`<span class="diff-line diff-meta">… 行数过多已截断（${lines.length - MAX_LINES} 行省略）</span>`);
+  }
+  return parts.join('');
 }
 
 async function mergeSession(id) {
