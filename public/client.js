@@ -1,3 +1,13 @@
+// Open the project's memo (multicc.memo.md) in a new tab/window.
+function openMemo() {
+  const u = new URLSearchParams(location.search);
+  const sid = (typeof currentSessionId !== 'undefined' && currentSessionId) || u.get('id') || u.get('session');
+  if (!sid) return;
+  const token = u.get('token');
+  const tokenParam = token ? '&token=' + encodeURIComponent(token) : '';
+  window.open('/memo.html?sessionId=' + encodeURIComponent(sid) + tokenParam, '_blank');
+}
+
 'use strict';
 
 /* ── Terminal setup ── */

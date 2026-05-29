@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:xterm/xterm.dart';
 
 import '../models/message.dart';
+import '../providers/session_manager.dart';
 import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/terminal_service.dart';
+import 'memo_screen.dart';
 
 class TerminalScreen extends StatefulWidget {
   final SettingsService settings;
@@ -218,6 +221,16 @@ class _TerminalAppBar extends StatelessWidget {
             ),
           ),
           Tooltip(
+            message: '项目备忘 (multicc.memo.md)',
+            child: GestureDetector(
+              onTap: () => _openMemoFromTerminal(context, session.id),
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: Icon(Icons.sticky_note_2_outlined, color: Color(0xFFc9d1d9), size: 20),
+              ),
+            ),
+          ),
+          Tooltip(
             message: '合并 worktree',
             child: GestureDetector(
               onTap: onMerge,
@@ -236,6 +249,37 @@ class _TerminalAppBar extends StatelessWidget {
       ),
     );
   }
+}
+
+// Open the directory-memo screen for the terminal session's directory.
+void _openMemoFromTerminal(BuildContext context, String sessionId) {
+  final mgr = Provider.of<SessionManager>(context, listen: false);
+  Session? s;
+  for (final x in mgr.sessions) {
+    if (x.id == sessionId) { s = x; break; }
+  }
+  if (s == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Session 信息未加载')),
+    );
+    return;
+  }
+  Directory? d;
+  for (final x in mgr.directories) {
+    if (x.id == s.dirId) { d = x; break; }
+  }
+  if (d == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('找不到对应目录')),
+    );
+    return;
+  }
+  Navigator.push(
+    context,
+    MaterialPageRoute<void>(
+      builder: (_) => MemoScreen(directory: d!, mgr: mgr),
+    ),
+  );
 }
 
 Widget _cliBadge(SessionCli cli) {

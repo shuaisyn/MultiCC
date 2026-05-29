@@ -75,6 +75,16 @@ const mergeHintBtn = document.getElementById('merge-hint-btn');
 /* ── State ── */
 let ws = null;
 let sessionId = null;
+
+// Open the project's memo (multicc.memo.md) in a new tab/window.
+function openMemo() {
+  const u = new URLSearchParams(location.search);
+  const sid = (typeof _sessionName !== 'undefined' && _sessionName) || u.get('id') || u.get('session');
+  if (!sid) return;
+  const token = u.get('token');
+  const tokenParam = token ? '&token=' + encodeURIComponent(token) : '';
+  window.open('/memo.html?sessionId=' + encodeURIComponent(sid) + tokenParam, '_blank');
+}
 let isStreaming = false;
 let _pendingCancel = false; // cancel requested while WS was disconnected
 
