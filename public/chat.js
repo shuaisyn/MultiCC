@@ -1477,6 +1477,35 @@ window.addEventListener('pageshow', (e) => {
   else ensureWsAlive();
 });
 window.addEventListener('focus', ensureWsAlive);
+// Network restored (mobile data/wifi flap) — reconnect immediately.
+window.addEventListener('online', () => forceReconnect('network online'));
+
+// Fallback heartbeat: some Android WebViews never fire visibilitychange/focus when
+// the whole app backgrounds, so the resume hooks above don't run and a dead socket
+// is never noticed. A plain interval resumes ticking when the app comes back and
+// catches a closed socket within a few seconds — no reliance on visibility events.
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    ensureWsAlive();
+  }
+}, 5000);
+
+/* ── Manual reconnect control (header ↻) ── */
+(function initReconnectBtn() {
+  const btn = document.getElementById('reconnect-btn');
+  if (!btn) return;
+  // Tap → force reconnect; long-press (600ms) → hard page reload as a last resort.
+  let lpTimer = null, longFired = false;
+  const startLP = () => { longFired = false; lpTimer = setTimeout(() => { longFired = true; location.reload(); }, 600); };
+  const cancelLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  btn.addEventListener('click', () => { if (!longFired) forceReconnect('manual button'); });
+  btn.addEventListener('mousedown', startLP);
+  btn.addEventListener('touchstart', startLP, { passive: true });
+  ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(ev => btn.addEventListener(ev, cancelLP));
+})();
+// The status pill is always a reconnect affordance too (not only after a drop).
+if (statusEl) statusEl.onclick = () => forceReconnect('status click');
 
 /* ── Debug panel wiring ── */
 (function initDebugPanel() {

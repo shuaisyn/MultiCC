@@ -780,7 +780,7 @@ async function memoConfirmSend(sessionId) {
 async function renameDirectory(id) {
   const dir = _cachedDirectories.find(d => d.id === id);
   if (!dir) return;
-  const next = prompt('重命名目录', dir.name || '');
+  const next = await showPrompt('重命名目录', dir.name || '');
   if (next === null) return;
   const name = next.trim();
   if (!name) { showToast('名称不能为空', true); return; }
@@ -806,7 +806,7 @@ async function deleteDirectory(id) {
   const msg = hasSessions
     ? `Delete "${dir.name}" and ALL its sessions? This cannot be undone.`
     : `Delete empty directory "${dir.name}"?`;
-  if (!confirm(msg)) return;
+  if (!(await showConfirm(msg, { danger: true, okText: '删除' }))) return;
   try {
     const qs = tokenQS('?');
     const url = `/api/directories/${id}${qs}${qs ? '&' : '?'}force=1`;
@@ -850,7 +850,7 @@ async function newSessionInDir(dirId, cli, kind) {
 async function renameSession(id) {
   const sess = _cachedSessions.find(s => s.id === id);
   if (!sess) return;
-  const next = prompt('Rename session', sess.label || sess.id);
+  const next = await showPrompt('Rename session', sess.label || sess.id);
   if (next === null) return;
   const label = next.trim();
   if (label.length > 80) {
@@ -967,7 +967,7 @@ function openSessionChat(id, _cwd) {
 }
 
 async function deleteSession(id) {
-  if (!confirm(`Delete session ${id}?\nThe PTY process will be terminated.`)) return;
+  if (!(await showConfirm(`Delete session ${id}?\nThe PTY process will be terminated.`, { danger: true, okText: '删除' }))) return;
   try {
     const res = await fetch(`/api/sessions/${id}` + tokenQS('?'), { method: 'DELETE' });
     if (!res.ok) {
@@ -1057,7 +1057,7 @@ function renderDiffLines(text) {
 }
 
 async function mergeSession(id) {
-  if (!confirm(`把会话 ${id} 的 worktree 合并回基分支？\n未提交的改动会先自动提交。`)) return;
+  if (!(await showConfirm(`把会话 ${id} 的 worktree 合并回基分支？\n未提交的改动会先自动提交。`, { okText: '合并' }))) return;
   try {
     const res = await fetch(`/api/sessions/${id}/merge` + tokenQS('?'), { method: 'POST' });
     const data = await res.json();
@@ -1281,6 +1281,61 @@ function showToast(msg, isError = false) {
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2500);
 }
+
+// In-DOM replacements for native prompt()/confirm(): many Android WebViews suppress
+// the native JS dialogs (returning null/false), which silently broke rename/delete.
+// These work everywhere. Both return a Promise.
+function _dialog({ message, value, danger, okText, cancelText, withInput }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;white-space:pre-wrap;margin-bottom:12px;';
+    msg.textContent = message;
+    box.appendChild(msg);
+
+    let input = null;
+    if (withInput) {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.value = value || '';
+      input.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
+      box.appendChild(input);
+    }
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.className = 'btn'; cancel.textContent = cancelText || '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-green'); ok.textContent = okText || '确定';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const accept = () => close(withInput ? input.value : true);
+    const reject = () => close(withInput ? null : false);
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); reject(); }
+      else if (e.key === 'Enter' && (withInput || document.activeElement === ok)) { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept;
+    cancel.onclick = reject;
+    overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => { if (input) { input.focus(); input.select(); } else ok.focus(); }, 0);
+  });
+}
+function showConfirm(message, opts = {}) { return _dialog({ message, danger: opts.danger, okText: opts.okText, cancelText: opts.cancelText, withInput: false }); }
+function showPrompt(message, value = '', opts = {}) { return _dialog({ message, value, okText: opts.okText, cancelText: opts.cancelText, withInput: true }); }
 
 /* ── Keyboard shortcut: Esc to close focus panel or modal ── */
 document.addEventListener('keydown', (e) => {
@@ -1803,7 +1858,7 @@ function wechatGatewayOpen() {
 }
 
 async function wechatGatewayReset() {
-  if (!confirm('清空 Gateway 对话历史？')) return;
+  if (!(await showConfirm('清空 Gateway 对话历史？', { danger: true, okText: '清空' }))) return;
   try {
     const res = await fetch('/api/wechat/gateway/reset' + tokenQS('?'), { method: 'POST' });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
@@ -1812,7 +1867,7 @@ async function wechatGatewayReset() {
 }
 
 async function wechatGatewayDestroy() {
-  if (!confirm('销毁 Gateway 会话？历史会保留在 chat_history。')) return;
+  if (!(await showConfirm('销毁 Gateway 会话？历史会保留在 chat_history。', { danger: true, okText: '销毁' }))) return;
   try {
     const res = await fetch('/api/wechat/gateway' + tokenQS('?'), { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
@@ -2075,7 +2130,7 @@ async function loadUploadStats() {
 
 async function cleanupUploads() {
   const stStatus = document.getElementById('st-status');
-  if (!confirm('Delete all temporary uploaded files?')) return;
+  if (!(await showConfirm('Delete all temporary uploaded files?', { danger: true, okText: '删除' }))) return;
   try {
     stStatus.textContent = 'Cleaning...';
     const res = await fetch('/api/uploads/cleanup' + tokenQS('?'), { method: 'DELETE' });
