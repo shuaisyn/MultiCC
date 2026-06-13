@@ -390,8 +390,10 @@ function showPopoverMenu(triggerEl, items) {
 
 function showDirMenu(ev, dirId) {
   ev.stopPropagation();
+  const dir = (_cachedDirectories || []).find(d => d.id === dirId);
   showPopoverMenu(ev.currentTarget, [
     { label: '改名', onclick: () => renameDirectory(dirId) },
+    { label: `默认角色提示词${dir?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeDirectoryRole(dirId) },
     { sep: true },
     { label: '删除目录', danger: true, onclick: () => deleteDirectory(dirId) },
   ]);
@@ -414,6 +416,7 @@ function showSessionMenu(ev, sessionId) {
   if ((s?.cli || 'claude') === 'claude') {
     items.push({ label: `切换模型（${modelShortName(s?.model || '')}）`, onclick: () => changeSessionModel(sessionId) });
   }
+  items.push({ label: `角色提示词${s?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeSessionRole(sessionId) });
   items.push({ sep: true });
   items.push({ label: mergeLabel, ready: mergeReady, onclick: () => mergeSession(sessionId) });
   showPopoverMenu(ev.currentTarget, items);
@@ -966,6 +969,111 @@ async function changeSessionModel(id) {
     }
     const hint = sess.kind === 'terminal' ? '（重启会话后生效）' : '（下一轮对话生效）';
     showToast(`模型已切换为 ${modelShortName(picked)} ${hint}`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+// WebView-safe multi-line role-prompt editor. Resolves to the entered text
+// (empty string = clear), or null when cancelled.
+function showRoleEditor({ title, current = '', placeholder = '' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:560px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:10px;';
+    msg.textContent = title;
+    box.appendChild(msg);
+
+    const ta = document.createElement('textarea');
+    ta.value = current || '';
+    ta.placeholder = placeholder;
+    ta.rows = 8;
+    ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;line-height:1.5;padding:10px;outline:none;resize:vertical;margin-bottom:6px;font-family:inherit;';
+    box.appendChild(ta);
+
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:#8b949e;margin-bottom:12px;';
+    hint.textContent = '留空＝清除（会话将继承目录默认角色）。Ctrl/⌘+Enter 保存。';
+    box.appendChild(hint);
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.className = 'btn'; cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn btn-green'; ok.textContent = '保存';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const accept = () => {
+      if (ta.value.length > 8000) { showToast('角色提示词过长（上限 8000 字）', true); return; }
+      close(ta.value);
+    };
+    const reject = () => close(null);
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); reject(); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept;
+    cancel.onclick = reject;
+    overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => ta.focus(), 0);
+  });
+}
+
+async function changeSessionRole(id) {
+  const sess = _cachedSessions.find(s => s.id === id);
+  if (!sess) return;
+  const next = await showRoleEditor({
+    title: `会话角色提示词 — ${sess.label || sess.id}`,
+    current: sess.rolePrompt || '',
+    placeholder: '例如：你是开发保姆，被触发时用 multicc-trigger skill 检查 git 改动并提醒提交和测试，不要擅自改代码。',
+  });
+  if (next === null) return; // cancelled
+  try {
+    const res = await fetch(`/api/sessions/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolePrompt: next }),
+    });
+    if (!res.ok) { const err = await res.json(); showToast(`Error: ${err.error}`, true); return; }
+    const hint = (sess.cli || 'claude') === 'codex' ? '（Codex 仅新会话首轮生效）' : '（下一轮对话生效）';
+    showToast(`${next.trim() ? '角色已更新' : '已清除会话角色（继承目录默认）'} ${hint}`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+async function changeDirectoryRole(id) {
+  const dir = (_cachedDirectories || []).find(d => d.id === id);
+  if (!dir) return;
+  const next = await showRoleEditor({
+    title: `目录默认角色 — ${dir.name}`,
+    current: dir.rolePrompt || '',
+    placeholder: '该目录下所有会话的默认角色。单个会话可在「角色提示词」里单独覆盖。',
+  });
+  if (next === null) return;
+  try {
+    const res = await fetch(`/api/directories/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolePrompt: next }),
+    });
+    if (!res.ok) { const err = await res.json(); showToast(`Error: ${err.error}`, true); return; }
+    showToast(`${next.trim() ? '目录默认角色已更新' : '已清除目录默认角色'}（对未单独设角色的会话下一轮生效）`);
     loadDashboard();
   } catch (err) {
     showToast(`Error: ${err.message}`, true);
