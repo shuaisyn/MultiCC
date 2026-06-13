@@ -32,6 +32,10 @@ function shortenPath(p, maxLen) {
   return '...' + p.slice(-(maxLen - 3));
 }
 
+function inlineEncoded(value) {
+  return encodeURIComponent(value).replace(/'/g, '%27');
+}
+
 /* ── Notification monitoring via WebSocket ── */
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*(?:\x07|\x1b\\)|[()][AB012]|.)/g;
 const WAITING_PATTERNS = [
@@ -1968,6 +1972,125 @@ async function loadApkInfo() {
   } catch {}
 }
 
+/* ── Installed skills + Claude history management ── */
+let _agentSkills = [];
+let _claudeHistory = [];
+
+async function loadAgentSkills() {
+  const list = document.getElementById('skills-list');
+  if (!list) return;
+  list.innerHTML = '<div class="resource-empty">Loading…</div>';
+  try {
+    const res = await fetch('/api/agent-resources/skills' + tokenQS('?'));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    _agentSkills = data.skills || [];
+    document.getElementById('skills-summary').textContent =
+      `${data.counts?.claude || 0} Claude · ${data.counts?.codex || 0} Codex`;
+    renderSkills();
+  } catch (err) {
+    list.innerHTML = `<div class="resource-empty">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderSkills() {
+  const list = document.getElementById('skills-list');
+  if (!list) return;
+  const q = (document.getElementById('skills-filter')?.value || '').trim().toLowerCase();
+  const skills = _agentSkills.filter(s =>
+    !q || `${s.provider} ${s.source} ${s.name} ${s.description} ${s.path}`.toLowerCase().includes(q));
+  if (!skills.length) {
+    list.innerHTML = '<div class="resource-empty">No matching skills</div>';
+    return;
+  }
+  list.innerHTML = skills.map(s => `
+    <div class="resource-row">
+      <span class="resource-badge ${escapeHtml(s.provider)}">${escapeHtml(s.provider)}</span>
+      <div class="resource-main">
+        <div class="resource-title">${escapeHtml(s.name || '(unnamed skill)')}</div>
+        ${s.description ? `<div class="resource-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description)}</div>` : ''}
+        <div class="resource-meta" title="${escapeHtml(s.path)}">${escapeHtml(s.source)} · ${escapeHtml(s.path)}</div>
+      </div>
+    </div>`).join('');
+}
+
+async function loadClaudeHistory() {
+  const list = document.getElementById('claude-history-list');
+  if (!list) return;
+  list.innerHTML = '<div class="resource-empty">Loading…</div>';
+  try {
+    const res = await fetch('/api/agent-resources/claude-sessions' + tokenQS('?'));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    _claudeHistory = data.sessions || [];
+    document.getElementById('claude-history-summary').textContent =
+      `${data.count || 0} sessions · ${fmtSize(data.totalSize || 0)} · ${data.protectedCount || 0} protected`;
+    renderClaudeHistory();
+  } catch (err) {
+    list.innerHTML = `<div class="resource-empty">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderClaudeHistory() {
+  const list = document.getElementById('claude-history-list');
+  if (!list) return;
+  const q = (document.getElementById('claude-history-filter')?.value || '').trim().toLowerCase();
+  const sessions = _claudeHistory.filter(s =>
+    !q || `${s.id} ${s.title} ${s.preview} ${s.cwd} ${s.project}`.toLowerCase().includes(q));
+  if (!sessions.length) {
+    list.innerHTML = '<div class="resource-empty">No matching Claude history sessions</div>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => {
+    const updated = new Date(s.updatedAt).toLocaleString();
+    return `
+      <div class="resource-row">
+        ${s.linked ? '<span class="resource-badge protected">protected</span>' : '<span class="resource-badge claude">history</span>'}
+        <div class="resource-main">
+          <div class="resource-title" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</div>
+          <div class="resource-desc" title="${escapeHtml(s.cwd || s.project)}">${escapeHtml(s.cwd || s.project)}</div>
+          <div class="resource-meta">${escapeHtml(s.id)} · ${escapeHtml(updated)} · ${fmtSize(s.size || 0)}</div>
+        </div>
+        <button class="btn btn-danger btn-sm" ${s.linked ? 'disabled title="Linked to MultiCC"' : ''}
+          onclick="deleteClaudeHistorySession(decodeURIComponent('${inlineEncoded(s.project)}'),decodeURIComponent('${inlineEncoded(s.id)}'))">Delete</button>
+      </div>`;
+  }).join('');
+}
+
+async function deleteClaudeHistorySession(project, id) {
+  if (!confirm(`Delete Claude history session ${id}?\nThis cannot be undone.`)) return;
+  const status = document.getElementById('claude-history-status');
+  try {
+    status.textContent = 'Deleting…';
+    const url = `/api/agent-resources/claude-sessions/${encodeURIComponent(project)}/${encodeURIComponent(id)}${tokenQS('?')}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    status.textContent = `Deleted ${id}, freed ${fmtSize(data.freed || 0)}`;
+    await loadClaudeHistory();
+  } catch (err) {
+    status.textContent = `Delete failed: ${err.message}`;
+  }
+}
+
+async function cleanupClaudeHistory() {
+  const days = Number(document.getElementById('claude-history-age').value);
+  if (!confirm(`Delete every unprotected Claude history session older than ${days} days?\nThis cannot be undone.`)) return;
+  const status = document.getElementById('claude-history-status');
+  try {
+    status.textContent = 'Cleaning…';
+    const suffix = tokenQS('?');
+    const url = `/api/agent-resources/claude-sessions${suffix}${suffix ? '&' : '?'}olderThanDays=${days}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    status.textContent = `Deleted ${data.deleted} sessions, freed ${fmtSize(data.freed || 0)}`;
+    await loadClaudeHistory();
+  } catch (err) {
+    status.textContent = `Cleanup failed: ${err.message}`;
+  }
+}
+
 /* ── Temp upload stats & cleanup ── */
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -2174,6 +2297,8 @@ loadVoiceSettings();
 loadPushDiagnostics();
 loadNotifySettings();
 loadApkInfo();
+loadAgentSkills();
+loadClaudeHistory();
 loadUploadStats();
 wechatLoadConfig();
 wechatCheckStatus();

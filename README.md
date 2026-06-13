@@ -315,6 +315,10 @@ user message
 | `DELETE` | `/api/sessions/:id` | Kill and delete a session |
 | `POST` | `/api/sessions/:id/relocate` | Change session's working directory |
 | `POST` | `/api/sessions/:id/restart` | Restart a dead terminal session in place |
+| `GET` | `/api/agent-resources/skills` | List installed Claude and Codex skills |
+| `GET` | `/api/agent-resources/claude-sessions` | List Claude Code history sessions |
+| `DELETE` | `/api/agent-resources/claude-sessions/:project/:id` | Delete one unlinked Claude history session |
+| `DELETE` | `/api/agent-resources/claude-sessions?olderThanDays=N` | Delete unlinked Claude history older than N days |
 
 ### Files
 

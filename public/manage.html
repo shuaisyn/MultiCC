@@ -603,6 +603,31 @@
     .sc-footer .status-text.ok { color: #3fb950; }
     .sc-footer .status-text.err { color: #f85149; }
 
+    .resource-toolbar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 12px; border-bottom: 1px solid #21262d;
+    }
+    .resource-toolbar input, .resource-toolbar select {
+      background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+      border-radius: 6px; padding: 6px 9px; font-size: 12px;
+    }
+    .resource-toolbar input { flex: 1; min-width: 180px; }
+    .resource-list { max-height: 440px; overflow: auto; }
+    .resource-row {
+      display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+      border-bottom: 1px solid #21262d; font-size: 12px;
+    }
+    .resource-row:last-child { border-bottom: 0; }
+    .resource-main { flex: 1; min-width: 0; }
+    .resource-title { color: #f0f6fc; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .resource-meta { color: #6e7681; font-family: monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; }
+    .resource-desc { color: #8b949e; font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .resource-badge { padding: 2px 7px; border-radius: 10px; font-size: 10px; white-space: nowrap; background: #21262d; color: #8b949e; }
+    .resource-badge.claude { color: #f78166; background: #f7816618; }
+    .resource-badge.codex { color: #3fb950; background: #2ea04318; }
+    .resource-badge.protected { color: #58a6ff; background: #58a6ff18; }
+    .resource-empty { color: #6e7681; text-align: center; padding: 24px 12px; font-size: 12px; }
+
     /* ── Toast ── */
     #toast {
       position: fixed;
@@ -977,6 +1002,39 @@
           <div class="sc-header">消息日志 <span id="wx-running-badge" style="font-size:10px;padding:1px 8px;border-radius:10px;margin-left:8px;display:none;background:#23863640;color:#3fb950;">Running</span></div>
           <div id="wx-log" style="max-height:260px;overflow-y:auto;padding:8px 12px;font-size:12px;font-family:monospace;background:#0d1117;display:flex;flex-direction:column;gap:2px;">
             <div style="color:#484f58;text-align:center;padding:20px 0;">桥接未启动</div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Agent resources (collapsible) -->
+      <details class="settings-section" id="agent-resources-section">
+        <summary>Agent Resources</summary>
+
+        <div class="settings-card">
+          <div class="sc-header">Installed Skills <span id="skills-summary" style="color:#8b949e;font-size:11px;font-weight:400;margin-left:8px;">—</span></div>
+          <div class="resource-toolbar">
+            <input id="skills-filter" type="search" placeholder="Filter by name, description, or path" oninput="renderSkills()" />
+            <button class="btn" onclick="loadAgentSkills()">Refresh</button>
+          </div>
+          <div id="skills-list" class="resource-list"><div class="resource-empty">Loading…</div></div>
+        </div>
+
+        <div class="settings-card">
+          <div class="sc-header">Claude History Sessions <span id="claude-history-summary" style="color:#8b949e;font-size:11px;font-weight:400;margin-left:8px;">—</span></div>
+          <div class="resource-toolbar">
+            <input id="claude-history-filter" type="search" placeholder="Filter by title, cwd, or session ID" oninput="renderClaudeHistory()" />
+            <select id="claude-history-age">
+              <option value="7">older than 7 days</option>
+              <option value="30" selected>older than 30 days</option>
+              <option value="90">older than 90 days</option>
+              <option value="180">older than 180 days</option>
+            </select>
+            <button class="btn" onclick="loadClaudeHistory()">Refresh</button>
+            <button class="btn btn-danger" onclick="cleanupClaudeHistory()">Clean Old</button>
+          </div>
+          <div id="claude-history-list" class="resource-list"><div class="resource-empty">Loading…</div></div>
+          <div class="sc-footer">
+            <span class="status-text" id="claude-history-status">Linked MultiCC sessions are protected from deletion.</span>
           </div>
         </div>
       </details>
