@@ -297,10 +297,16 @@ const cliProviders = {
     },
     // Chat-mode spawn args: `-p --output-format stream-json [--resume id | --session-id id] <prompt>`
     buildChatSpawnArgs(session, prompt, opts) {
+      // Image hint is always present; the resolved role prompt (session > dir)
+      // is appended after it so the user's custom role rides every turn (--resume
+      // keeps the system prompt out, so we re-send it each turn on purpose).
+      const sysPrompt = opts.rolePrompt
+        ? `${MULTICC_IMG_HINT}\n\n${opts.rolePrompt}`
+        : MULTICC_IMG_HINT;
       const args = [
         '-p', '--output-format', 'stream-json', '--verbose',
         '--include-partial-messages', '--dangerously-skip-permissions',
-        '--append-system-prompt', MULTICC_IMG_HINT,
+        '--append-system-prompt', sysPrompt,
       ];
       // Per-session model wins; otherwise follow the user's current /model default
       // (passed explicitly because `--resume` would keep the session's original model).
@@ -330,12 +336,19 @@ const cliProviders = {
     // Chat-mode spawn args: `exec --json [--skip-git-repo-check] [--dangerously-bypass-approvals-and-sandbox] [resume <id>] <prompt>`
     buildChatSpawnArgs(session, prompt, opts) {
       const args = [];
+      // Codex `exec` has no system-prompt flag, so the role prompt is prepended
+      // into the prompt text — only on the first turn, since `exec resume` keeps
+      // the earlier context (re-sending every turn would just waste tokens).
+      let p = prompt;
+      if (opts.isFirstTurn && opts.rolePrompt) {
+        p = `[角色设定]\n${opts.rolePrompt}\n[角色设定结束]\n\n${prompt}`;
+      }
       if (opts.isFirstTurn) {
         args.push('exec', '--json', '--skip-git-repo-check',
-          '--dangerously-bypass-approvals-and-sandbox', prompt);
+          '--dangerously-bypass-approvals-and-sandbox', p);
       } else {
         args.push('exec', 'resume', session.cliSessionId, '--json',
-          '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', prompt);
+          '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', p);
       }
       return args;
     },
@@ -1477,6 +1490,7 @@ app.get('/api/sessions', (req, res) => {
         cliSessionId: p.cliSessionId || null,
         label: p.label || null,
         model: p.model || null,
+        rolePrompt: p.rolePrompt || null,
         cwd,
         createdAt: p.createdAt,
         mergeState: p.dirId ? gitWorktreeMergeState(directories.get(p.dirId), p) : null,
@@ -1837,6 +1851,12 @@ app.patch('/api/directories/:id', (req, res) => {
       if (!ready.ok) return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
     }
   }
+  if (req.body.rolePrompt !== undefined) {
+    const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
+    if (rp.length > 8000) return res.status(400).json({ error: 'rolePrompt too long (max 8000)' });
+    // Directory-level default role; sessions without their own role inherit it.
+    d.rolePrompt = rp.trim() || null;
+  }
   saveDirectories();
   res.json(d);
 });
@@ -2037,6 +2057,13 @@ app.patch('/api/sessions/:id', (req, res) => {
     // Chat sessions pick this up on the next turn (fresh spawn per turn);
     // terminal sessions need a session restart to relaunch claude with it.
     appendEvent(s.dirId, 'session_model_changed', `${s.label || s.id} → ${s.model || '默认'}`, s.id);
+  }
+  if (req.body.rolePrompt !== undefined) {
+    const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
+    if (rp.length > 8000) return res.status(400).json({ error: 'rolePrompt too long (max 8000)' });
+    // null clears the session override → it falls back to the directory default.
+    s.rolePrompt = rp.trim() || null;
+    appendEvent(s.dirId, 'session_role_changed', s.rolePrompt ? (s.label || s.id) : `${s.label || s.id}（清除，继承目录）`, s.id);
   }
   savePersistedSessions();
   res.json(s);
@@ -3929,6 +3956,16 @@ ${tail}`,
 // dispatch path can drive a session with no connected client. opts.isFirstTurn
 // forces first-turn spawn semantics; opts.originDispatchId, when set, pushes the
 // final assistant text back to WeChat once the turn completes (auto-回流).
+// Resolve the effective custom role prompt for a session: an explicit
+// session-level role wins; otherwise inherit the owning directory's default.
+// Returns null when neither is set (sessions keep the bare image hint only).
+function resolveRolePrompt(persisted) {
+  if (!persisted) return null;
+  if (persisted.rolePrompt) return persisted.rolePrompt;
+  const dir = persisted.dirId ? directories.get(persisted.dirId) : null;
+  return (dir && dir.rolePrompt) || null;
+}
+
 function runChatTurn(sessionName, text, opts = {}) {
   const { isFirstTurn: forceFirstTurn, originDispatchId } = opts;
   const persisted = persistedSessions.get(sessionName);
@@ -4030,7 +4067,8 @@ function runChatTurn(sessionName, text, opts = {}) {
     promptText = buildGatewayPrompt(promptText);
   }
 
-  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn });
+  const rolePrompt = resolveRolePrompt(persisted);
+  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn, rolePrompt });
   console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
   const spawnChat = (spawnArgs, isRetry) => {
@@ -4260,7 +4298,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         cs.chatTurnCount = 0;
         cs.isStreaming = true;
         cs.streamReplay = [];
-        const fallbackArgs = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn: true });
+        const fallbackArgs = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn: true, rolePrompt });
         chatBroadcast(sessionName, {
           type: 'system', subtype: 'warning',
           message: `${cs.cli} 启动失败（${reason}），已用新会话重试`,
