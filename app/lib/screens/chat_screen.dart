@@ -214,6 +214,16 @@ class _Header extends StatelessWidget {
             ),
           ),
           const Spacer(),
+          // Manual reconnect — always available, even when the status dot reads
+          // green. Rebuilds the WebSocket from scratch to recover a socket that
+          // looks connected but is actually dead (half-open, no onDone/onError),
+          // which otherwise only a full app restart could fix.
+          _HeaderBtn(
+            icon: Icons.sync_rounded,
+            tooltip: '重连（重建连接）',
+            onTap: () => _forceReconnect(context, provider),
+          ),
+          const SizedBox(width: 4),
           // Model switch — claude sessions only (codex has no model concept here).
           if (provider.cli == SessionCli.claude) ...[
             _ModelChip(sessionId: provider.sessionName),
@@ -250,6 +260,19 @@ class _Header extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  void _forceReconnect(BuildContext context, ChatProvider provider) {
+    provider.reconnect();
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text('正在重建连接…'),
+          duration: Duration(seconds: 2),
+          backgroundColor: Color(0xFF21262d),
+        ),
+      );
   }
 
   void _confirmClear(BuildContext context, ChatProvider provider) {
