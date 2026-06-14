@@ -20,6 +20,8 @@ const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { execSync, execFileSync, spawn } = require('child_process');
 const multer = require('multer');
+const chokidar = require('chokidar');
+const cron = require('node-cron');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 const wechatBridge = require('./wechat-ilink');
 const voiceAsr = require('./voice-asr');
@@ -1885,6 +1887,7 @@ app.delete('/api/directories/:id', (req, res) => {
       chatSessions.delete(s.id);
     }
     if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
+    teardownTriggers(s.id);
     purgeNotesForSession(s.id);
     persistedSessions.delete(s.id);
     invalidSessions.delete(s.id);
@@ -2075,6 +2078,63 @@ app.patch('/api/sessions/:id', (req, res) => {
   res.json(s);
 });
 
+// ── Per-session auto-triggers ──
+// Written by the bundled multicc-trigger skill (via localhost) or the manage UI;
+// read by the trigger runtime (file-watch / cron / post-turn).
+app.get('/api/sessions/:id/triggers', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  res.json({ triggers: s.triggers || [] });
+});
+
+app.post('/api/sessions/:id/triggers', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  const v = validateTrigger(req.body || {});
+  if (v.error) return res.status(400).json({ error: v.error });
+  if (!Array.isArray(s.triggers)) s.triggers = [];
+  s.triggers.push(v.trigger);
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  appendEvent(s.dirId, 'trigger_added', triggerLabel(v.trigger), s.id);
+  res.json(v.trigger);
+});
+
+app.put('/api/sessions/:id/triggers/:tid', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const idx = s.triggers.findIndex((t) => t.id === req.params.tid);
+  if (idx < 0) return res.status(404).json({ error: 'trigger not found' });
+  const v = validateTrigger({ ...s.triggers[idx], ...req.body, id: req.params.tid });
+  if (v.error) return res.status(400).json({ error: v.error });
+  v.trigger.lastFiredAt = s.triggers[idx].lastFiredAt; // preserve across edits
+  s.triggers[idx] = v.trigger;
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  res.json(v.trigger);
+});
+
+app.delete('/api/sessions/:id/triggers/:tid', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const before = s.triggers.length;
+  s.triggers = s.triggers.filter((t) => t.id !== req.params.tid);
+  if (s.triggers.length === before) return res.status(404).json({ error: 'trigger not found' });
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  res.json({ ok: true });
+});
+
+// Fire a trigger immediately, bypassing cooldown + enabled (for manual testing).
+app.post('/api/sessions/:id/triggers/:tid/test', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const t = s.triggers.find((x) => x.id === req.params.tid);
+  if (!t) return res.status(404).json({ error: 'trigger not found' });
+  fireTrigger(s.id, { ...t, enabled: true, cooldownMs: 0 }, 'manual-test');
+  res.json({ ok: true });
+});
+
 app.get('/api/sessions/:id', (req, res) => {
   const id = req.params.id;
   const active = sessions.get(id);
@@ -2166,6 +2226,7 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (dir) gitWorktreeRemove(dir.path, persisted.worktreePath, persisted.branch);
   }
   if (persisted) appendEvent(persisted.dirId, 'session_deleted', persisted.label || persisted.id, null);
+  teardownTriggers(id);
   purgeNotesForSession(id);
   persistedSessions.delete(id);
   invalidSessions.delete(id);
@@ -3973,7 +4034,7 @@ function resolveRolePrompt(persisted) {
 }
 
 function runChatTurn(sessionName, text, opts = {}) {
-  const { isFirstTurn: forceFirstTurn, originDispatchId } = opts;
+  const { isFirstTurn: forceFirstTurn, originDispatchId, originTrigger } = opts;
   const persisted = persistedSessions.get(sessionName);
   if (!persisted) {
     console.warn(`[multicc/chat] runChatTurn: no persisted record for ${sessionName}`);
@@ -4039,6 +4100,9 @@ function runChatTurn(sessionName, text, opts = {}) {
   cs.isStreaming = true;
   cs.streamReplay = [];
   cs._resultSaved = false;
+  // Marks this turn as initiated by an auto-trigger, so post-turn triggers
+  // don't recurse on their own output (see firePostTurnTriggers).
+  cs._originTrigger = !!originTrigger;
   cs.originDispatchId = originDispatchId || null;
   setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
 
@@ -4080,7 +4144,14 @@ function runChatTurn(sessionName, text, opts = {}) {
   const spawnChat = (spawnArgs, isRetry) => {
     const proc = spawn(provider.cmd, spawnArgs, {
       cwd: cs.cwd,
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+      env: {
+        ...process.env, TERM: 'dumb', NO_COLOR: '1',
+        // Let the bundled multicc-trigger skill know who it is and where the
+        // localhost API lives, so it can register/manage triggers for us.
+        MULTICC_SESSION_ID: sessionName,
+        MULTICC_DIR_ID: persisted.dirId || '',
+        MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     cs.claudeProc = proc;
@@ -4225,6 +4296,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         }
         setSessionStatus(sessionName, { status: 'idle', currentFile: null });
         scheduleIntentClassify(cs, sessionName);
+        firePostTurnTriggers(sessionName, cs);
       }
       // Drop claude's `system init` — server already sent its own
       if (evt.type === 'system' && evt.subtype === 'init') return;
@@ -4722,7 +4794,221 @@ recoverTmuxSessions();
 // Initialize AuxQueue (loads history, registers __aux__ session)
 auxQueue.init();
 
+// ───────────────────────────────────────────────────────────────────────────
+// Auto-trigger runtime
+//
+// Triggers live on the session record (persisted.triggers). This is the "waking
+// half": it watches files / cron / turn-end and, when a rule matches, starts a
+// fresh chat turn via runChatTurn with originTrigger:true. All the "what to do"
+// logic lives in the bundled multicc-trigger skill, not here — a fired trigger
+// just injects a prompt that points the agent at that skill.
+// ───────────────────────────────────────────────────────────────────────────
+
+const DEFAULT_TRIGGER_PROMPT =
+  '【multicc 自动触发】请使用 multicc-trigger skill 执行检查流程：查看当前 git 改动（git status/diff），' +
+  '提醒我该提交或该补/跑测试的地方；简短汇报即可，不要擅自修改代码或提交。';
+
+const triggerWatchers = new Map();   // sessionId -> chokidar watcher
+const triggerCronTasks = new Map();  // sessionId -> [cron task]
+const _deferredFire = new Map();     // `${sessionId}:${triggerId}` -> timeout
+
+function clampInt(v, min, max, dflt) {
+  const n = parseInt(v, 10);
+  if (Number.isNaN(n)) return dflt;
+  return Math.max(min, Math.min(max, n));
+}
+
+function triggerLabel(t) {
+  if (t.type === 'file-change') return `文件变更 ${(t.paths || []).join(',')}`;
+  if (t.type === 'schedule') return `定时 ${t.cron}`;
+  return '每轮结束';
+}
+
+// Validate + normalize a trigger from API input. Returns {trigger} or {error}.
+function validateTrigger(body) {
+  const type = String(body.type || '');
+  if (!['post-turn', 'file-change', 'schedule'].includes(type)) return { error: 'invalid type' };
+  const t = {
+    id: body.id || crypto.randomUUID(),
+    type,
+    enabled: body.enabled !== false,
+    prompt: body.prompt != null ? String(body.prompt).slice(0, 4000) : '',
+    cooldownMs: clampInt(body.cooldownMs, 0, 86400000, type === 'post-turn' ? 30000 : 0),
+    mode: 'inject',
+    createdAt: body.createdAt || new Date().toISOString(),
+  };
+  if (type === 'file-change') {
+    let paths = body.paths;
+    if (typeof paths === 'string') paths = [paths];
+    if (!Array.isArray(paths) || !paths.length) return { error: 'file-change requires paths[]' };
+    t.paths = paths.map(String).slice(0, 20);
+    t.debounceMs = clampInt(body.debounceMs, 500, 60000, 3000);
+  }
+  if (type === 'schedule') {
+    if (!body.cron || !cron.validate(String(body.cron))) return { error: 'invalid cron expression' };
+    t.cron = String(body.cron);
+  }
+  return { trigger: t };
+}
+
+// Tiny glob matcher (chokidar 5 dropped glob support, so we watch the worktree
+// root and match changed relative paths ourselves). Supports ** * ?.
+const _globCache = new Map();
+function globToRegex(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') { re += '.*'; i++; if (glob[i + 1] === '/') i++; }
+      else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if ('.+^${}()|[]\\'.includes(c)) re += '\\' + c;
+    else re += c;
+  }
+  return new RegExp('^' + re + '$');
+}
+function matchGlob(p, glob) {
+  let r = _globCache.get(glob);
+  if (!r) { r = globToRegex(glob); _globCache.set(glob, r); }
+  return r.test(p);
+}
+function matchAnyGlob(p, globs) {
+  return Array.isArray(globs) && globs.some((g) => matchGlob(p, g));
+}
+
+// Fire a trigger: cooldown + busy checks, then inject the prompt as a new turn.
+function fireTrigger(sessionId, trigger, reason) {
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || !trigger.enabled) return;
+  const now = Date.now();
+  const cd = trigger.cooldownMs || 0;
+  if (cd > 0 && trigger.lastFiredAt && (now - trigger.lastFiredAt) < cd) return;
+  // If the session is mid-turn, defer rather than clobber the running turn.
+  const cs = chatSessions.get(sessionId);
+  if (cs && cs.isStreaming) {
+    const key = sessionId + ':' + trigger.id;
+    if (!_deferredFire.has(key)) {
+      _deferredFire.set(key, setTimeout(() => {
+        _deferredFire.delete(key);
+        fireTrigger(sessionId, trigger, reason);
+      }, 6000));
+    }
+    return;
+  }
+  // Persist lastFiredAt on the live record (test triggers may be ephemeral copies).
+  const live = (persisted.triggers || []).find((x) => x.id === trigger.id);
+  if (live) { live.lastFiredAt = now; savePersistedSessions(); }
+  const prompt = (trigger.prompt && trigger.prompt.trim()) || DEFAULT_TRIGGER_PROMPT;
+  appendEvent(persisted.dirId, 'trigger_fired', `${triggerLabel(trigger)} · ${reason}`, sessionId);
+  chatBroadcast(sessionId, { type: 'system', subtype: 'trigger_fired', trigger: triggerLabel(trigger), reason });
+  runChatTurn(sessionId, prompt, { originTrigger: true });
+}
+
+// Called after every chat turn's `result`. Fires post-turn triggers, but never
+// on a turn that an auto-trigger itself started (cs._originTrigger) — no loop.
+function firePostTurnTriggers(sessionId, cs) {
+  if (cs && cs._originTrigger) return;
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || !Array.isArray(persisted.triggers)) return;
+  for (const t of persisted.triggers) {
+    if (t.enabled && t.type === 'post-turn') fireTrigger(sessionId, t, 'post-turn');
+  }
+}
+
+function buildFileWatchers(sessionId, persisted) {
+  const triggers = (persisted.triggers || []).filter((t) => t.enabled && t.type === 'file-change');
+  if (!triggers.length) return;
+  const root = persisted.worktreePath || cwdForSession(persisted);
+  if (!root || !fs.existsSync(root)) return;
+  let watcher;
+  try {
+    watcher = chokidar.watch(root, {
+      ignoreInitial: true,
+      persistent: true,
+      depth: 20,
+      ignored: (p) => /(^|[\/\\])(\.git|node_modules|\.multicc-worktrees|\.DS_Store)([\/\\]|$)/.test(p),
+    });
+  } catch (e) {
+    console.warn(`[multicc/trigger] watch failed for ${sessionId}: ${e.message}`);
+    return;
+  }
+  const debouncers = new Map();
+  const onChange = (full) => {
+    const rel = path.relative(root, full).split(path.sep).join('/');
+    for (const t of triggers) {
+      if (!matchAnyGlob(rel, t.paths)) continue;
+      const key = t.id;
+      if (debouncers.has(key)) clearTimeout(debouncers.get(key));
+      debouncers.set(key, setTimeout(() => {
+        debouncers.delete(key);
+        fireTrigger(sessionId, t, `file:${rel}`);
+      }, t.debounceMs || 3000));
+    }
+  };
+  watcher.on('add', onChange).on('change', onChange).on('unlink', onChange);
+  watcher.on('error', () => {});
+  triggerWatchers.set(sessionId, watcher);
+}
+
+function buildCronTasks(sessionId, persisted) {
+  const triggers = (persisted.triggers || []).filter((t) => t.enabled && t.type === 'schedule' && t.cron);
+  const tasks = [];
+  for (const t of triggers) {
+    if (!cron.validate(t.cron)) continue;
+    try {
+      tasks.push(cron.schedule(t.cron, () => fireTrigger(sessionId, t, 'schedule')));
+    } catch (e) {
+      console.warn(`[multicc/trigger] cron failed (${t.cron}) for ${sessionId}: ${e.message}`);
+    }
+  }
+  if (tasks.length) triggerCronTasks.set(sessionId, tasks);
+}
+
+function teardownTriggers(sessionId) {
+  const w = triggerWatchers.get(sessionId);
+  if (w) { try { w.close(); } catch (_) {} triggerWatchers.delete(sessionId); }
+  const tasks = triggerCronTasks.get(sessionId);
+  if (tasks) { for (const t of tasks) { try { t.stop(); } catch (_) {} } triggerCronTasks.delete(sessionId); }
+}
+
+// Rebuild watchers + cron for one session (call after its triggers change).
+function reconcileTriggers(sessionId) {
+  teardownTriggers(sessionId);
+  const p = persistedSessions.get(sessionId);
+  if (!p) return;
+  buildFileWatchers(sessionId, p);
+  buildCronTasks(sessionId, p);
+}
+
+function reconcileAllTriggers() {
+  let n = 0;
+  for (const [id, p] of persistedSessions) {
+    if (Array.isArray(p.triggers) && p.triggers.length) { reconcileTriggers(id); n++; }
+  }
+  if (n) console.log(`[multicc/trigger] armed triggers for ${n} session(s)`);
+}
+
+// Copy the bundled multicc-trigger skill into ~/.claude/skills so every claude
+// session multicc spawns can discover it. Re-copies when the version differs.
+function installBundledSkill() {
+  try {
+    const src = path.join(__dirname, 'skills', 'multicc-trigger');
+    if (!fs.existsSync(src)) return;
+    const dest = path.join(os.homedir(), '.claude', 'skills', 'multicc-trigger');
+    const readVer = (dir) => { try { return fs.readFileSync(path.join(dir, '.skill-version'), 'utf8').trim(); } catch (_) { return null; } };
+    if (fs.existsSync(dest) && readVer(dest) === readVer(src)) return;
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(src, dest, { recursive: true });
+    try { fs.chmodSync(path.join(dest, 'bin', 'mtrigger'), 0o755); } catch (_) {}
+    console.log('[multicc/trigger] installed multicc-trigger skill → ~/.claude/skills/');
+  } catch (e) {
+    console.warn(`[multicc/trigger] skill install failed: ${e.message}`);
+  }
+}
+
 // Scheduled tasks (定时任务): inject the session-creation + turn-running machinery.
+// Complements the per-session triggers above — this one fires by creating a
+// fresh chat session in a target directory (directory-level recurring tasks).
 cronTasks.mount(app);
 cronTasks.init({ directories, createSessionRecord, runChatTurn });
 
@@ -4730,4 +5016,6 @@ server.listen(PORT, () => {
   console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);
   console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
   console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
+  installBundledSkill();
+  reconcileAllTriggers();
 });
