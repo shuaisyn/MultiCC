@@ -782,6 +782,21 @@
       <div id="aux-section"></div>
       <div id="directory-list"></div>
 
+      <!-- Scheduled Tasks (定时任务) -->
+      <details class="settings-section" id="cron-section">
+        <summary>定时任务 <span id="cron-count" style="color:#6e7681;font-weight:400;"></span></summary>
+        <div class="settings-card">
+          <div class="sc-header" style="display:flex;align-items:center;gap:8px;">
+            <span style="flex:1;">所有 agent / 你创建的定时任务（到点自动新建会话执行）</span>
+            <button class="btn btn-sm" onclick="loadCronTasks()">刷新</button>
+            <button class="btn btn-green btn-sm" onclick="openCronModal()">+ 新建</button>
+          </div>
+          <div class="sc-body" id="cron-list" style="display:flex;flex-direction:column;gap:8px;">
+            <div style="color:#6e7681;font-size:13px;">加载中…</div>
+          </div>
+        </div>
+      </details>
+
       <!-- Voice Settings (collapsible) -->
       <details class="settings-section">
         <summary>Voice Settings</summary>
@@ -1158,6 +1173,52 @@
         <span class="status-text" id="asr-status"></span>
         <button class="btn" onclick="closeAsrModal()">取消</button>
         <button class="btn btn-green" onclick="saveAsrSettings()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scheduled task create/edit modal -->
+  <div id="cron-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;align-items:center;justify-content:center;" onclick="if(event.target===this)closeCronModal()">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;width:min(96vw,560px);max-height:92vh;overflow-y:auto;display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid #21262d;gap:8px;">
+        <div style="flex:1;color:#f0f6fc;font-size:15px;font-weight:600;" id="cron-modal-title">⏰ 新建定时任务</div>
+        <button class="btn" onclick="closeCronModal()">关闭</button>
+      </div>
+      <div style="padding:16px 18px;">
+        <input type="hidden" id="cron-edit-id" />
+        <div class="setting-row"><label>任务名</label><input id="cron-f-name" type="text" placeholder="例如：每天早报" /></div>
+        <div class="setting-row">
+          <label>目标目录</label>
+          <select id="cron-f-dir" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 10px;outline:none;flex:1;"></select>
+        </div>
+        <div class="setting-row">
+          <label>CLI</label>
+          <select id="cron-f-cli" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 10px;outline:none;">
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+          </select>
+        </div>
+        <div class="setting-row"><label>cron</label><input id="cron-f-cron" type="text" placeholder="分 时 日 月 周，如 0 9 * * *" style="font-family:monospace;" /></div>
+        <div style="padding:0 0 8px 122px;display:flex;flex-wrap:wrap;gap:6px;">
+          <button class="btn btn-sm" onclick="cronPreset('0 9 * * *')">每天9点</button>
+          <button class="btn btn-sm" onclick="cronPreset('0 * * * *')">每小时</button>
+          <button class="btn btn-sm" onclick="cronPreset('*/30 * * * *')">每30分</button>
+          <button class="btn btn-sm" onclick="cronPreset('0 9 * * 1')">每周一9点</button>
+          <button class="btn btn-sm" onclick="cronPreset('0 9 1 * *')">每月1号9点</button>
+          <span id="cron-next-hint" style="font-size:12px;color:#6e7681;align-self:center;"></span>
+        </div>
+        <div class="setting-row" style="align-items:flex-start;">
+          <label style="padding-top:8px;">Prompt</label>
+          <textarea id="cron-f-prompt" placeholder="到点要执行的完整指令" style="flex:1;min-height:90px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;resize:vertical;font-family:inherit;"></textarea>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;user-select:none;margin-top:6px;">
+          <input id="cron-f-enabled" type="checkbox" checked style="margin:0;" /> 启用
+        </label>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;justify-content:flex-end;padding:12px 18px;border-top:1px solid #21262d;">
+        <span class="status-text" id="cron-modal-status"></span>
+        <button class="btn" onclick="closeCronModal()">取消</button>
+        <button class="btn btn-green" onclick="saveCronTask()">保存</button>
       </div>
     </div>
   </div>

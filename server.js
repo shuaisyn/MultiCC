@@ -25,6 +25,7 @@ const cron = require('node-cron');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 const wechatBridge = require('./wechat-ilink');
 const voiceAsr = require('./voice-asr');
+const cronTasks = require('./cron-tasks');
 const webpush = require('web-push');
 
 const crypto = require('crypto');
@@ -284,6 +285,11 @@ const MULTICC_IMG_HINT = [
   '![说明](/绝对/路径/到/图片.png)',
   '前端会自动把本地路径图片内联显示给用户（可点击放大），无需上传或转 base64。',
   '仅在图片文件确实存在时这样写，不要编造路径。',
+  '',
+  '【定时任务】当用户要你「定时/每天/每隔一段时间」自动做某事时，可登记一个 multicc 定时任务（到点会自动新建一个 chat 会话执行你写的 prompt）。在本机用 curl 调用：',
+  `  curl -s http://127.0.0.1:${process.env.PORT || 3000}/api/cron -H 'Content-Type: application/json' \\`,
+  `    -d '{"name":"任务名","dirPath":"<当前工作目录的绝对路径>","cron":"0 9 * * *","prompt":"到点要执行的完整指令"}'`,
+  'cron 为标准 5 段（分 时 日 月 周，本地时区），如 "0 9 * * *" 表示每天 9:00。dirPath 用你当前的工作目录即可。登记后告诉用户可在 /manage 的「定时任务」里查看与管理。仅在用户明确要求定时/周期执行时才登记。',
 ].join('\n');
 
 const cliProviders = {
@@ -4999,6 +5005,12 @@ function installBundledSkill() {
     console.warn(`[multicc/trigger] skill install failed: ${e.message}`);
   }
 }
+
+// Scheduled tasks (定时任务): inject the session-creation + turn-running machinery.
+// Complements the per-session triggers above — this one fires by creating a
+// fresh chat session in a target directory (directory-level recurring tasks).
+cronTasks.mount(app);
+cronTasks.init({ directories, createSessionRecord, runChatTurn });
 
 server.listen(PORT, () => {
   console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);
