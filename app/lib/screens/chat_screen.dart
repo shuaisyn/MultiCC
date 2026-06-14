@@ -188,11 +188,30 @@ class _Header extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          // Connection dot — tap to manually reconnect whenever not connected.
+          // A refresh glyph appears so the affordance is discoverable and gives
+          // a larger touch target than the bare 8px dot.
           GestureDetector(
-            onTap: state == ChatConnectionState.disconnected
-                ? provider.reconnect
-                : null,
-            child: Icon(Icons.circle, size: 8, color: statusColor),
+            behavior: HitTestBehavior.opaque,
+            onTap:
+                state == ChatConnectionState.connected ? null : provider.reconnect,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.circle, size: 8, color: statusColor),
+                  if (state != ChatConnectionState.connected) ...[
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.refresh_rounded,
+                      size: 15,
+                      color: Color(0xFF8b949e),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
           const Spacer(),
           // Model switch — claude sessions only (codex has no model concept here).
