@@ -27,6 +27,7 @@ const wechatBridge = require('./wechat-ilink');
 const voiceAsr = require('./voice-asr');
 const cronTasks = require('./cron-tasks');
 const webpush = require('web-push');
+const macosPower = require('./macos-power');
 
 const crypto = require('crypto');
 const app = express();
@@ -3249,6 +3250,33 @@ app.post('/api/settings/notify', (req, res) => {
   res.json({ ok: true });
 });
 
+// macOS system power settings
+app.get('/api/settings/power', (req, res) => {
+  if (!macosPower.isAvailable()) {
+    return res.json({ available: false, enabled: false });
+  }
+  try {
+    res.json(macosPower.getLidSleepPrevention());
+  } catch (error) {
+    res.status(500).json({ available: true, error: error.message });
+  }
+});
+
+app.post('/api/settings/power', async (req, res) => {
+  if (!macosPower.isAvailable()) {
+    return res.status(400).json({ error: 'This setting is only available on macOS' });
+  }
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled must be a boolean' });
+  }
+  try {
+    const status = await macosPower.setLidSleepPrevention(req.body.enabled);
+    res.json({ ok: true, ...status });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Send push notification to all subscribers (async, properly handles stale cleanup)
 async function sendPushToAll(payload) {
   if (pushSubscriptions.size === 0) return;
@@ -4568,6 +4596,13 @@ function handleChatWs(ws, req, urlObj) {
       // Typing signal: user is composing → cancel pending intent classify
       if (msg.type === 'typing') {
         cancelPendingClassify(cs);
+        return;
+      }
+
+      // App-level heartbeat: lets the client detect a half-open socket (the OS
+      // froze the connection without a close frame) and reconnect.
+      if (msg.type === 'ping') {
+        try { ws.send(JSON.stringify({ type: 'pong' })); } catch (_) {}
         return;
       }
 
