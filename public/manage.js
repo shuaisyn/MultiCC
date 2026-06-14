@@ -390,8 +390,10 @@ function showPopoverMenu(triggerEl, items) {
 
 function showDirMenu(ev, dirId) {
   ev.stopPropagation();
+  const dir = (_cachedDirectories || []).find(d => d.id === dirId);
   showPopoverMenu(ev.currentTarget, [
     { label: '改名', onclick: () => renameDirectory(dirId) },
+    { label: `默认角色提示词${dir?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeDirectoryRole(dirId) },
     { sep: true },
     { label: '删除目录', danger: true, onclick: () => deleteDirectory(dirId) },
   ]);
@@ -406,13 +408,18 @@ function showSessionMenu(ev, sessionId) {
   const mergeLabel = mergeReady
     ? `✓ 合并到 ${ms.baseBranch || 'main'}${ms.ahead ? `（${ms.ahead} 个提交）` : ''}`
     : `合并到 ${ms.baseBranch || 'main'}`;
-  showPopoverMenu(ev.currentTarget, [
+  const items = [
     { label: '改名', onclick: () => renameSession(sessionId) },
     { label: '留言', onclick: () => openNoteModal(sessionId) },
     { label: 'Diff', onclick: () => showDiff(sessionId) },
-    { sep: true },
-    { label: mergeLabel, ready: mergeReady, onclick: () => mergeSession(sessionId) },
-  ]);
+  ];
+  if ((s?.cli || 'claude') === 'claude') {
+    items.push({ label: `切换模型（${modelShortName(s?.model || '')}）`, onclick: () => changeSessionModel(sessionId) });
+  }
+  items.push({ label: `角色提示词${s?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeSessionRole(sessionId) });
+  items.push({ sep: true });
+  items.push({ label: mergeLabel, ready: mergeReady, onclick: () => mergeSession(sessionId) });
+  showPopoverMenu(ev.currentTarget, items);
 }
 
 function renderDirectoryBlock(dir, dirSessions) {
@@ -513,6 +520,7 @@ function renderSessionRow(s) {
       <div class="sess-row-top">
         <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
         <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
+        ${s.model ? `<span class="kind-chip" title="模型：${escapeHtml(s.model)}">${escapeHtml(modelShortName(s.model))}</span>` : ''}
         <span class="sess-status ${statusCls}" id="sess-status-${escapeHtml(s.id)}">${statusText}</span>
         <span class="sess-notes" id="sess-notes-${escapeHtml(s.id)}" style="font-size:10px;color:#d29922;${pendingNotes > 0 ? '' : 'display:none'}">${pendingNotes > 0 ? '📨 ' + pendingNotes : ''}</span>
       </div>
@@ -784,7 +792,7 @@ async function memoConfirmSend(sessionId) {
 async function renameDirectory(id) {
   const dir = _cachedDirectories.find(d => d.id === id);
   if (!dir) return;
-  const next = prompt('重命名目录', dir.name || '');
+  const next = await showPrompt('重命名目录', dir.name || '');
   if (next === null) return;
   const name = next.trim();
   if (!name) { showToast('名称不能为空', true); return; }
@@ -810,7 +818,7 @@ async function deleteDirectory(id) {
   const msg = hasSessions
     ? `Delete "${dir.name}" and ALL its sessions? This cannot be undone.`
     : `Delete empty directory "${dir.name}"?`;
-  if (!confirm(msg)) return;
+  if (!(await showConfirm(msg, { danger: true, okText: '删除' }))) return;
   try {
     const qs = tokenQS('?');
     const url = `/api/directories/${id}${qs}${qs ? '&' : '?'}force=1`;
@@ -828,12 +836,100 @@ async function deleteDirectory(id) {
   }
 }
 
+// Claude model choices for new sessions. value '' = follow the user's /model default.
+const CLAUDE_MODEL_OPTIONS = [
+  { value: '', label: '默认（跟随 Claude 设置）' },
+  { value: 'claude-fable-5', label: 'Fable 5' },
+  { value: 'claude-fable-5[1m]', label: 'Fable 5 (1M context)' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  { value: '__custom__', label: '自定义…' },
+];
+
+function modelShortName(model) {
+  const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
+  return opt ? opt.label : model;
+}
+
+// WebView-safe model picker (same pattern as _dialog). Resolves to '' (default),
+// a model string, or null (cancelled).
+function showModelPicker({ title = '选择该会话使用的模型', okText = '创建', current = '' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:12px;';
+    msg.textContent = title;
+    box.appendChild(msg);
+
+    const isKnown = CLAUDE_MODEL_OPTIONS.some(o => o.value === current);
+    const select = document.createElement('select');
+    select.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
+    for (const o of CLAUDE_MODEL_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.value; opt.textContent = o.label;
+      select.appendChild(opt);
+    }
+    select.value = isKnown ? current : '__custom__';
+    box.appendChild(select);
+
+    const custom = document.createElement('input');
+    custom.type = 'text';
+    custom.placeholder = '模型 ID，如 claude-opus-4-8';
+    custom.value = isKnown ? '' : current;
+    custom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;';
+    box.appendChild(custom);
+    const syncCustom = () => {
+      custom.style.display = select.value === '__custom__' ? '' : 'none';
+    };
+    syncCustom();
+    select.onchange = () => { syncCustom(); if (select.value === '__custom__') custom.focus(); };
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.className = 'btn'; cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn btn-green'; ok.textContent = okText;
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const accept = () => close(select.value === '__custom__' ? custom.value.trim() : select.value);
+    const reject = () => close(null);
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); reject(); }
+      else if (e.key === 'Enter') { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept;
+    cancel.onclick = reject;
+    overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => select.focus(), 0);
+  });
+}
+
 async function newSessionInDir(dirId, cli, kind) {
+  let model = null;
+  if (cli === 'claude') {
+    const picked = await showModelPicker();
+    if (picked === null) return; // cancelled
+    model = picked || null;
+  }
   try {
     const res = await fetch(`/api/directories/${dirId}/sessions${tokenQS('?')}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cli, kind }),
+      body: JSON.stringify({ cli, kind, model }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -851,10 +947,143 @@ async function newSessionInDir(dirId, cli, kind) {
   }
 }
 
+async function changeSessionModel(id) {
+  const sess = _cachedSessions.find(s => s.id === id);
+  if (!sess) return;
+  const picked = await showModelPicker({
+    title: '切换该会话使用的模型',
+    okText: '保存',
+    current: sess.model || '',
+  });
+  if (picked === null) return; // cancelled
+  try {
+    const res = await fetch(`/api/sessions/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: picked }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(`Error: ${err.error}`, true);
+      return;
+    }
+    const hint = sess.kind === 'terminal' ? '（重启会话后生效）' : '（下一轮对话生效）';
+    showToast(`模型已切换为 ${modelShortName(picked)} ${hint}`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+// WebView-safe multi-line role-prompt editor. Resolves to the entered text
+// (empty string = clear), or null when cancelled.
+function showRoleEditor({ title, current = '', placeholder = '' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:560px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:10px;';
+    msg.textContent = title;
+    box.appendChild(msg);
+
+    const ta = document.createElement('textarea');
+    ta.value = current || '';
+    ta.placeholder = placeholder;
+    ta.rows = 8;
+    ta.style.cssText = 'width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;line-height:1.5;padding:10px;outline:none;resize:vertical;margin-bottom:6px;font-family:inherit;';
+    box.appendChild(ta);
+
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:#8b949e;margin-bottom:12px;';
+    hint.textContent = '留空＝清除（会话将继承目录默认角色）。Ctrl/⌘+Enter 保存。';
+    box.appendChild(hint);
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.className = 'btn'; cancel.textContent = '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn btn-green'; ok.textContent = '保存';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const accept = () => {
+      if (ta.value.length > 8000) { showToast('角色提示词过长（上限 8000 字）', true); return; }
+      close(ta.value);
+    };
+    const reject = () => close(null);
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); reject(); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept;
+    cancel.onclick = reject;
+    overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => ta.focus(), 0);
+  });
+}
+
+async function changeSessionRole(id) {
+  const sess = _cachedSessions.find(s => s.id === id);
+  if (!sess) return;
+  const next = await showRoleEditor({
+    title: `会话角色提示词 — ${sess.label || sess.id}`,
+    current: sess.rolePrompt || '',
+    placeholder: '例如：你是开发保姆，被触发时用 multicc-trigger skill 检查 git 改动并提醒提交和测试，不要擅自改代码。',
+  });
+  if (next === null) return; // cancelled
+  try {
+    const res = await fetch(`/api/sessions/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolePrompt: next }),
+    });
+    if (!res.ok) { const err = await res.json(); showToast(`Error: ${err.error}`, true); return; }
+    const hint = (sess.cli || 'claude') === 'codex' ? '（Codex 仅新会话首轮生效）' : '（下一轮对话生效）';
+    showToast(`${next.trim() ? '角色已更新' : '已清除会话角色（继承目录默认）'} ${hint}`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
+async function changeDirectoryRole(id) {
+  const dir = (_cachedDirectories || []).find(d => d.id === id);
+  if (!dir) return;
+  const next = await showRoleEditor({
+    title: `目录默认角色 — ${dir.name}`,
+    current: dir.rolePrompt || '',
+    placeholder: '该目录下所有会话的默认角色。单个会话可在「角色提示词」里单独覆盖。',
+  });
+  if (next === null) return;
+  try {
+    const res = await fetch(`/api/directories/${id}${tokenQS('?')}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rolePrompt: next }),
+    });
+    if (!res.ok) { const err = await res.json(); showToast(`Error: ${err.error}`, true); return; }
+    showToast(`${next.trim() ? '目录默认角色已更新' : '已清除目录默认角色'}（对未单独设角色的会话下一轮生效）`);
+    loadDashboard();
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
 async function renameSession(id) {
   const sess = _cachedSessions.find(s => s.id === id);
   if (!sess) return;
-  const next = prompt('Rename session', sess.label || sess.id);
+  const next = await showPrompt('Rename session', sess.label || sess.id);
   if (next === null) return;
   const label = next.trim();
   if (label.length > 80) {
@@ -971,7 +1200,7 @@ function openSessionChat(id, _cwd) {
 }
 
 async function deleteSession(id) {
-  if (!confirm(`Delete session ${id}?\nThe PTY process will be terminated.`)) return;
+  if (!(await showConfirm(`Delete session ${id}?\nThe PTY process will be terminated.`, { danger: true, okText: '删除' }))) return;
   try {
     const res = await fetch(`/api/sessions/${id}` + tokenQS('?'), { method: 'DELETE' });
     if (!res.ok) {
@@ -1075,7 +1304,7 @@ function renderDiffLines(text) {
 }
 
 async function mergeSession(id) {
-  if (!confirm(`把会话 ${id} 的 worktree 合并回基分支？\n未提交的改动会先自动提交。`)) return;
+  if (!(await showConfirm(`把会话 ${id} 的 worktree 合并回基分支？\n未提交的改动会先自动提交。`, { okText: '合并' }))) return;
   try {
     const res = await fetch(`/api/sessions/${id}/merge` + tokenQS('?'), { method: 'POST' });
     const data = await res.json();
@@ -1180,6 +1409,7 @@ function eventLabel(evt) {
   switch (evt.type) {
     case 'session_created': return `🆕 新建会话 ${who}（${evt.detail || ''}）`;
     case 'session_renamed': return `✏️ 会话改名为 ${evt.detail || who}`;
+    case 'session_model_changed': return `🧠 切换模型 ${evt.detail || who}`;
     case 'session_deleted': return `🗑 删除会话 ${evt.detail || who}`;
     case 'merged':          return `🔀 ${who} 合并：${evt.detail || ''}`;
     case 'note':            return `📨 ${who} 留言 ${evt.detail || ''}`;
@@ -1301,6 +1531,61 @@ function showToast(msg, isError = false) {
   setTimeout(() => toast.classList.remove('show'), 2500);
 }
 
+// In-DOM replacements for native prompt()/confirm(): many Android WebViews suppress
+// the native JS dialogs (returning null/false), which silently broke rename/delete.
+// These work everywhere. Both return a Promise.
+function _dialog({ message, value, danger, okText, cancelText, withInput }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;white-space:pre-wrap;margin-bottom:12px;';
+    msg.textContent = message;
+    box.appendChild(msg);
+
+    let input = null;
+    if (withInput) {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.value = value || '';
+      input.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
+      box.appendChild(input);
+    }
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.className = 'btn'; cancel.textContent = cancelText || '取消';
+    const ok = document.createElement('button');
+    ok.className = 'btn ' + (danger ? 'btn-danger' : 'btn-green'); ok.textContent = okText || '确定';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const accept = () => close(withInput ? input.value : true);
+    const reject = () => close(withInput ? null : false);
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); reject(); }
+      else if (e.key === 'Enter' && (withInput || document.activeElement === ok)) { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept;
+    cancel.onclick = reject;
+    overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => { if (input) { input.focus(); input.select(); } else ok.focus(); }, 0);
+  });
+}
+function showConfirm(message, opts = {}) { return _dialog({ message, danger: opts.danger, okText: opts.okText, cancelText: opts.cancelText, withInput: false }); }
+function showPrompt(message, value = '', opts = {}) { return _dialog({ message, value, okText: opts.okText, cancelText: opts.cancelText, withInput: true }); }
+
 /* ── Keyboard shortcut: Esc to close focus panel or modal ── */
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -1383,6 +1668,244 @@ async function saveVoiceSettings() {
     wsStatus.textContent = `Failed: ${err.message}`;
     wsStatus.className = 'status-text err';
   }
+}
+
+/* ── Streaming ASR Settings (modal) ── */
+function _asrBadge(el, ready) {
+  if (!el) return;
+  el.textContent = ready ? '● 就绪' : '○ 未配置';
+  el.style.color = ready ? '#3fb950' : '#6e7681';
+}
+
+async function loadAsrSettings() {
+  try {
+    const res = await fetch('/api/settings/voice' + tokenQS('?'));
+    const data = await res.json();
+    const a = data.asr || {};
+    const st = a.status || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    const ph = (id, has, hint) => { const el = document.getElementById(id); if (el) { el.value = ''; el.placeholder = has ? '已配置（留空不修改）' : hint; } };
+
+    if (document.getElementById('asr-provider')) document.getElementById('asr-provider').value = a.provider || 'openai';
+    ph('asr-openai-key', a.hasOpenaiKey, 'sk-...');
+    set('asr-openai-url', a.openaiUrl);
+    set('asr-openai-model', a.openaiModel);
+    ph('asr-volc-appid', a.hasVolcAppId, '火山 App ID');
+    ph('asr-volc-token', a.hasVolcToken, '火山 Access Token');
+    set('asr-volc-resource', a.volcResourceId);
+    set('asr-volc-url', a.volcUrl);
+    set('asr-funasr-url', a.funasrUrl);
+    set('asr-funasr-mode', a.funasrMode);
+
+    _asrBadge(document.getElementById('asr-openai-badge'), st.openai && st.openai.ready);
+    _asrBadge(document.getElementById('asr-volc-badge'), st.volcano && st.volcano.ready);
+    _asrBadge(document.getElementById('asr-funasr-badge'), st.funasr && st.funasr.ready);
+
+    // Summary line on the Voice Settings card
+    const sum = document.getElementById('asr-summary');
+    if (sum) {
+      const names = { openai: 'OpenAI Realtime', volcano: '火山引擎', funasr: 'FunASR' };
+      const ready = [];
+      if (st.openai && st.openai.ready) ready.push('OpenAI');
+      if (st.volcano && st.volcano.ready) ready.push('火山');
+      if (st.funasr && st.funasr.ready) ready.push('FunASR');
+      sum.textContent = `默认：${names[a.provider] || a.provider || '—'}` + (ready.length ? ` · 已配置：${ready.join('、')}` : ' · 尚未配置任何提供商');
+      sum.style.color = ready.length ? '#8b949e' : '#d29922';
+    }
+  } catch (_) {}
+}
+
+function openAsrModal() {
+  const m = document.getElementById('asr-modal');
+  if (m) { m.style.display = 'flex'; loadAsrSettings(); }
+}
+function closeAsrModal() {
+  const m = document.getElementById('asr-modal');
+  if (m) m.style.display = 'none';
+}
+
+async function saveAsrSettings() {
+  const status = document.getElementById('asr-status');
+  const val = (id) => (document.getElementById(id)?.value || '').trim();
+  const asr = { provider: val('asr-provider') };       // provider always sent
+  const opt = (k, id) => { const v = val(id); if (v) asr[k] = v; };  // only send non-empty
+  opt('openaiApiKey', 'asr-openai-key');
+  opt('openaiUrl', 'asr-openai-url');
+  opt('openaiModel', 'asr-openai-model');
+  opt('volcAppId', 'asr-volc-appid');
+  opt('volcAccessToken', 'asr-volc-token');
+  opt('volcResourceId', 'asr-volc-resource');
+  opt('volcUrl', 'asr-volc-url');
+  opt('funasrUrl', 'asr-funasr-url');
+  opt('funasrMode', 'asr-funasr-mode');
+
+  try {
+    const res = await fetch('/api/settings/voice' + tokenQS('?'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asr }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (status) { status.textContent = '已保存'; status.style.color = '#3fb950'; }
+    showToast('流式 ASR 设置已保存');
+    loadAsrSettings();
+  } catch (err) {
+    if (status) { status.textContent = `失败：${err.message}`; status.style.color = '#f85149'; }
+  }
+}
+
+/* ── Scheduled Tasks (定时任务) ── */
+function _cronTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadCronTasks() {
+  const list = document.getElementById('cron-list');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/cron' + tokenQS('?'));
+    const tasks = await res.json();
+    const cnt = document.getElementById('cron-count');
+    if (cnt) cnt.textContent = tasks.length ? `(${tasks.length})` : '';
+    if (!tasks.length) {
+      list.innerHTML = '<div style="color:#6e7681;font-size:13px;">还没有定时任务。点「+ 新建」，或让 agent 帮你登记。</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const t of tasks) {
+      const row = document.createElement('div');
+      row.style.cssText = 'border:1px solid #21262d;border-radius:8px;padding:10px 12px;background:#0d1117;';
+      const statusColor = t.lastStatus === 'ok' ? '#3fb950' : (t.lastStatus ? '#f85149' : '#6e7681');
+      const statusTxt = t.lastStatus ? `上次 ${_cronTime(t.lastRunAt)} · ${t.lastStatus === 'ok' ? '成功' : (t.lastError || t.lastStatus)}` : '尚未运行';
+      row.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="font-weight:600;color:#f0f6fc;">${escapeHtml(t.name)}</span>
+          <span style="font-size:11px;padding:1px 6px;border-radius:4px;background:${t.enabled ? '#23863622' : '#6e768122'};color:${t.enabled ? '#3fb950' : '#8b949e'};">${t.enabled ? '启用' : '停用'}</span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-sm" title="立即运行" onclick="runCronTask('${t.id}')">▶ 运行</button>
+          <button class="btn btn-sm" onclick="toggleCronTask('${t.id}', ${t.enabled ? 'false' : 'true'})">${t.enabled ? '停用' : '启用'}</button>
+          <button class="btn btn-sm" onclick="openCronModal('${t.id}')">编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteCronTask('${t.id}')">删除</button>
+        </div>
+        <div style="font-size:12px;color:#8b949e;margin-top:6px;font-family:monospace;">
+          <code style="color:#d29922;">${escapeHtml(t.cron)}</code> · 📁 ${escapeHtml(t.dirName)} · ${escapeHtml(t.cli)} · 创建者 ${escapeHtml(t.createdBy)}
+        </div>
+        <div style="font-size:12px;color:#6e7681;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml((t.prompt || '').slice(0, 80))}${(t.prompt || '').length > 80 ? '…' : ''}</div>
+        <div style="font-size:11px;margin-top:4px;color:${statusColor};">${escapeHtml(statusTxt)}${t.enabled && t.nextRunAt ? ` · 下次 ${_cronTime(t.nextRunAt)}` : ''}</div>
+      `;
+      list.appendChild(row);
+    }
+  } catch (err) {
+    list.innerHTML = `<div style="color:#f85149;font-size:13px;">加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+let _cronTasksCache = [];
+function _populateCronDirs(selectedId) {
+  const sel = document.getElementById('cron-f-dir');
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const d of (_cachedDirectories || [])) {
+    const o = document.createElement('option');
+    o.value = d.id; o.textContent = d.name;
+    if (d.id === selectedId) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+async function openCronModal(id) {
+  const m = document.getElementById('cron-modal');
+  if (!m) return;
+  document.getElementById('cron-modal-status').textContent = '';
+  document.getElementById('cron-next-hint').textContent = '';
+  const title = document.getElementById('cron-modal-title');
+  let task = null;
+  if (id) {
+    try { _cronTasksCache = await (await fetch('/api/cron' + tokenQS('?'))).json(); } catch (_) {}
+    task = _cronTasksCache.find(t => t.id === id) || null;
+  }
+  title.textContent = task ? '⏰ 编辑定时任务' : '⏰ 新建定时任务';
+  document.getElementById('cron-edit-id').value = task ? task.id : '';
+  document.getElementById('cron-f-name').value = task ? task.name : '';
+  _populateCronDirs(task ? task.dirId : ((_cachedDirectories[0] && _cachedDirectories[0].id) || ''));
+  document.getElementById('cron-f-cli').value = task ? task.cli : 'claude';
+  document.getElementById('cron-f-cron').value = task ? task.cron : '0 9 * * *';
+  document.getElementById('cron-f-prompt').value = task ? task.prompt : '';
+  document.getElementById('cron-f-enabled').checked = task ? task.enabled : true;
+  m.style.display = 'flex';
+}
+function closeCronModal() {
+  const m = document.getElementById('cron-modal');
+  if (m) m.style.display = 'none';
+}
+function cronPreset(expr) {
+  document.getElementById('cron-f-cron').value = expr;
+  document.getElementById('cron-next-hint').textContent = '';
+}
+
+async function saveCronTask() {
+  const status = document.getElementById('cron-modal-status');
+  const id = document.getElementById('cron-edit-id').value;
+  const body = {
+    name: document.getElementById('cron-f-name').value.trim(),
+    dirId: document.getElementById('cron-f-dir').value,
+    cli: document.getElementById('cron-f-cli').value,
+    cron: document.getElementById('cron-f-cron').value.trim(),
+    prompt: document.getElementById('cron-f-prompt').value,
+    enabled: document.getElementById('cron-f-enabled').checked,
+  };
+  if (!body.name) { status.textContent = '任务名不能为空'; status.style.color = '#f85149'; return; }
+  if (!body.prompt.trim()) { status.textContent = 'prompt 不能为空'; status.style.color = '#f85149'; return; }
+  try {
+    const url = '/api/cron' + (id ? '/' + id : '') + tokenQS('?');
+    const res = await fetch(url, {
+      method: id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = data.error || `HTTP ${res.status}`; status.style.color = '#f85149'; return; }
+    showToast(id ? '已更新定时任务' : '已创建定时任务');
+    closeCronModal();
+    loadCronTasks();
+  } catch (err) {
+    status.textContent = `失败：${err.message}`; status.style.color = '#f85149';
+  }
+}
+
+async function runCronTask(id) {
+  try {
+    const res = await fetch(`/api/cron/${id}/run` + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) showToast(`运行失败：${data.error || res.status}`, true);
+    else showToast('已触发，正在新建会话执行');
+    loadCronTasks();
+  } catch (err) { showToast(`运行失败：${err.message}`, true); }
+}
+
+async function toggleCronTask(id, enabled) {
+  try {
+    const res = await fetch(`/api/cron/${id}` + tokenQS('?'), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) { const e = await res.json(); showToast(`Error: ${e.error}`, true); return; }
+    loadCronTasks();
+  } catch (err) { showToast(`Error: ${err.message}`, true); }
+}
+
+async function deleteCronTask(id) {
+  if (!(await showConfirm('删除这个定时任务？', { danger: true, okText: '删除' }))) return;
+  try {
+    const res = await fetch(`/api/cron/${id}` + tokenQS('?'), { method: 'DELETE' });
+    if (!res.ok) { const e = await res.json(); showToast(`Error: ${e.error}`, true); return; }
+    showToast('已删除');
+    loadCronTasks();
+  } catch (err) { showToast(`Error: ${err.message}`, true); }
 }
 
 /* ── QR Code ── */
@@ -1738,7 +2261,7 @@ function wechatGatewayOpen() {
 }
 
 async function wechatGatewayReset() {
-  if (!confirm('清空 Gateway 对话历史？')) return;
+  if (!(await showConfirm('清空 Gateway 对话历史？', { danger: true, okText: '清空' }))) return;
   try {
     const res = await fetch('/api/wechat/gateway/reset' + tokenQS('?'), { method: 'POST' });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
@@ -1747,7 +2270,7 @@ async function wechatGatewayReset() {
 }
 
 async function wechatGatewayDestroy() {
-  if (!confirm('销毁 Gateway 会话？历史会保留在 chat_history。')) return;
+  if (!(await showConfirm('销毁 Gateway 会话？历史会保留在 chat_history。', { danger: true, okText: '销毁' }))) return;
   try {
     const res = await fetch('/api/wechat/gateway' + tokenQS('?'), { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
@@ -2129,7 +2652,7 @@ async function loadUploadStats() {
 
 async function cleanupUploads() {
   const stStatus = document.getElementById('st-status');
-  if (!confirm('Delete all temporary uploaded files?')) return;
+  if (!(await showConfirm('Delete all temporary uploaded files?', { danger: true, okText: '删除' }))) return;
   try {
     stStatus.textContent = 'Cleaning...';
     const res = await fetch('/api/uploads/cleanup' + tokenQS('?'), { method: 'DELETE' });
@@ -2309,6 +2832,8 @@ focusSession = function(id) {
 /* ── Init ── */
 loadDashboard();
 loadVoiceSettings();
+loadAsrSettings();
+loadCronTasks();
 loadPushDiagnostics();
 loadNotifySettings();
 loadApkInfo();

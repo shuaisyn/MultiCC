@@ -55,6 +55,36 @@ function renderMarkdown(text) {
   return (typeof marked !== 'undefined' && marked.parse) ? marked.parse(text) : escHtml(text);
 }
 
+// Assistant markdown may reference local-filesystem images, e.g. ![](/tmp/x.png).
+// The browser can't load those directly, so rewrite such <img> to stream through
+// the existing /api/download?inline=1 route — this is how the agent shows images
+// to the user. Web URLs (http/https/data/blob//api/…) are left untouched.
+const _LOCAL_IMG_RE = /^(?:file:\/\/|\/(?:tmp|Users|home|var|private|opt|Volumes|mnt|root|data)\/|[A-Za-z]:[\\/])/;
+function fixupLocalImages(root) {
+  if (!root) return;
+  root.querySelectorAll('img').forEach(img => {
+    const raw = img.getAttribute('src') || '';
+    if (!_LOCAL_IMG_RE.test(raw)) return;
+    const p = raw.replace(/^file:\/\//, '');
+    const url = withToken('/api/download?path=' + encodeURIComponent(p) + '&inline=1');
+    const name = p.split(/[\\/]/).pop();
+    img.src = url;
+    img.style.maxWidth = '100%';
+    img.style.borderRadius = '8px';
+    img.style.cursor = 'zoom-in';
+    img.loading = 'lazy';
+    img.addEventListener('click', () => openLightbox(url, name));
+    img.addEventListener('error', () => {
+      if (img.dataset.failed) return;
+      img.dataset.failed = '1';
+      const note = document.createElement('div');
+      note.style.cssText = 'font-size:12px;color:#f85149;font-family:monospace';
+      note.textContent = '⚠ 无法加载图片: ' + p;
+      img.replaceWith(note);
+    });
+  });
+}
+
 /* ── DOM refs ── */
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('input');
@@ -75,6 +105,16 @@ const mergeHintBtn = document.getElementById('merge-hint-btn');
 /* ── State ── */
 let ws = null;
 let sessionId = null;
+
+// Open the project's memo (multicc.memo.md) in a new tab/window.
+function openMemo() {
+  const u = new URLSearchParams(location.search);
+  const sid = (typeof _sessionName !== 'undefined' && _sessionName) || u.get('id') || u.get('session');
+  if (!sid) return;
+  const token = u.get('token');
+  const tokenParam = token ? '&token=' + encodeURIComponent(token) : '';
+  window.open('/memo.html?sessionId=' + encodeURIComponent(sid) + tokenParam, '_blank');
+}
 let isStreaming = false;
 let _pendingCancel = false; // cancel requested while WS was disconnected
 
@@ -519,6 +559,7 @@ function renderCurrentText(final = false) {
   tmp.innerHTML = html;
   contentEl.innerHTML = '';
   while (tmp.firstChild) contentEl.appendChild(tmp.firstChild);
+  fixupLocalImages(contentEl);
   toolEls.forEach(el => contentEl.appendChild(el));
 
   if (!final && isStreaming) {
@@ -639,6 +680,7 @@ function replayHistory(messages) {
       // Render text as markdown
       if (m.content?.trim()) {
         contentEl.innerHTML = renderMarkdown(m.content);
+        fixupLocalImages(contentEl);
         highlightCodeBlocks(contentEl);
       }
 
@@ -961,6 +1003,116 @@ async function requestMerge() {
 mergeBtn?.addEventListener('click', requestMerge);
 mergeHintBtn?.addEventListener('click', requestMerge);
 startMergeStatusPolling();
+
+/* ── Per-session model switch (claude only) ── */
+const modelBtn = document.getElementById('model-btn');
+const CLAUDE_MODEL_OPTIONS = [
+  { value: '', label: '默认（跟随 Claude 设置）' },
+  { value: 'claude-fable-5', label: 'Fable 5' },
+  { value: 'claude-fable-5[1m]', label: 'Fable 5 (1M context)' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  { value: '__custom__', label: '自定义…' },
+];
+let _sessionModel = '';
+
+function modelShortName(model) {
+  const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
+  return opt ? opt.label : model;
+}
+
+function updateModelBtn() {
+  if (!modelBtn) return;
+  modelBtn.textContent = `🧠 ${_sessionModel ? modelShortName(_sessionModel) : '默认'}`;
+  modelBtn.style.display = '';
+}
+
+// WebView-safe picker (native select/confirm are unreliable in Android WebViews).
+function showModelPicker(current) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:12px;';
+    msg.textContent = '切换该会话使用的模型（下一轮对话生效）';
+    box.appendChild(msg);
+
+    const isKnown = CLAUDE_MODEL_OPTIONS.some(o => o.value === current);
+    const select = document.createElement('select');
+    select.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
+    for (const o of CLAUDE_MODEL_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.value; opt.textContent = o.label;
+      select.appendChild(opt);
+    }
+    select.value = isKnown ? current : '__custom__';
+    box.appendChild(select);
+
+    const custom = document.createElement('input');
+    custom.type = 'text';
+    custom.placeholder = '模型 ID，如 claude-opus-4-8';
+    custom.value = isKnown ? '' : current;
+    custom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;';
+    box.appendChild(custom);
+    const syncCustom = () => { custom.style.display = select.value === '__custom__' ? '' : 'none'; };
+    syncCustom();
+    select.onchange = () => { syncCustom(); if (select.value === '__custom__') custom.focus(); };
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;';
+    const ok = document.createElement('button');
+    ok.textContent = '保存';
+    ok.style.cssText = 'background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(row);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const close = (result) => { overlay.remove(); resolve(result); };
+    ok.onclick = () => close(select.value === '__custom__' ? custom.value.trim() : select.value);
+    cancel.onclick = () => close(null);
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+  });
+}
+
+async function loadSessionModel() {
+  if (!_sessionName || !modelBtn) return;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`));
+    if (!res.ok) return;
+    const info = await res.json();
+    if ((info.cli || 'claude') !== 'claude') return; // codex has no model switch
+    _sessionModel = info.model || '';
+    updateModelBtn();
+  } catch (_) {}
+}
+
+modelBtn?.addEventListener('click', async () => {
+  const picked = await showModelPicker(_sessionModel);
+  if (picked === null) return;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: picked }),
+    });
+    const data = await res.json();
+    if (!res.ok) { addSystemMsg('模型切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    _sessionModel = data.model || '';
+    updateModelBtn();
+    addSystemMsg(`✓ 模型已切换为 ${_sessionModel ? modelShortName(_sessionModel) : '默认（跟随 Claude 设置）'}，下一轮对话生效`);
+  } catch (e) {
+    addSystemMsg('模型切换失败：' + e.message);
+  }
+});
+
+loadSessionModel();
 
 /* ── Clear context button ── */
 document.getElementById('clear-ctx-btn').addEventListener('click', () => {
@@ -1435,6 +1587,35 @@ window.addEventListener('pageshow', (e) => {
   else ensureWsAlive();
 });
 window.addEventListener('focus', ensureWsAlive);
+// Network restored (mobile data/wifi flap) — reconnect immediately.
+window.addEventListener('online', () => forceReconnect('network online'));
+
+// Fallback heartbeat: some Android WebViews never fire visibilitychange/focus when
+// the whole app backgrounds, so the resume hooks above don't run and a dead socket
+// is never noticed. A plain interval resumes ticking when the app comes back and
+// catches a closed socket within a few seconds — no reliance on visibility events.
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    ensureWsAlive();
+  }
+}, 5000);
+
+/* ── Manual reconnect control (header ↻) ── */
+(function initReconnectBtn() {
+  const btn = document.getElementById('reconnect-btn');
+  if (!btn) return;
+  // Tap → force reconnect; long-press (600ms) → hard page reload as a last resort.
+  let lpTimer = null, longFired = false;
+  const startLP = () => { longFired = false; lpTimer = setTimeout(() => { longFired = true; location.reload(); }, 600); };
+  const cancelLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  btn.addEventListener('click', () => { if (!longFired) forceReconnect('manual button'); });
+  btn.addEventListener('mousedown', startLP);
+  btn.addEventListener('touchstart', startLP, { passive: true });
+  ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach(ev => btn.addEventListener(ev, cancelLP));
+})();
+// The status pill is always a reconnect affordance too (not only after a drop).
+if (statusEl) statusEl.onclick = () => forceReconnect('status click');
 
 /* ── Debug panel wiring ── */
 (function initDebugPanel() {

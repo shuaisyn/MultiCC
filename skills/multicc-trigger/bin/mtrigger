@@ -1,0 +1,126 @@
+#!/usr/bin/env node
+/**
+ * mtrigger — multicc-trigger skill CLI.
+ * Registers/queries/removes per-session auto-triggers by calling the multicc
+ * localhost API (127.0.0.1 is always treated as authenticated, so no token).
+ *
+ * Reads MULTICC_SESSION_ID and MULTICC_BASE_URL from the environment, which
+ * multicc injects when it spawns the CLI for a chat session.
+ */
+'use strict';
+const http = require('http');
+const { URL } = require('url');
+
+const SESSION = process.env.MULTICC_SESSION_ID;
+const BASE = process.env.MULTICC_BASE_URL || 'http://127.0.0.1:3000';
+
+function die(msg) { console.error(`mtrigger: ${msg}`); process.exit(1); }
+if (!SESSION) die('MULTICC_SESSION_ID not set — run me from inside a multicc chat session.');
+
+function api(method, pathSuffix, body) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(`${BASE}/api/sessions/${encodeURIComponent(SESSION)}/triggers${pathSuffix}`);
+    const data = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = http.request(u, {
+      method,
+      headers: data
+        ? { 'Content-Type': 'application/json', 'Content-Length': data.length }
+        : {},
+    }, (res) => {
+      let buf = '';
+      res.on('data', (c) => (buf += c));
+      res.on('end', () => {
+        let json = null;
+        try { json = buf ? JSON.parse(buf) : null; } catch (_) {}
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve(json);
+        else reject(new Error((json && json.error) || `HTTP ${res.statusCode}`));
+      });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+// Minimal flag parser: --key value, repeatable --paths collected into an array.
+function parseFlags(argv) {
+  const out = { paths: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('--')) continue;
+    const key = a.slice(2);
+    const val = argv[i + 1];
+    i++;
+    if (key === 'paths') out.paths.push(val);
+    else out[key] = val;
+  }
+  return out;
+}
+
+function fmt(t) {
+  const on = t.enabled ? '●' : '○';
+  let what;
+  if (t.type === 'file-change') what = `file-change [${(t.paths || []).join(', ')}] debounce=${t.debounceMs}ms`;
+  else if (t.type === 'schedule') what = `schedule "${t.cron}"`;
+  else what = 'post-turn';
+  const cd = t.cooldownMs ? ` cooldown=${t.cooldownMs}ms` : '';
+  const last = t.lastFiredAt ? ` last=${new Date(t.lastFiredAt).toLocaleString()}` : '';
+  const p = t.prompt ? `\n      prompt: ${t.prompt}` : '\n      prompt: (默认检查/提醒)';
+  return `  ${on} ${t.id}  ${what}${cd}${last}${p}`;
+}
+
+async function main() {
+  const [cmd, ...rest] = process.argv.slice(2);
+  switch (cmd) {
+    case 'list': {
+      const r = await api('GET', '');
+      const list = (r && r.triggers) || [];
+      if (!list.length) { console.log('（该会话暂无触发规则）'); break; }
+      console.log(`会话 ${SESSION} 的触发规则：`);
+      for (const t of list) console.log(fmt(t));
+      break;
+    }
+    case 'add': {
+      const f = parseFlags(rest);
+      if (!f.type) die('--type required (file-change | schedule | post-turn)');
+      const body = { type: f.type };
+      if (f.prompt) body.prompt = f.prompt;
+      if (f.cooldown) body.cooldownMs = parseInt(f.cooldown, 10);
+      if (f.type === 'file-change') {
+        if (!f.paths.length) die('file-change requires at least one --paths <glob>');
+        body.paths = f.paths;
+        if (f.debounce) body.debounceMs = parseInt(f.debounce, 10);
+      }
+      if (f.type === 'schedule') {
+        if (!f.cron) die('schedule requires --cron <expr>');
+        body.cron = f.cron;
+      }
+      const t = await api('POST', '', body);
+      console.log(`已登记触发规则 ${t.id}`);
+      console.log(fmt(t));
+      break;
+    }
+    case 'remove': case 'rm': case 'delete': {
+      const id = rest[0]; if (!id) die('usage: mtrigger remove <id>');
+      await api('DELETE', `/${encodeURIComponent(id)}`);
+      console.log(`已删除 ${id}`);
+      break;
+    }
+    case 'enable': case 'disable': {
+      const id = rest[0]; if (!id) die(`usage: mtrigger ${cmd} <id>`);
+      const t = await api('PUT', `/${encodeURIComponent(id)}`, { enabled: cmd === 'enable' });
+      console.log(fmt(t));
+      break;
+    }
+    case 'test': {
+      const id = rest[0]; if (!id) die('usage: mtrigger test <id>');
+      await api('POST', `/${encodeURIComponent(id)}/test`);
+      console.log(`已立即触发 ${id}（看会话里这一轮的回复）`);
+      break;
+    }
+    default:
+      console.log('mtrigger <list|add|remove|enable|disable|test>  (见 SKILL.md)');
+  }
+}
+
+main().catch((e) => die(e.message));

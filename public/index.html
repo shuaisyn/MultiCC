@@ -625,6 +625,7 @@
       <button id="files-btn" class="hdr-btn" title="文件浏览器">📁</button>
       <button id="notify-btn" class="hdr-btn" title="语音通知 (点击开启/关闭)">🔔</button>
       <a href="/wechat" class="hdr-btn" title="WeChat Bridge">💬</a>
+      <button id="memo-btn" class="hdr-btn" title="项目备忘 (multicc.memo.md)" onclick="openMemo()">📝</button>
       <button id="merge-btn" class="hdr-btn" title="把此会话 worktree 合并回基分支">🔀</button>
       <button id="restart-btn" class="hdr-btn" title="重启 Claude 命令">🔄</button>
       <button id="reconnect-btn" onclick="connect()">Reconnect</button>
@@ -744,6 +745,7 @@
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
   <script src="pwa.js"></script>
+  <script src="voice-stream.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

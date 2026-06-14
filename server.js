@@ -20,8 +20,12 @@ const net = require('net');
 const { StringDecoder } = require('string_decoder');
 const { execSync, execFileSync, spawn } = require('child_process');
 const multer = require('multer');
+const chokidar = require('chokidar');
+const cron = require('node-cron');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 const wechatBridge = require('./wechat-ilink');
+const voiceAsr = require('./voice-asr');
+const cronTasks = require('./cron-tasks');
 const webpush = require('web-push');
 
 const crypto = require('crypto');
@@ -226,6 +230,18 @@ const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?
   .filter(Boolean);
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
+// Read the user's default model from ~/.claude/settings.json on every spawn so
+// chat-mode sessions (which `--resume` and would otherwise keep their original
+// model forever) follow the current /model choice without a server restart.
+function claudeDefaultModel() {
+  try {
+    const settings = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8'));
+    return typeof settings.model === 'string' && settings.model ? settings.model : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ── Codex CLI binary resolution (mirrors claude lookup) ──
 function resolveCodex() {
   if (process.env.CODEX_CMD) return process.env.CODEX_CMD;
@@ -259,6 +275,23 @@ console.log(`[multicc] Using codex: ${CODEX_CMD}`);
 // Each provider knows how to (1) build the interactive terminal command line for tmux,
 // (2) build chat-mode spawn args, (3) parse one line of streamed JSON output.
 // Chat-mode parse output schema: { kind: 'text'|'tool'|'tool_result'|'result'|'system'|'thread', ... }
+// Injected into chat-mode system prompt so the agent knows it can SHOW images to
+// the user: the web chat renders Markdown and rewrites local-path <img> through
+// /api/download, so an absolute-path image link just works.
+const MULTICC_IMG_HINT = [
+  '你正在 multicc 的网页聊天框里与用户对话，你的回复会被渲染为 Markdown。',
+  '当你需要给用户「展示图片」（截图、生成的图表、参考图等本地图片文件）时，',
+  '直接用 Markdown 图片语法并写该文件的【绝对路径】即可，例如：',
+  '![说明](/绝对/路径/到/图片.png)',
+  '前端会自动把本地路径图片内联显示给用户（可点击放大），无需上传或转 base64。',
+  '仅在图片文件确实存在时这样写，不要编造路径。',
+  '',
+  '【定时任务】当用户要你「定时/每天/每隔一段时间」自动做某事时，可登记一个 multicc 定时任务（到点会自动新建一个 chat 会话执行你写的 prompt）。在本机用 curl 调用：',
+  `  curl -s http://127.0.0.1:${process.env.PORT || 3000}/api/cron -H 'Content-Type: application/json' \\`,
+  `    -d '{"name":"任务名","dirPath":"<当前工作目录的绝对路径>","cron":"0 9 * * *","prompt":"到点要执行的完整指令"}'`,
+  'cron 为标准 5 段（分 时 日 月 周，本地时区），如 "0 9 * * *" 表示每天 9:00。dirPath 用你当前的工作目录即可。登记后告诉用户可在 /manage 的「定时任务」里查看与管理。仅在用户明确要求定时/周期执行时才登记。',
+].join('\n');
+
 const cliProviders = {
   claude: {
     name: 'claude',
@@ -266,15 +299,27 @@ const cliProviders = {
     // Interactive terminal: `claude --session-id <uuid>`
     buildTerminalCmd(session) {
       let cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
+      if (session.model) cmd += ` --model ${session.model}`;
       if (session.cliSessionId) cmd += ` --session-id ${session.cliSessionId}`;
       return cmd;
     },
     // Chat-mode spawn args: `-p --output-format stream-json [--resume id | --session-id id] <prompt>`
     buildChatSpawnArgs(session, prompt, opts) {
+      // Image hint is always present; the resolved role prompt (session > dir)
+      // is appended after it so the user's custom role rides every turn (--resume
+      // keeps the system prompt out, so we re-send it each turn on purpose).
+      const sysPrompt = opts.rolePrompt
+        ? `${MULTICC_IMG_HINT}\n\n${opts.rolePrompt}`
+        : MULTICC_IMG_HINT;
       const args = [
         '-p', '--output-format', 'stream-json', '--verbose',
         '--include-partial-messages', '--dangerously-skip-permissions',
+        '--append-system-prompt', sysPrompt,
       ];
+      // Per-session model wins; otherwise follow the user's current /model default
+      // (passed explicitly because `--resume` would keep the session's original model).
+      const model = session.model || claudeDefaultModel();
+      if (model) args.push('--model', model);
       if (CLAUDE_CHAT_DISALLOWED_TOOLS.length) {
         args.push('--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(','));
       }
@@ -299,12 +344,19 @@ const cliProviders = {
     // Chat-mode spawn args: `exec --json [--skip-git-repo-check] [--dangerously-bypass-approvals-and-sandbox] [resume <id>] <prompt>`
     buildChatSpawnArgs(session, prompt, opts) {
       const args = [];
+      // Codex `exec` has no system-prompt flag, so the role prompt is prepended
+      // into the prompt text — only on the first turn, since `exec resume` keeps
+      // the earlier context (re-sending every turn would just waste tokens).
+      let p = prompt;
+      if (opts.isFirstTurn && opts.rolePrompt) {
+        p = `[角色设定]\n${opts.rolePrompt}\n[角色设定结束]\n\n${prompt}`;
+      }
       if (opts.isFirstTurn) {
         args.push('exec', '--json', '--skip-git-repo-check',
-          '--dangerously-bypass-approvals-and-sandbox', prompt);
+          '--dangerously-bypass-approvals-and-sandbox', p);
       } else {
         args.push('exec', 'resume', session.cliSessionId, '--json',
-          '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', prompt);
+          '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', p);
       }
       return args;
     },
@@ -586,7 +638,48 @@ function findDirByPath(resolvedPath, excludeId) {
 const DIR_MAX_FILES = 50000;                       // > this many files → unsuitable
 const DIR_MAX_BYTES = 2 * 1024 * 1024 * 1024;      // > 2 GB of content → unsuitable
 const DIR_SCAN_TIME_MS = 3000;                     // hard ceiling on the scan itself
+
+function dirUnsuitableReason(exceeded) {
+  if (exceeded === 'too-many-files')
+    return { ok: false, reason: `该目录文件过多（超过 ${DIR_MAX_FILES} 个），不适合作为 session 目录，请选择具体的项目目录` };
+  if (exceeded === 'too-large')
+    return { ok: false, reason: `该目录体积过大（超过 ${Math.round(DIR_MAX_BYTES / (1024 ** 3))}GB），不适合作为 session 目录，请选择具体的项目目录` };
+  if (exceeded === 'scan-timeout')
+    return { ok: false, reason: '该目录过大（扫描超时），不适合作为 session 目录，请选择具体的项目目录' };
+  return { ok: true };
+}
+
+// Measure only what `git add -A` will actually hash: files git would stage, i.e.
+// untracked + modified, with .gitignore applied. This is the right weight for an
+// existing repo — huge gitignored logs/build output (and nested git repos, which
+// `ls-files` reports as a single dir entry, not their contents) must not count.
+// Returns null if the dir isn't a usable repo, so callers fall back to a raw walk.
+function dirSuitabilityViaGit(dirPath) {
+  if (!gitIsRepo(dirPath)) return null;
+  let out;
+  try { out = gitRun(dirPath, ['ls-files', '-o', '-m', '-z', '--exclude-standard']); }
+  catch { return null; }
+  let files = 0, bytes = 0;
+  const deadline = Date.now() + DIR_SCAN_TIME_MS;
+  for (const rel of out.split('\0')) {
+    if (!rel) continue;
+    if (Date.now() > deadline) return dirUnsuitableReason('scan-timeout');
+    let st;
+    try { st = fs.statSync(path.join(dirPath, rel)); } catch { continue; }
+    if (!st.isFile()) continue;            // nested-repo dir entries land here → skipped
+    files++;
+    bytes += st.size;
+    if (files > DIR_MAX_FILES) return dirUnsuitableReason('too-many-files');
+    if (bytes > DIR_MAX_BYTES) return dirUnsuitableReason('too-large');
+  }
+  return { ok: true };
+}
+
 function dirSuitability(dirPath) {
+  // Prefer git's own view when the dir is already a repo (respects .gitignore).
+  const viaGit = dirSuitabilityViaGit(dirPath);
+  if (viaGit) return viaGit;
+  // Fallback: raw filesystem walk for not-yet-initialised dirs (e.g. ~/Downloads).
   let files = 0, bytes = 0, exceeded = null;
   const deadline = Date.now() + DIR_SCAN_TIME_MS;
   const walk = (dir) => {
@@ -599,7 +692,13 @@ function dirSuitability(dirPath) {
       if (e.name === '.git' || e.name === WORKTREE_SUBDIR) continue;
       if (e.isSymbolicLink()) continue;
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isDirectory()) {
+        // Skip nested git repos: `git add -A` records them as a single gitlink
+        // (their contents are never hashed), so they shouldn't count toward the
+        // working-tree weight we're estimating here.
+        if (fs.existsSync(path.join(full, '.git'))) continue;
+        walk(full); continue;
+      }
       if (e.isFile()) {
         files++;
         try { bytes += fs.statSync(full).size; } catch {}
@@ -609,13 +708,7 @@ function dirSuitability(dirPath) {
     }
   };
   walk(dirPath);
-  if (exceeded === 'too-many-files')
-    return { ok: false, reason: `该目录文件过多（超过 ${DIR_MAX_FILES} 个），不适合作为 session 目录，请选择具体的项目目录` };
-  if (exceeded === 'too-large')
-    return { ok: false, reason: `该目录体积过大（超过 ${Math.round(DIR_MAX_BYTES / (1024 ** 3))}GB），不适合作为 session 目录，请选择具体的项目目录` };
-  if (exceeded === 'scan-timeout')
-    return { ok: false, reason: '该目录过大（扫描超时），不适合作为 session 目录，请选择具体的项目目录' };
-  return { ok: true };
+  return dirUnsuitableReason(exceeded);
 }
 
 // Turn an ensureDirGitReady reason code into a user-facing message.
@@ -1433,6 +1526,8 @@ app.get('/api/sessions', (req, res) => {
         kind: p.kind || 'terminal',
         cliSessionId: p.cliSessionId || null,
         label: p.label || null,
+        model: p.model || null,
+        rolePrompt: p.rolePrompt || null,
         cwd,
         createdAt: p.createdAt,
         mergeState: p.dirId ? gitWorktreeMergeState(directories.get(p.dirId), p) : null,
@@ -1793,6 +1888,12 @@ app.patch('/api/directories/:id', (req, res) => {
       if (!ready.ok) return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
     }
   }
+  if (req.body.rolePrompt !== undefined) {
+    const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
+    if (rp.length > 8000) return res.status(400).json({ error: 'rolePrompt too long (max 8000)' });
+    // Directory-level default role; sessions without their own role inherit it.
+    d.rolePrompt = rp.trim() || null;
+  }
   saveDirectories();
   res.json(d);
 });
@@ -1815,6 +1916,7 @@ app.delete('/api/directories/:id', (req, res) => {
       chatSessions.delete(s.id);
     }
     if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
+    teardownTriggers(s.id);
     purgeNotesForSession(s.id);
     persistedSessions.delete(s.id);
     invalidSessions.delete(s.id);
@@ -1918,10 +2020,14 @@ app.get('/api/directories/:id/workspace', (req, res) => {
 // Shared by the REST endpoint and the gateway dispatch path. Pass an explicit `id`
 // to create/reuse a named session (e.g. ephemeral gateway chats). Returns
 // { ok:true, id, session, reused? } or { ok:false, error }.
-function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemeral = false }) {
+function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemeral = false, model = null }) {
   if (!dir) return { ok: false, error: 'directory not found' };
   if (!['claude', 'codex'].includes(cli)) return { ok: false, error: 'cli must be claude or codex' };
   if (!['terminal', 'chat'].includes(kind)) return { ok: false, error: 'kind must be terminal or chat' };
+  // Model is claude-only and interpolated into a tmux shell command — keep the charset tight.
+  if (model && (cli !== 'claude' || !/^[A-Za-z0-9._\[\]-]{1,100}$/.test(model))) {
+    return { ok: false, error: 'invalid model' };
+  }
   const sid = id || allocateSessionId(dir, cli, kind);
   if (persistedSessions.has(sid)) return { ok: true, id: sid, session: persistedSessions.get(sid), reused: true };
 
@@ -1942,6 +2048,7 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
     cli, kind,
     cliSessionId: null,   // claude gets one allocated on spawn; codex captures from first event
     label,
+    model: model || null, // claude-only; null = follow the user's /model default
     createdAt: new Date().toISOString(),
     worktreePath,
     branch,
@@ -1959,7 +2066,8 @@ app.post('/api/directories/:id/sessions', (req, res) => {
   const cli = (req.body.cli || '').trim();
   const kind = (req.body.kind || '').trim();
   const label = (req.body.label || '').trim() || null;
-  const r = createSessionRecord({ dir: d, cli, kind, label });
+  const model = (req.body.model || '').trim() || null;
+  const r = createSessionRecord({ dir: d, cli, kind, label, model });
   if (!r.ok) return res.status(400).json({ error: r.error });
   res.json(r.session);
 });
@@ -1975,10 +2083,85 @@ app.patch('/api/sessions/:id', (req, res) => {
     const label = (req.body.label || '').toString().trim();
     if (label.length > 80) return res.status(400).json({ error: 'label too long (max 80)' });
     s.label = label || null;
+    appendEvent(s.dirId, 'session_renamed', s.label || s.id, s.id);
+  }
+  if (req.body.model !== undefined) {
+    const model = (req.body.model || '').toString().trim();
+    if (s.cli !== 'claude') return res.status(400).json({ error: 'model is claude-only' });
+    if (model && !/^[A-Za-z0-9._\[\]-]{1,100}$/.test(model)) {
+      return res.status(400).json({ error: 'invalid model' });
+    }
+    s.model = model || null;
+    // Chat sessions pick this up on the next turn (fresh spawn per turn);
+    // terminal sessions need a session restart to relaunch claude with it.
+    appendEvent(s.dirId, 'session_model_changed', `${s.label || s.id} → ${s.model || '默认'}`, s.id);
+  }
+  if (req.body.rolePrompt !== undefined) {
+    const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
+    if (rp.length > 8000) return res.status(400).json({ error: 'rolePrompt too long (max 8000)' });
+    // null clears the session override → it falls back to the directory default.
+    s.rolePrompt = rp.trim() || null;
+    appendEvent(s.dirId, 'session_role_changed', s.rolePrompt ? (s.label || s.id) : `${s.label || s.id}（清除，继承目录）`, s.id);
   }
   savePersistedSessions();
-  appendEvent(s.dirId, 'session_renamed', s.label || s.id, s.id);
   res.json(s);
+});
+
+// ── Per-session auto-triggers ──
+// Written by the bundled multicc-trigger skill (via localhost) or the manage UI;
+// read by the trigger runtime (file-watch / cron / post-turn).
+app.get('/api/sessions/:id/triggers', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  res.json({ triggers: s.triggers || [] });
+});
+
+app.post('/api/sessions/:id/triggers', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  const v = validateTrigger(req.body || {});
+  if (v.error) return res.status(400).json({ error: v.error });
+  if (!Array.isArray(s.triggers)) s.triggers = [];
+  s.triggers.push(v.trigger);
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  appendEvent(s.dirId, 'trigger_added', triggerLabel(v.trigger), s.id);
+  res.json(v.trigger);
+});
+
+app.put('/api/sessions/:id/triggers/:tid', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const idx = s.triggers.findIndex((t) => t.id === req.params.tid);
+  if (idx < 0) return res.status(404).json({ error: 'trigger not found' });
+  const v = validateTrigger({ ...s.triggers[idx], ...req.body, id: req.params.tid });
+  if (v.error) return res.status(400).json({ error: v.error });
+  v.trigger.lastFiredAt = s.triggers[idx].lastFiredAt; // preserve across edits
+  s.triggers[idx] = v.trigger;
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  res.json(v.trigger);
+});
+
+app.delete('/api/sessions/:id/triggers/:tid', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const before = s.triggers.length;
+  s.triggers = s.triggers.filter((t) => t.id !== req.params.tid);
+  if (s.triggers.length === before) return res.status(404).json({ error: 'trigger not found' });
+  savePersistedSessions();
+  reconcileTriggers(s.id);
+  res.json({ ok: true });
+});
+
+// Fire a trigger immediately, bypassing cooldown + enabled (for manual testing).
+app.post('/api/sessions/:id/triggers/:tid/test', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s || !Array.isArray(s.triggers)) return res.status(404).json({ error: 'not found' });
+  const t = s.triggers.find((x) => x.id === req.params.tid);
+  if (!t) return res.status(404).json({ error: 'trigger not found' });
+  fireTrigger(s.id, { ...t, enabled: true, cooldownMs: 0 }, 'manual-test');
+  res.json({ ok: true });
 });
 
 app.get('/api/sessions/:id', (req, res) => {
@@ -1988,10 +2171,12 @@ app.get('/api/sessions/:id', (req, res) => {
   if (!active && !persisted) return res.status(404).json({ error: 'Session not found' });
   const dir = persisted?.dirId ? directories.get(persisted.dirId) : null;
   const mergeState = persisted ? gitWorktreeMergeState(dir, persisted) : null;
+  const cli = persisted?.cli || 'claude';
+  const model = persisted?.model || null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model });
   }
 });
 
@@ -2070,6 +2255,7 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (dir) gitWorktreeRemove(dir.path, persisted.worktreePath, persisted.branch);
   }
   if (persisted) appendEvent(persisted.dirId, 'session_deleted', persisted.label || persisted.id, null);
+  teardownTriggers(id);
   purgeNotesForSession(id);
   persistedSessions.delete(id);
   invalidSessions.delete(id);
@@ -2804,6 +2990,20 @@ app.get('/api/settings/voice', (req, res) => {
     hasWhisperKey: !!wsKey,
     whisperLanguage: env.WHISPER_LANGUAGE || process.env.WHISPER_LANGUAGE || 'zh',
     whisperPrompt: env.WHISPER_PROMPT || process.env.WHISPER_PROMPT || '',
+    // ── Streaming ASR (real-time dictation) ──
+    asr: {
+      provider: env.ASR_PROVIDER || process.env.ASR_PROVIDER || 'openai',
+      status: voiceAsr.providerStatus(),
+      openaiUrl: env.OPENAI_REALTIME_URL || process.env.OPENAI_REALTIME_URL || 'wss://api.openai.com/v1/realtime',
+      openaiModel: env.OPENAI_REALTIME_MODEL || process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-transcribe',
+      hasOpenaiKey: !!(env.OPENAI_REALTIME_API_KEY || process.env.OPENAI_REALTIME_API_KEY),
+      volcUrl: env.VOLC_ASR_URL || process.env.VOLC_ASR_URL || '',
+      volcResourceId: env.VOLC_ASR_RESOURCE_ID || process.env.VOLC_ASR_RESOURCE_ID || 'volc.bigasr.sauc.duration',
+      hasVolcAppId: !!(env.VOLC_ASR_APP_ID || process.env.VOLC_ASR_APP_ID),
+      hasVolcToken: !!(env.VOLC_ASR_ACCESS_TOKEN || process.env.VOLC_ASR_ACCESS_TOKEN),
+      funasrUrl: env.FUNASR_WS_URL || process.env.FUNASR_WS_URL || '',
+      funasrMode: env.FUNASR_MODE || process.env.FUNASR_MODE || '2pass',
+    },
   });
 });
 
@@ -2818,7 +3018,21 @@ app.post('/api/settings/voice', (req, res) => {
   if (whisperModel !== undefined) updates.WHISPER_MODEL = whisperModel;
   if (whisperLanguage !== undefined) updates.WHISPER_LANGUAGE = whisperLanguage;
   if (whisperPrompt !== undefined) updates.WHISPER_PROMPT = whisperPrompt;
+  // ── Streaming ASR config (skip masked **** values) ──
+  const asr = req.body.asr || {};
+  const setAsr = (k, v) => { if (v !== undefined && !(typeof v === 'string' && v.includes('****'))) updates[k] = v; };
+  setAsr('ASR_PROVIDER', asr.provider);
+  setAsr('OPENAI_REALTIME_API_KEY', asr.openaiApiKey);
+  setAsr('OPENAI_REALTIME_URL', asr.openaiUrl);
+  setAsr('OPENAI_REALTIME_MODEL', asr.openaiModel);
+  setAsr('VOLC_ASR_APP_ID', asr.volcAppId);
+  setAsr('VOLC_ASR_ACCESS_TOKEN', asr.volcAccessToken);
+  setAsr('VOLC_ASR_RESOURCE_ID', asr.volcResourceId);
+  setAsr('VOLC_ASR_URL', asr.volcUrl);
+  setAsr('FUNASR_WS_URL', asr.funasrUrl);
+  setAsr('FUNASR_MODE', asr.funasrMode);
   writeEnvFile(updates);
+  voiceAsr.applyConfig(updates);
   // Update in-memory env + module-level constants
   for (const [k, v] of Object.entries(updates)) process.env[k] = v;
   if (updates.OPENROUTER_API_KEY) OPENROUTER_API_KEY = updates.OPENROUTER_API_KEY;
@@ -3838,8 +4052,18 @@ ${tail}`,
 // dispatch path can drive a session with no connected client. opts.isFirstTurn
 // forces first-turn spawn semantics; opts.originDispatchId, when set, pushes the
 // final assistant text back to WeChat once the turn completes (auto-回流).
+// Resolve the effective custom role prompt for a session: an explicit
+// session-level role wins; otherwise inherit the owning directory's default.
+// Returns null when neither is set (sessions keep the bare image hint only).
+function resolveRolePrompt(persisted) {
+  if (!persisted) return null;
+  if (persisted.rolePrompt) return persisted.rolePrompt;
+  const dir = persisted.dirId ? directories.get(persisted.dirId) : null;
+  return (dir && dir.rolePrompt) || null;
+}
+
 function runChatTurn(sessionName, text, opts = {}) {
-  const { isFirstTurn: forceFirstTurn, originDispatchId } = opts;
+  const { isFirstTurn: forceFirstTurn, originDispatchId, originTrigger } = opts;
   const persisted = persistedSessions.get(sessionName);
   if (!persisted) {
     console.warn(`[multicc/chat] runChatTurn: no persisted record for ${sessionName}`);
@@ -3905,6 +4129,9 @@ function runChatTurn(sessionName, text, opts = {}) {
   cs.isStreaming = true;
   cs.streamReplay = [];
   cs._resultSaved = false;
+  // Marks this turn as initiated by an auto-trigger, so post-turn triggers
+  // don't recurse on their own output (see firePostTurnTriggers).
+  cs._originTrigger = !!originTrigger;
   cs.originDispatchId = originDispatchId || null;
   setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
 
@@ -3939,13 +4166,21 @@ function runChatTurn(sessionName, text, opts = {}) {
     promptText = buildGatewayPrompt(promptText);
   }
 
-  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn });
+  const rolePrompt = resolveRolePrompt(persisted);
+  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn, rolePrompt });
   console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
   const spawnChat = (spawnArgs, isRetry) => {
     const proc = spawn(provider.cmd, spawnArgs, {
       cwd: cs.cwd,
-      env: { ...process.env, TERM: 'dumb', NO_COLOR: '1' },
+      env: {
+        ...process.env, TERM: 'dumb', NO_COLOR: '1',
+        // Let the bundled multicc-trigger skill know who it is and where the
+        // localhost API lives, so it can register/manage triggers for us.
+        MULTICC_SESSION_ID: sessionName,
+        MULTICC_DIR_ID: persisted.dirId || '',
+        MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     cs.claudeProc = proc;
@@ -4090,6 +4325,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         }
         setSessionStatus(sessionName, { status: 'idle', currentFile: null });
         scheduleIntentClassify(cs, sessionName);
+        firePostTurnTriggers(sessionName, cs);
       }
       // Drop claude's `system init` — server already sent its own
       if (evt.type === 'system' && evt.subtype === 'init') return;
@@ -4169,7 +4405,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         cs.chatTurnCount = 0;
         cs.isStreaming = true;
         cs.streamReplay = [];
-        const fallbackArgs = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn: true });
+        const fallbackArgs = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn: true, rolePrompt });
         chatBroadcast(sessionName, {
           type: 'system', subtype: 'warning',
           message: `${cs.cli} 启动失败（${reason}），已用新会话重试`,
@@ -4410,6 +4646,11 @@ wss.on('connection', (ws, req) => {
     return handleChatWs(ws, req, urlObj);
   }
 
+  // Route to streaming voice (ASR) proxy
+  if (urlObj.pathname === '/ws/voice') {
+    return voiceAsr.handleVoiceWs(ws, req, urlObj);
+  }
+
   // Route to the per-directory workspace status board
   if (urlObj.pathname === '/ws/workspace') {
     return handleWorkspaceWs(ws, req, urlObj);
@@ -4582,8 +4823,228 @@ recoverTmuxSessions();
 // Initialize AuxQueue (loads history, registers __aux__ session)
 auxQueue.init();
 
+// ───────────────────────────────────────────────────────────────────────────
+// Auto-trigger runtime
+//
+// Triggers live on the session record (persisted.triggers). This is the "waking
+// half": it watches files / cron / turn-end and, when a rule matches, starts a
+// fresh chat turn via runChatTurn with originTrigger:true. All the "what to do"
+// logic lives in the bundled multicc-trigger skill, not here — a fired trigger
+// just injects a prompt that points the agent at that skill.
+// ───────────────────────────────────────────────────────────────────────────
+
+const DEFAULT_TRIGGER_PROMPT =
+  '【multicc 自动触发】请使用 multicc-trigger skill 执行检查流程：查看当前 git 改动（git status/diff），' +
+  '提醒我该提交或该补/跑测试的地方；简短汇报即可，不要擅自修改代码或提交。';
+
+const triggerWatchers = new Map();   // sessionId -> chokidar watcher
+const triggerCronTasks = new Map();  // sessionId -> [cron task]
+const _deferredFire = new Map();     // `${sessionId}:${triggerId}` -> timeout
+
+function clampInt(v, min, max, dflt) {
+  const n = parseInt(v, 10);
+  if (Number.isNaN(n)) return dflt;
+  return Math.max(min, Math.min(max, n));
+}
+
+function triggerLabel(t) {
+  if (t.type === 'file-change') return `文件变更 ${(t.paths || []).join(',')}`;
+  if (t.type === 'schedule') return `定时 ${t.cron}`;
+  return '每轮结束';
+}
+
+// Validate + normalize a trigger from API input. Returns {trigger} or {error}.
+function validateTrigger(body) {
+  const type = String(body.type || '');
+  if (!['post-turn', 'file-change', 'schedule'].includes(type)) return { error: 'invalid type' };
+  const t = {
+    id: body.id || crypto.randomUUID(),
+    type,
+    enabled: body.enabled !== false,
+    prompt: body.prompt != null ? String(body.prompt).slice(0, 4000) : '',
+    cooldownMs: clampInt(body.cooldownMs, 0, 86400000, type === 'post-turn' ? 30000 : 0),
+    mode: 'inject',
+    createdAt: body.createdAt || new Date().toISOString(),
+  };
+  if (type === 'file-change') {
+    let paths = body.paths;
+    if (typeof paths === 'string') paths = [paths];
+    if (!Array.isArray(paths) || !paths.length) return { error: 'file-change requires paths[]' };
+    t.paths = paths.map(String).slice(0, 20);
+    t.debounceMs = clampInt(body.debounceMs, 500, 60000, 3000);
+  }
+  if (type === 'schedule') {
+    if (!body.cron || !cron.validate(String(body.cron))) return { error: 'invalid cron expression' };
+    t.cron = String(body.cron);
+  }
+  return { trigger: t };
+}
+
+// Tiny glob matcher (chokidar 5 dropped glob support, so we watch the worktree
+// root and match changed relative paths ourselves). Supports ** * ?.
+const _globCache = new Map();
+function globToRegex(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') { re += '.*'; i++; if (glob[i + 1] === '/') i++; }
+      else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if ('.+^${}()|[]\\'.includes(c)) re += '\\' + c;
+    else re += c;
+  }
+  return new RegExp('^' + re + '$');
+}
+function matchGlob(p, glob) {
+  let r = _globCache.get(glob);
+  if (!r) { r = globToRegex(glob); _globCache.set(glob, r); }
+  return r.test(p);
+}
+function matchAnyGlob(p, globs) {
+  return Array.isArray(globs) && globs.some((g) => matchGlob(p, g));
+}
+
+// Fire a trigger: cooldown + busy checks, then inject the prompt as a new turn.
+function fireTrigger(sessionId, trigger, reason) {
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || !trigger.enabled) return;
+  const now = Date.now();
+  const cd = trigger.cooldownMs || 0;
+  if (cd > 0 && trigger.lastFiredAt && (now - trigger.lastFiredAt) < cd) return;
+  // If the session is mid-turn, defer rather than clobber the running turn.
+  const cs = chatSessions.get(sessionId);
+  if (cs && cs.isStreaming) {
+    const key = sessionId + ':' + trigger.id;
+    if (!_deferredFire.has(key)) {
+      _deferredFire.set(key, setTimeout(() => {
+        _deferredFire.delete(key);
+        fireTrigger(sessionId, trigger, reason);
+      }, 6000));
+    }
+    return;
+  }
+  // Persist lastFiredAt on the live record (test triggers may be ephemeral copies).
+  const live = (persisted.triggers || []).find((x) => x.id === trigger.id);
+  if (live) { live.lastFiredAt = now; savePersistedSessions(); }
+  const prompt = (trigger.prompt && trigger.prompt.trim()) || DEFAULT_TRIGGER_PROMPT;
+  appendEvent(persisted.dirId, 'trigger_fired', `${triggerLabel(trigger)} · ${reason}`, sessionId);
+  chatBroadcast(sessionId, { type: 'system', subtype: 'trigger_fired', trigger: triggerLabel(trigger), reason });
+  runChatTurn(sessionId, prompt, { originTrigger: true });
+}
+
+// Called after every chat turn's `result`. Fires post-turn triggers, but never
+// on a turn that an auto-trigger itself started (cs._originTrigger) — no loop.
+function firePostTurnTriggers(sessionId, cs) {
+  if (cs && cs._originTrigger) return;
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || !Array.isArray(persisted.triggers)) return;
+  for (const t of persisted.triggers) {
+    if (t.enabled && t.type === 'post-turn') fireTrigger(sessionId, t, 'post-turn');
+  }
+}
+
+function buildFileWatchers(sessionId, persisted) {
+  const triggers = (persisted.triggers || []).filter((t) => t.enabled && t.type === 'file-change');
+  if (!triggers.length) return;
+  const root = persisted.worktreePath || cwdForSession(persisted);
+  if (!root || !fs.existsSync(root)) return;
+  let watcher;
+  try {
+    watcher = chokidar.watch(root, {
+      ignoreInitial: true,
+      persistent: true,
+      depth: 20,
+      ignored: (p) => /(^|[\/\\])(\.git|node_modules|\.multicc-worktrees|\.DS_Store)([\/\\]|$)/.test(p),
+    });
+  } catch (e) {
+    console.warn(`[multicc/trigger] watch failed for ${sessionId}: ${e.message}`);
+    return;
+  }
+  const debouncers = new Map();
+  const onChange = (full) => {
+    const rel = path.relative(root, full).split(path.sep).join('/');
+    for (const t of triggers) {
+      if (!matchAnyGlob(rel, t.paths)) continue;
+      const key = t.id;
+      if (debouncers.has(key)) clearTimeout(debouncers.get(key));
+      debouncers.set(key, setTimeout(() => {
+        debouncers.delete(key);
+        fireTrigger(sessionId, t, `file:${rel}`);
+      }, t.debounceMs || 3000));
+    }
+  };
+  watcher.on('add', onChange).on('change', onChange).on('unlink', onChange);
+  watcher.on('error', () => {});
+  triggerWatchers.set(sessionId, watcher);
+}
+
+function buildCronTasks(sessionId, persisted) {
+  const triggers = (persisted.triggers || []).filter((t) => t.enabled && t.type === 'schedule' && t.cron);
+  const tasks = [];
+  for (const t of triggers) {
+    if (!cron.validate(t.cron)) continue;
+    try {
+      tasks.push(cron.schedule(t.cron, () => fireTrigger(sessionId, t, 'schedule')));
+    } catch (e) {
+      console.warn(`[multicc/trigger] cron failed (${t.cron}) for ${sessionId}: ${e.message}`);
+    }
+  }
+  if (tasks.length) triggerCronTasks.set(sessionId, tasks);
+}
+
+function teardownTriggers(sessionId) {
+  const w = triggerWatchers.get(sessionId);
+  if (w) { try { w.close(); } catch (_) {} triggerWatchers.delete(sessionId); }
+  const tasks = triggerCronTasks.get(sessionId);
+  if (tasks) { for (const t of tasks) { try { t.stop(); } catch (_) {} } triggerCronTasks.delete(sessionId); }
+}
+
+// Rebuild watchers + cron for one session (call after its triggers change).
+function reconcileTriggers(sessionId) {
+  teardownTriggers(sessionId);
+  const p = persistedSessions.get(sessionId);
+  if (!p) return;
+  buildFileWatchers(sessionId, p);
+  buildCronTasks(sessionId, p);
+}
+
+function reconcileAllTriggers() {
+  let n = 0;
+  for (const [id, p] of persistedSessions) {
+    if (Array.isArray(p.triggers) && p.triggers.length) { reconcileTriggers(id); n++; }
+  }
+  if (n) console.log(`[multicc/trigger] armed triggers for ${n} session(s)`);
+}
+
+// Copy the bundled multicc-trigger skill into ~/.claude/skills so every claude
+// session multicc spawns can discover it. Re-copies when the version differs.
+function installBundledSkill() {
+  try {
+    const src = path.join(__dirname, 'skills', 'multicc-trigger');
+    if (!fs.existsSync(src)) return;
+    const dest = path.join(os.homedir(), '.claude', 'skills', 'multicc-trigger');
+    const readVer = (dir) => { try { return fs.readFileSync(path.join(dir, '.skill-version'), 'utf8').trim(); } catch (_) { return null; } };
+    if (fs.existsSync(dest) && readVer(dest) === readVer(src)) return;
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(src, dest, { recursive: true });
+    try { fs.chmodSync(path.join(dest, 'bin', 'mtrigger'), 0o755); } catch (_) {}
+    console.log('[multicc/trigger] installed multicc-trigger skill → ~/.claude/skills/');
+  } catch (e) {
+    console.warn(`[multicc/trigger] skill install failed: ${e.message}`);
+  }
+}
+
+// Scheduled tasks (定时任务): inject the session-creation + turn-running machinery.
+// Complements the per-session triggers above — this one fires by creating a
+// fresh chat session in a target directory (directory-level recurring tasks).
+cronTasks.mount(app);
+cronTasks.init({ directories, createSessionRecord, runChatTurn });
+
 server.listen(PORT, () => {
   console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);
   console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
   console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
+  installBundledSkill();
+  reconcileAllTriggers();
 });
