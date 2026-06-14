@@ -11,6 +11,7 @@ import '../services/settings_service.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/thinking_indicator.dart';
+import '../widgets/conflict_diff_dialog.dart';
 import 'setup_screen.dart';
 
 /// Reusable chat view — expects a ChatProvider in the widget tree
@@ -297,6 +298,8 @@ Future<void> confirmMergeWorktree(
     final result = await SessionService(
       settings: settings,
     ).mergeSession(sessionId);
+    final hasConflict =
+        result['conflicts'] is List && (result['conflicts'] as List).isNotEmpty;
     String msg;
     if (result['ok'] == true) {
       msg = result['merged'] == true
@@ -309,6 +312,13 @@ Future<void> confirmMergeWorktree(
     }
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(SnackBar(content: Text(msg)));
+    if (hasConflict && context.mounted) {
+      await showConflictDiffDialog(
+        context,
+        sessionId: sessionId,
+        result: result,
+      );
+    }
   } catch (e) {
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(SnackBar(content: Text('合并请求失败：$e')));

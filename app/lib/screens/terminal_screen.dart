@@ -5,6 +5,7 @@ import '../models/message.dart';
 import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/terminal_service.dart';
+import '../widgets/conflict_diff_dialog.dart';
 
 class TerminalScreen extends StatefulWidget {
   final SettingsService settings;
@@ -70,6 +71,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
     try {
       final result = await SessionService(settings: widget.settings)
           .mergeSession(widget.session.id);
+      final hasConflict =
+          result['conflicts'] is List && (result['conflicts'] as List).isNotEmpty;
       String msg;
       if (result['ok'] == true) {
         msg = result['merged'] == true
@@ -82,6 +85,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
       }
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(content: Text(msg)));
+      if (hasConflict && mounted) {
+        await showConflictDiffDialog(
+          context,
+          sessionId: widget.session.id,
+          result: result,
+        );
+      }
     } catch (e) {
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(content: Text('合并请求失败：$e')));
