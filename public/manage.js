@@ -1739,6 +1739,160 @@ async function saveAsrSettings() {
   }
 }
 
+/* ── Scheduled Tasks (定时任务) ── */
+function _cronTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadCronTasks() {
+  const list = document.getElementById('cron-list');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/cron' + tokenQS('?'));
+    const tasks = await res.json();
+    const cnt = document.getElementById('cron-count');
+    if (cnt) cnt.textContent = tasks.length ? `(${tasks.length})` : '';
+    if (!tasks.length) {
+      list.innerHTML = '<div style="color:#6e7681;font-size:13px;">还没有定时任务。点「+ 新建」，或让 agent 帮你登记。</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const t of tasks) {
+      const row = document.createElement('div');
+      row.style.cssText = 'border:1px solid #21262d;border-radius:8px;padding:10px 12px;background:#0d1117;';
+      const statusColor = t.lastStatus === 'ok' ? '#3fb950' : (t.lastStatus ? '#f85149' : '#6e7681');
+      const statusTxt = t.lastStatus ? `上次 ${_cronTime(t.lastRunAt)} · ${t.lastStatus === 'ok' ? '成功' : (t.lastError || t.lastStatus)}` : '尚未运行';
+      row.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <span style="font-weight:600;color:#f0f6fc;">${escapeHtml(t.name)}</span>
+          <span style="font-size:11px;padding:1px 6px;border-radius:4px;background:${t.enabled ? '#23863622' : '#6e768122'};color:${t.enabled ? '#3fb950' : '#8b949e'};">${t.enabled ? '启用' : '停用'}</span>
+          <span style="flex:1;"></span>
+          <button class="btn btn-sm" title="立即运行" onclick="runCronTask('${t.id}')">▶ 运行</button>
+          <button class="btn btn-sm" onclick="toggleCronTask('${t.id}', ${t.enabled ? 'false' : 'true'})">${t.enabled ? '停用' : '启用'}</button>
+          <button class="btn btn-sm" onclick="openCronModal('${t.id}')">编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteCronTask('${t.id}')">删除</button>
+        </div>
+        <div style="font-size:12px;color:#8b949e;margin-top:6px;font-family:monospace;">
+          <code style="color:#d29922;">${escapeHtml(t.cron)}</code> · 📁 ${escapeHtml(t.dirName)} · ${escapeHtml(t.cli)} · 创建者 ${escapeHtml(t.createdBy)}
+        </div>
+        <div style="font-size:12px;color:#6e7681;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml((t.prompt || '').slice(0, 80))}${(t.prompt || '').length > 80 ? '…' : ''}</div>
+        <div style="font-size:11px;margin-top:4px;color:${statusColor};">${escapeHtml(statusTxt)}${t.enabled && t.nextRunAt ? ` · 下次 ${_cronTime(t.nextRunAt)}` : ''}</div>
+      `;
+      list.appendChild(row);
+    }
+  } catch (err) {
+    list.innerHTML = `<div style="color:#f85149;font-size:13px;">加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+let _cronTasksCache = [];
+function _populateCronDirs(selectedId) {
+  const sel = document.getElementById('cron-f-dir');
+  if (!sel) return;
+  sel.innerHTML = '';
+  for (const d of (_cachedDirectories || [])) {
+    const o = document.createElement('option');
+    o.value = d.id; o.textContent = d.name;
+    if (d.id === selectedId) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+async function openCronModal(id) {
+  const m = document.getElementById('cron-modal');
+  if (!m) return;
+  document.getElementById('cron-modal-status').textContent = '';
+  document.getElementById('cron-next-hint').textContent = '';
+  const title = document.getElementById('cron-modal-title');
+  let task = null;
+  if (id) {
+    try { _cronTasksCache = await (await fetch('/api/cron' + tokenQS('?'))).json(); } catch (_) {}
+    task = _cronTasksCache.find(t => t.id === id) || null;
+  }
+  title.textContent = task ? '⏰ 编辑定时任务' : '⏰ 新建定时任务';
+  document.getElementById('cron-edit-id').value = task ? task.id : '';
+  document.getElementById('cron-f-name').value = task ? task.name : '';
+  _populateCronDirs(task ? task.dirId : ((_cachedDirectories[0] && _cachedDirectories[0].id) || ''));
+  document.getElementById('cron-f-cli').value = task ? task.cli : 'claude';
+  document.getElementById('cron-f-cron').value = task ? task.cron : '0 9 * * *';
+  document.getElementById('cron-f-prompt').value = task ? task.prompt : '';
+  document.getElementById('cron-f-enabled').checked = task ? task.enabled : true;
+  m.style.display = 'flex';
+}
+function closeCronModal() {
+  const m = document.getElementById('cron-modal');
+  if (m) m.style.display = 'none';
+}
+function cronPreset(expr) {
+  document.getElementById('cron-f-cron').value = expr;
+  document.getElementById('cron-next-hint').textContent = '';
+}
+
+async function saveCronTask() {
+  const status = document.getElementById('cron-modal-status');
+  const id = document.getElementById('cron-edit-id').value;
+  const body = {
+    name: document.getElementById('cron-f-name').value.trim(),
+    dirId: document.getElementById('cron-f-dir').value,
+    cli: document.getElementById('cron-f-cli').value,
+    cron: document.getElementById('cron-f-cron').value.trim(),
+    prompt: document.getElementById('cron-f-prompt').value,
+    enabled: document.getElementById('cron-f-enabled').checked,
+  };
+  if (!body.name) { status.textContent = '任务名不能为空'; status.style.color = '#f85149'; return; }
+  if (!body.prompt.trim()) { status.textContent = 'prompt 不能为空'; status.style.color = '#f85149'; return; }
+  try {
+    const url = '/api/cron' + (id ? '/' + id : '') + tokenQS('?');
+    const res = await fetch(url, {
+      method: id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) { status.textContent = data.error || `HTTP ${res.status}`; status.style.color = '#f85149'; return; }
+    showToast(id ? '已更新定时任务' : '已创建定时任务');
+    closeCronModal();
+    loadCronTasks();
+  } catch (err) {
+    status.textContent = `失败：${err.message}`; status.style.color = '#f85149';
+  }
+}
+
+async function runCronTask(id) {
+  try {
+    const res = await fetch(`/api/cron/${id}/run` + tokenQS('?'), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) showToast(`运行失败：${data.error || res.status}`, true);
+    else showToast('已触发，正在新建会话执行');
+    loadCronTasks();
+  } catch (err) { showToast(`运行失败：${err.message}`, true); }
+}
+
+async function toggleCronTask(id, enabled) {
+  try {
+    const res = await fetch(`/api/cron/${id}` + tokenQS('?'), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) { const e = await res.json(); showToast(`Error: ${e.error}`, true); return; }
+    loadCronTasks();
+  } catch (err) { showToast(`Error: ${err.message}`, true); }
+}
+
+async function deleteCronTask(id) {
+  if (!(await showConfirm('删除这个定时任务？', { danger: true, okText: '删除' }))) return;
+  try {
+    const res = await fetch(`/api/cron/${id}` + tokenQS('?'), { method: 'DELETE' });
+    if (!res.ok) { const e = await res.json(); showToast(`Error: ${e.error}`, true); return; }
+    showToast('已删除');
+    loadCronTasks();
+  } catch (err) { showToast(`Error: ${err.message}`, true); }
+}
+
 /* ── QR Code ── */
 async function showQR() {
   const modal = document.getElementById('qr-modal');
@@ -2664,6 +2818,7 @@ focusSession = function(id) {
 loadDashboard();
 loadVoiceSettings();
 loadAsrSettings();
+loadCronTasks();
 loadPushDiagnostics();
 loadNotifySettings();
 loadApkInfo();
