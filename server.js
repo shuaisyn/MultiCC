@@ -3832,7 +3832,15 @@ app.get('/api/apk-info', (req, res) => {
   const apkPath = path.join(__dirname, 'public', 'multicc.apk');
   try {
     const stat = fs.statSync(apkPath);
-    res.json({ exists: true, mtime: stat.mtime.toISOString(), size: stat.size });
+    const info = { exists: true, mtime: stat.mtime.toISOString(), size: stat.size };
+    // Optional version sidecar written by scripts/publish-apk.sh — lets the
+    // updater show the real version instead of a generic "new version".
+    try {
+      const meta = JSON.parse(fs.readFileSync(apkPath + '.json', 'utf8'));
+      if (meta.versionName) info.versionName = meta.versionName;
+      if (meta.versionCode) info.versionCode = meta.versionCode;
+    } catch (_) {}
+    res.json(info);
   } catch {
     res.json({ exists: false });
   }
