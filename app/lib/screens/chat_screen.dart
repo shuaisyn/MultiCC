@@ -770,6 +770,56 @@ class _CwdBar extends StatelessWidget {
   }
 }
 
+/// Minimum gap (minutes) between two consecutive messages before a time
+/// separator is drawn between them.
+const int _timeSeparatorGapMinutes = 5;
+
+/// Human-friendly time label for a chat separator, relative to now:
+/// today → "HH:mm", yesterday → "昨天 HH:mm", within a week → "周X HH:mm",
+/// same year → "M月d日 HH:mm", otherwise "yyyy年M月d日 HH:mm".
+String formatChatTime(DateTime t) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(t.year, t.month, t.day);
+  final hm =
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  final diffDays = today.difference(day).inDays;
+  if (diffDays == 0) return hm;
+  if (diffDays == 1) return '昨天 $hm';
+  if (diffDays > 1 && diffDays < 7) {
+    const week = ['一', '二', '三', '四', '五', '六', '日'];
+    return '周${week[t.weekday - 1]} $hm';
+  }
+  if (t.year == now.year) return '${t.month}月${t.day}日 $hm';
+  return '${t.year}年${t.month}月${t.day}日 $hm';
+}
+
+/// Centered, pill-shaped time label inserted between distant messages.
+class _TimeSeparator extends StatelessWidget {
+  final DateTime time;
+  const _TimeSeparator({required this.time});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: const Color(0xFF14171c),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            formatChatTime(time),
+            style: const TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _MessageList extends StatefulWidget {
   final ScrollController scrollCtrl;
   const _MessageList({required this.scrollCtrl});
@@ -831,7 +881,22 @@ class _MessageListState extends State<_MessageList> {
           itemCount: messages.length + (showThinking ? 1 : 0),
           itemBuilder: (_, i) {
             if (i == messages.length) return const ThinkingIndicator();
-            return MessageBubble(message: messages[i]);
+            final msg = messages[i];
+            // WeChat-style time separator: show a centered time label only when
+            // this message is the first, or its gap from the previous message
+            // exceeds the threshold — so back-to-back turns stay uncluttered.
+            final prev = i > 0 ? messages[i - 1] : null;
+            final showTime = prev == null ||
+                msg.timestamp.difference(prev.timestamp).inMinutes.abs() >=
+                    _timeSeparatorGapMinutes;
+            if (!showTime) return MessageBubble(message: msg);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _TimeSeparator(time: msg.timestamp),
+                MessageBubble(message: msg),
+              ],
+            );
           },
         ),
         if (_userScrolled)
