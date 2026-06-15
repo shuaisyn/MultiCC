@@ -3384,14 +3384,6 @@ function sendWebhookNotification(payload) {
 
 // ── Server-side notification detection (for push notifications) ──
 const PUSH_ANSI_RE = /\x1b(?:\[[0-9;?]*[a-zA-Z~]|\][^\x07]*(?:\x07|\x1b\\)|[()][AB012]|.)/g;
-// "等待操作" — 需要用户做选择或确认（选 1/2/3、Y/n、Allow/Deny）
-const PUSH_WAITING_PATTERNS = [
-  /\[Y\/n\]/, /\[y\/N\]/, /\(y\/n\)/i, /\(yes\/no\)/i,
-  /Yes\s*\/\s*No/i,
-  /Allow\s*(once|always)/i, /Approve\??/i, /Deny/i,
-  /Do you want to proceed/i, /Do you want to/i, /Press Enter/i,
-  /^\s*[1-9]\.\s+\S/m, /^\s*[1-9]\)\s+\S/m,
-];
 const PUSH_IDLE_MS = 6000;
 const PUSH_MIN_CHARS = 80;
 const PUSH_COOLDOWN = 8000;
@@ -3401,13 +3393,6 @@ const pushMonitors = new Map();
 
 function pushStripAnsi(str) {
   return str.replace(PUSH_ANSI_RE, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-}
-
-function pushMatchesWaiting(text) {
-  for (const pat of PUSH_WAITING_PATTERNS) {
-    if (pat.test(text)) return true;
-  }
-  return false;
 }
 
 function initPushMonitor(sessionId) {
@@ -3431,12 +3416,68 @@ function cleanupPushMonitor(sessionId) {
   }
 }
 
+// Is there anyone who could receive a terminal notification right now? Avoids
+// spending aux-AI calls when nothing is watching: a push channel, the
+// terminal's own WS clients, or the directory's workspace board.
+function hasNotifyConsumer(sessionId) {
+  if (pushSubscriptions.size > 0 || BARK_URL || WEBHOOK_URL) return true;
+  if ((sessions.get(sessionId)?.clients?.size || 0) > 0) return true;
+  const dirId = persistedSessions.get(sessionId)?.dirId;
+  if (dirId && (workspaceClients.get(dirId)?.size || 0) > 0) return true;
+  return false;
+}
+
+// Push a server-originated message to a terminal session's live WS clients.
+function terminalBroadcast(sessionId, payload) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  const json = JSON.stringify(payload);
+  for (const client of session.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(json); } catch (_) {}
+    }
+  }
+}
+
+// Output went idle on a terminal session — the terminal equivalent of an SSE
+// pause. Let the aux-AI judge done-vs-waiting from the output tail (single
+// source of truth, same as chat), then fan the verdict out to every surface:
+// push channels, the terminal's own WS clients, and the workspace board.
+function classifyTerminalIdle(sessionId, tail) {
+  const mon = pushMonitors.get(sessionId);
+  if (mon) {
+    if (mon.classifyPending) return; // one classification already in flight
+    mon.classifyPending = true;
+  }
+  auxQueue.enqueue({
+    type: 'intent_classify',
+    prompt: `你是一个意图分类器。下面是一个命令行 AI 编码助手(Claude Code / Codex)终端会话的最近输出。判断它当前状态，只回复一个字母：
+C — 任务已完成或回到空闲提示符，不需要用户操作
+W — 正在等待用户回复、确认或选择（如 y/n、Allow/Deny、编号选项、问题待答）
+
+终端输出（尾部）：
+${tail}`,
+    meta: { sessionId },
+  }).then(result => {
+    if (mon) mon.classifyPending = false;
+    if (result.cancelled) return;
+    const state = result.text.trim().toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+    const msg = state === 'waiting' ? '等待操作' : '任务已完成';
+    triggerPush(sessionId, state, msg);
+    terminalBroadcast(sessionId, { type: 'notify', state, message: msg });
+    const dirId = persistedSessions.get(sessionId)?.dirId;
+    if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId, state, message: msg });
+    console.log(`[multicc/aux] Terminal classify for ${sessionId}: ${state}`);
+  }).catch(() => { if (mon) mon.classifyPending = false; });
+}
+
 /**
- * Called from ptyProcess.onData to detect notification patterns server-side.
- * Triggers web push when a session completes or waits for user action.
+ * Called from ptyProcess.onData. Tracks output and, once a terminal goes idle,
+ * asks the aux-AI whether the task finished or is waiting for the user, then
+ * notifies all surfaces. No regex judging here — the AI is the single judge.
  */
 function pushOnOutput(sessionId, rawData) {
-  if (pushSubscriptions.size === 0 && !BARK_URL && !WEBHOOK_URL) return; // no channels configured
+  if (!hasNotifyConsumer(sessionId)) return; // nobody to notify
 
   const mon = initPushMonitor(sessionId);
   const text = pushStripAnsi(rawData);
@@ -3450,22 +3491,11 @@ function pushOnOutput(sessionId, rawData) {
     if (mon.state === 'idle') mon.state = 'active';
   }
 
-  // Immediate pattern check
-  if (mon.state === 'active' && pushMatchesWaiting(text)) {
-    mon.state = 'waiting';
-    triggerPush(sessionId, 'waiting', '等待操作');
-  }
-
-  // Idle timer
+  // Judge only after output stops for PUSH_IDLE_MS (the "stream paused" signal).
   if (mon.idleTimer) clearTimeout(mon.idleTimer);
   mon.idleTimer = setTimeout(() => {
     if (mon.state === 'active' && mon.chars >= PUSH_MIN_CHARS) {
-      const tail = mon.recentText.slice(-2000);
-      if (pushMatchesWaiting(tail)) {
-        triggerPush(sessionId, 'waiting', '等待操作');
-      } else {
-        triggerPush(sessionId, 'completed', '任务已完成');
-      }
+      classifyTerminalIdle(sessionId, mon.recentText.slice(-2000));
     }
     mon.state = 'idle';
     mon.chars = 0;

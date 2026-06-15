@@ -115,46 +115,27 @@ function startMonitor(sessionId) {
   ws.onmessage = ({ data }) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type !== 'output') return;
-      // Skip replay buffer (first 5s after connect)
-      if (Date.now() - mon.connectedAt < 5000) return;
-
-      const text = stripAnsi(msg.data);
-      const printable = text.replace(/\s+/g, '');
-
-      mon.recentText += text;
-      if (mon.recentText.length > 3000) mon.recentText = mon.recentText.slice(-2000);
-
-      if (printable.length > 0) {
-        mon.chars += printable.length;
-        if (mon.state === 'idle') {
-          mon.state = 'active';
-          // New activity: clear old status and reset alert so next event can fire
+      // Completion/waiting is no longer judged from raw output here. The server
+      // runs the aux-AI on idle and pushes a `notify` verdict (single judge,
+      // consistent with chat). We just render it.
+      if (msg.type === 'notify') {
+        const waiting = msg.state === 'waiting';
+        alertSession(
+          sessionId,
+          waiting ? 'waiting' : 'completed',
+          msg.message || (waiting ? '等待操作' : '任务已完成'),
+        );
+        return;
+      }
+      // New output → release the alert latch so the next verdict can fire again.
+      if (msg.type === 'output') {
+        if (Date.now() - mon.connectedAt < 5000) return; // skip replay buffer
+        const printable = stripAnsi(msg.data).replace(/\s+/g, '');
+        if (printable.length > 0 && _alertedSessions.has(sessionId)) {
           clearSessionStatus(sessionId);
           _alertedSessions.delete(sessionId);
         }
       }
-
-      // Only judge status AFTER output stops for NOTIFY_IDLE_MS
-      if (mon.idleTimer) clearTimeout(mon.idleTimer);
-      mon.idleTimer = setTimeout(() => {
-        if (mon.state === 'active' && mon.chars >= NOTIFY_MIN_CHARS) {
-          const tail = mon.recentText.slice(-2000);
-          // Still working (spinner/thinking) — don't judge yet, wait longer
-          if (isInProgress(tail)) {
-            mon.idleTimer = setTimeout(() => mon.idleTimer && (mon.state = 'idle', mon.chars = 0, mon.recentText = ''), NOTIFY_IDLE_MS);
-            return;
-          }
-          if (matchesWaiting(tail)) {
-            alertSession(sessionId, 'waiting', '等待操作');
-          } else {
-            alertSession(sessionId, 'completed', '任务已完成');
-          }
-        }
-        mon.state = 'idle';
-        mon.chars = 0;
-        mon.recentText = '';
-      }, NOTIFY_IDLE_MS);
     } catch (_) {}
   };
 
