@@ -8,6 +8,7 @@ node_modules/
 # Local runtime state
 sessions.json
 directories.json
+scheduled_tasks.json
 chat_history/
 events/
 logs/
