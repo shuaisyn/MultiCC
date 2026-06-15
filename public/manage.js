@@ -555,6 +555,7 @@ function renderSessionRow(s) {
       <div class="sess-id" title="${escapeHtml(s.id)}">${escapeHtml(displayName)}</div>
       <div class="sess-label">${escapeHtml(subtitle)}</div>
       <div class="sess-file" id="sess-file-${escapeHtml(s.id)}" style="font-size:11px;color:#d29922;font-family:monospace;${wb && wb.currentFile ? '' : 'display:none'}">${wb && wb.currentFile ? '✎ ' + escapeHtml(wb.currentFile.split('/').pop()) : ''}</div>
+      ${(() => { const sm = _workspaceSummaries.get(s.id); const t = sm && sm.summary ? sm.summary : ''; return `<div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${t ? '最近任务：' + escapeHtml(t) : ''}" style="${t ? '' : 'display:none'}">${t ? '🗒 ' + escapeHtml(t) : ''}</div>`; })()}
       <div class="sess-row-bottom">
         <span class="sess-label">${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
         <span class="sess-actions">
@@ -1358,6 +1359,7 @@ const _workspaceWs = new Map();        // dirId → WebSocket
 const _workspaceStatus = new Map();    // sessionId → { status, currentFile, lastActivity, mergeState }
 const _workspaceEvents = new Map();    // dirId → event[]
 const _workspaceNotes = new Map();     // sessionId → pending note count
+const _workspaceSummaries = new Map(); // sessionId → { summary, ts } — 最近任务 one-liner
 
 function wbStatusInfo(status) {
   switch (status) {
@@ -1383,9 +1385,11 @@ function connectWorkspace(dirId) {
       for (const s of msg.sessions) {
         _workspaceStatus.set(s.id, { status: s.status, currentFile: s.currentFile, lastActivity: s.lastActivity, mergeState: s.mergeState || null });
         _workspaceNotes.set(s.id, s.pendingNotes || 0);
+        if (s.summary) _workspaceSummaries.set(s.id, { summary: s.summary, ts: s.summaryTs || 0 });
         updateSessionStatusDom(s.id);
         updateSessionNotesDom(s.id);
         updateSessionMergeDom(s.id);
+        updateSessionSummaryDom(s.id);
       }
       _workspaceEvents.set(dirId, msg.events || []);
       updateEventTimelineDom(dirId);
@@ -1406,6 +1410,9 @@ function connectWorkspace(dirId) {
     } else if (msg.type === 'note_pending') {
       _workspaceNotes.set(msg.sessionId, msg.count || 0);
       updateSessionNotesDom(msg.sessionId);
+    } else if (msg.type === 'summary') {
+      _workspaceSummaries.set(msg.sessionId, { summary: msg.summary, ts: msg.ts || 0 });
+      updateSessionSummaryDom(msg.sessionId);
     }
   };
   ws.onclose = () => { if (_workspaceWs.get(dirId) === ws) _workspaceWs.delete(dirId); };
@@ -1478,6 +1485,16 @@ function toggleEventsBlock(btn, restCount) {
 function updateEventTimelineDom(dirId) {
   const el = document.getElementById(`wb-events-${dirId}`);
   if (el) el.outerHTML = renderEventTimeline(dirId);
+}
+
+function updateSessionSummaryDom(sessionId) {
+  const el = document.getElementById(`sess-summary-${sessionId}`);
+  if (!el) return;
+  const s = _workspaceSummaries.get(sessionId);
+  const text = s && s.summary ? s.summary : '';
+  el.textContent = text ? '🗒 ' + text : '';
+  el.title = text ? `最近任务：${text}` : '';
+  el.style.display = text ? '' : 'none';
 }
 
 function updateSessionNotesDom(sessionId) {

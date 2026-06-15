@@ -3453,9 +3453,11 @@ function classifyTerminalIdle(sessionId, tail) {
   }
   auxQueue.enqueue({
     type: 'intent_classify',
-    prompt: `你是一个意图分类器。下面是一个命令行 AI 编码助手(Claude Code / Codex)终端会话的最近输出。判断它当前状态，只回复一个字母：
-C — 任务已完成或回到空闲提示符，不需要用户操作
-W — 正在等待用户回复、确认或选择（如 y/n、Allow/Deny、编号选项、问题待答）
+    prompt: `你是一个意图分析器。下面是一个命令行 AI 编码助手(Claude Code / Codex)终端会话的最近输出。请严格输出两行：
+第1行：仅一个字母，表示当前状态——
+  C = 任务已完成或回到空闲提示符，不需要用户操作
+  W = 正在等待用户回复、确认或选择（如 y/n、Allow/Deny、编号选项、问题待答）
+第2行：用不超过 20 个汉字概括它最近在做的事（动词开头，如“修复登录页样式”），无法概括就留空。
 
 终端输出（尾部）：
 ${tail}`,
@@ -3463,13 +3465,14 @@ ${tail}`,
   }).then(result => {
     if (mon) mon.classifyPending = false;
     if (result.cancelled) return;
-    const state = result.text.trim().toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+    const { state, summary } = parseClassifyResult(result.text);
     const msg = state === 'waiting' ? '等待操作' : '任务已完成';
     triggerPush(sessionId, state, msg);
     terminalBroadcast(sessionId, { type: 'notify', state, message: msg });
     const dirId = persistedSessions.get(sessionId)?.dirId;
     if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId, state, message: msg });
-    console.log(`[multicc/aux] Terminal classify for ${sessionId}: ${state}`);
+    setSessionSummary(sessionId, summary);
+    console.log(`[multicc/aux] Terminal classify for ${sessionId}: ${state}${summary ? ` · ${summary}` : ''}`);
   }).catch(() => { if (mon) mon.classifyPending = false; });
 }
 
@@ -3939,6 +3942,29 @@ app.use('/api/wechat', wechatBridge.router);
 // status ∈ idle | thinking | editing | running | waiting
 const workspaceStatus = new Map();   // sessionId → { status, currentFile, lastActivity }
 const workspaceClients = new Map();  // dirId → Set<ws>
+const sessionSummaries = new Map();  // sessionId → { summary, ts } — aux-AI "最近任务" one-liner
+
+// Parse an aux-AI intent_classify reply: line 1 = state letter (C/W),
+// line 2 = optional short task summary. Tolerant of blank/extra lines.
+function parseClassifyResult(text) {
+  const lines = String(text || '').trim().split('\n').map(l => l.trim()).filter(Boolean);
+  const state = (lines[0] || '').toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+  let summary = lines.slice(1).join(' ').trim();
+  // Strip a leading bullet/label the model sometimes adds, and cap length.
+  summary = summary.replace(/^(第?2?行[:：]?|摘要[:：]?|总结[:：]?|[-*·]\s*)/, '').trim();
+  if (summary.length > 40) summary = summary.slice(0, 40);
+  return { state, summary };
+}
+
+// Store an aux-AI task summary for a session and push it to the workspace board.
+function setSessionSummary(sessionId, summary) {
+  if (!summary) return;
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || persisted.type === 'aux' || persisted.type === 'gateway') return;
+  const ts = Date.now();
+  sessionSummaries.set(sessionId, { summary, ts });
+  workspaceBroadcast(persisted.dirId, { type: 'summary', sessionId, summary, ts });
+}
 
 function workspaceBroadcast(dirId, payload) {
   const set = workspaceClients.get(dirId);
@@ -3977,6 +4003,7 @@ function workspaceSnapshot(dirId) {
     const st = workspaceStatus.get(s.id) || { status: 'idle', currentFile: null, lastActivity: 0 };
     const active = sessions.get(s.id);
     const chat = chatSessions.get(s.id);
+    const sum = sessionSummaries.get(s.id) || null;
     out.push({
       id: s.id, label: s.label || null, cli: s.cli || 'claude', kind: s.kind || 'terminal',
       branch: s.branch || null, invalid: invalidSessions.get(s.id) || null,
@@ -3984,6 +4011,7 @@ function workspaceSnapshot(dirId) {
       clients: s.kind === 'chat' ? (chat?.clients.size || 0) : (active?.clients.size || 0),
       pendingNotes: pendingNotesFor(s.id).length,
       mergeState: gitWorktreeMergeState(directories.get(s.dirId), s),
+      summary: sum?.summary || null, summaryTs: sum?.ts || null,
     });
   }
   return out;
@@ -4112,9 +4140,9 @@ function scheduleIntentClassify(cs, sessionName) {
     auxQueue.enqueue({
       id: taskId,
       type: 'intent_classify',
-      prompt: `你是一个意图分类器。判断以下 AI 助手回复的结尾状态，只回复一个字母：
-C — 任务已完成，不需要用户操作
-W — 正在等待用户回复或决策
+      prompt: `你是一个意图分析器。判断以下 AI 助手回复的结尾状态。请严格输出两行：
+第1行：仅一个字母——C = 任务已完成，不需要用户操作；W = 正在等待用户回复或决策
+第2行：用不超过 20 个汉字概括它最近在做的事（动词开头，如“修复登录页样式”），无法概括就留空。
 
 回复内容：
 ${tail}`,
@@ -4122,7 +4150,7 @@ ${tail}`,
     }).then(result => {
       cs.pendingClassifyTaskId = null;
       if (result.cancelled) return;
-      const state = result.text.trim().toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+      const { state, summary } = parseClassifyResult(result.text);
       const msg = state === 'waiting' ? '等待操作' : '任务已完成';
       // This aux-AI verdict is the single source of truth for "is the turn done
       // or waiting?". Fan it out to every channel from here so nothing re-judges:
@@ -4139,11 +4167,12 @@ ${tail}`,
       if (dirId) {
         workspaceBroadcast(dirId, { type: 'notify', sessionId, state, message: msg });
       }
+      setSessionSummary(sessionId, summary);
       // Reflect on the status board — but only if no new turn has started since.
       if (!cs.isStreaming) {
         setSessionStatus(sessionName, { status: state === 'waiting' ? 'waiting' : 'idle' });
       }
-      console.log(`[multicc/aux] Intent classify for ${sessionName}: ${state}`);
+      console.log(`[multicc/aux] Intent classify for ${sessionName}: ${state}${summary ? ` · ${summary}` : ''}`);
     }).catch(() => {
       cs.pendingClassifyTaskId = null;
     });
