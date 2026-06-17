@@ -31,6 +31,8 @@ const macosPower = require('./macos-power');
 const gitPush = require('./git-push');
 
 const crypto = require('crypto');
+const bus = require('./src/bus');
+const services = require('./src/services');
 const app = express();
 
 // ── Access token authentication (cookie-based login) ──
@@ -1200,6 +1202,8 @@ function handleGatewayTurnComplete(finalText) {
   const summary = parsed.message.length > 80 ? parsed.message.slice(0, 80) + '…' : parsed.message;
   pushToGateway(`📨 准备把任务投给 ${label}：\n「${summary}」\n回复「确认」执行，回复「取消」放弃。`);
 }
+// Gateway domain owns this handler; chat emits after a gateway session's own turn.
+bus.on('chat:gateway-turn-complete', handleGatewayTurnComplete);
 
 // Intercept gateway inbound messages for confirm/cancel of a pending dispatch.
 // Returns true if the message was consumed (caller should NOT run the LLM).
@@ -1257,7 +1261,9 @@ async function dispatchToSession(targetId, message) {
 
   const dispatchId = crypto.randomUUID();
   dispatchRuns.set(dispatchId, { targetId, chatSessionId: chatId, createdAt: Date.now() });
-  const ok = runChatTurn(chatId, message, { originDispatchId: dispatchId });
+  // Registry call (not a bus event): we need runChatTurn's boolean back to
+  // detect an immediate launch failure. Avoids a static require of the chat domain.
+  const ok = services.call('chat.runTurn', chatId, message, { originDispatchId: dispatchId });
   if (ok === false) { dispatchRuns.delete(dispatchId); return { ok: false, error: `启动 ${targetId} 回合失败` }; }
   return { ok: true, chatId };
 }
@@ -1270,6 +1276,8 @@ function finalizeDispatch(dispatchId, sessionName, finalText) {
   const text = (finalText || '').trim() || '（本次运行没有产生文本输出）';
   pushToGateway(`【${targetId} 回复】\n${text}`);
 }
+// Gateway domain owns this handler; chat emits when a dispatched turn finishes.
+bus.on('chat:dispatch-complete', finalizeDispatch);
 
 // ── Session management ──
 // { id, tmuxName, ttyPath, outputStream, fifoPath, buffer: string[], clients: Set<ws>, createdAt, lastActivity, cwd, exitCheckTimer }
@@ -1564,166 +1572,13 @@ app.get('/api/sessions', (req, res) => {
   res.json(list);
 });
 
-// ── Agent resources: installed skills + Claude Code history ──
-const CLAUDE_HOME = path.join(os.homedir(), '.claude');
-const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
-const SKILL_FILE = 'SKILL.md';
-
-function readFileSlice(filePath, start, length) {
-  const fd = fs.openSync(filePath, 'r');
-  try {
-    const buffer = Buffer.alloc(length);
-    const read = fs.readSync(fd, buffer, 0, length, start);
-    return buffer.subarray(0, read).toString('utf8');
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function skillMetadata(filePath, provider, source) {
-  let text = '';
-  try { text = readFileSlice(filePath, 0, 64 * 1024); } catch (_) {}
-  const frontmatter = text.startsWith('---') ? (text.split(/^---\s*$/m)[1] || '') : '';
-  const title = (frontmatter.match(/^name:\s*(.+)$/m)?.[1] || path.basename(path.dirname(filePath)))
-    .trim().replace(/^['"]|['"]$/g, '');
-  const description = (frontmatter.match(/^description:\s*(.+)$/m)?.[1] || '')
-    .trim().replace(/^['"]|['"]$/g, '');
-  let stat = null;
-  try { stat = fs.statSync(filePath); } catch (_) {}
-  return {
-    provider, source, name: title, description,
-    path: filePath,
-    updatedAt: stat?.mtime?.toISOString() || null,
-  };
-}
-
-function scanSkillRoot(root, provider, source, maxDepth, out, seen) {
-  if (!root || !fs.existsSync(root)) return;
-  const walk = (dir, depth) => {
-    if (depth > maxDepth) return;
-    let entries = [];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isFile() && entry.name === SKILL_FILE) {
-        let key = full;
-        try { key = fs.realpathSync(full); } catch (_) {}
-        if (!seen.has(key)) {
-          seen.add(key);
-          out.push(skillMetadata(full, provider, source));
-        }
-      } else if (entry.isDirectory() && depth < maxDepth && entry.name !== 'node_modules' && entry.name !== '.git') {
-        walk(full, depth + 1);
-      }
-    }
-  };
-  walk(root, 0);
-}
-
-function listInstalledSkills() {
-  const skills = [];
-  const seen = new Set();
-  const home = os.homedir();
-  scanSkillRoot(path.join(home, '.claude', 'skills'), 'claude', 'global', 3, skills, seen);
-  scanSkillRoot(path.join(home, '.claude', 'plugins', 'cache'), 'claude', 'plugin', 8, skills, seen);
-  scanSkillRoot(path.join(home, '.codex', 'skills'), 'codex', 'global', 4, skills, seen);
-  scanSkillRoot(path.join(home, '.agents', 'skills'), 'codex', 'shared', 3, skills, seen);
-
-  const projectRoots = new Set();
-  projectRoots.add(process.cwd());
-  projectRoots.add(__dirname);
-  for (const d of directories.values()) if (d.path) projectRoots.add(d.path);
-  for (const s of persistedSessions.values()) if (s.worktreePath) projectRoots.add(s.worktreePath);
-  for (const root of projectRoots) {
-    scanSkillRoot(path.join(root, '.claude', 'skills'), 'claude', 'project', 3, skills, seen);
-    scanSkillRoot(path.join(root, '.codex', 'skills'), 'codex', 'project', 3, skills, seen);
-    scanSkillRoot(path.join(root, '.agents', 'skills'), 'codex', 'project', 3, skills, seen);
-  }
-
-  return skills.sort((a, b) =>
-    a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
-}
-
-function claudeLinkedSessionIds() {
-  return new Set([...persistedSessions.values()]
-    .filter(s => (s.cli || 'claude') === 'claude' && s.cliSessionId)
-    .map(s => s.cliSessionId));
-}
-
-function claudeSessionSummary(filePath, linkedIds) {
-  const stat = fs.statSync(filePath);
-  const id = path.basename(filePath, '.jsonl');
-  const head = readFileSlice(filePath, 0, Math.min(stat.size, 192 * 1024));
-  const tailStart = Math.max(0, stat.size - 128 * 1024);
-  const tail = readFileSlice(filePath, tailStart, Math.min(stat.size, 128 * 1024));
-  let cwd = '';
-  let title = '';
-  let preview = '';
-  let lastPrompt = '';
-  for (const line of `${head}\n${tail}`.split('\n')) {
-    if (!line.startsWith('{')) continue;
-    let item;
-    try { item = JSON.parse(line); } catch (_) { continue; }
-    if (!cwd && item.cwd) cwd = item.cwd;
-    if (item.type === 'ai-title' && item.aiTitle) title = item.aiTitle;
-    if (item.type === 'last-prompt' && item.lastPrompt) lastPrompt = item.lastPrompt;
-    if (!preview && item.type === 'user') {
-      const content = item.message?.content;
-      preview = typeof content === 'string' ? content : '';
-    }
-  }
-  return {
-    id, project: path.basename(path.dirname(filePath)), cwd,
-    title: title || lastPrompt || preview.slice(0, 160) || '(untitled)',
-    preview: lastPrompt || preview.slice(0, 240),
-    size: stat.size,
-    createdAt: stat.birthtime.toISOString(),
-    updatedAt: stat.mtime.toISOString(),
-    linked: linkedIds.has(id),
-  };
-}
-
-function listClaudeHistory() {
-  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
-  const linkedIds = claudeLinkedSessionIds();
-  const list = [];
-  let projects = [];
-  try { projects = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true }); } catch (_) { return []; }
-  for (const project of projects) {
-    if (!project.isDirectory()) continue;
-    const projectDir = path.join(CLAUDE_PROJECTS_DIR, project.name);
-    let files = [];
-    try { files = fs.readdirSync(projectDir, { withFileTypes: true }); } catch (_) { continue; }
-    for (const file of files) {
-      if (!file.isFile() || !/^[0-9a-f-]+\.jsonl$/i.test(file.name)) continue;
-      try { list.push(claudeSessionSummary(path.join(projectDir, file.name), linkedIds)); } catch (_) {}
-    }
-  }
-  return list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-}
-
-function claudeHistoryFile(project, id) {
-  if (!/^[^/\\]+$/.test(project) || !/^[0-9a-f-]+$/i.test(id)) return null;
-  const candidate = path.resolve(CLAUDE_PROJECTS_DIR, project, `${id}.jsonl`);
-  const root = path.resolve(CLAUDE_PROJECTS_DIR) + path.sep;
-  return candidate.startsWith(root) ? candidate : null;
-}
-
-function removeClaudeHistorySession(project, id) {
-  const filePath = claudeHistoryFile(project, id);
-  if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'Claude session not found' };
-  if (claudeLinkedSessionIds().has(id)) return { ok: false, error: 'Session is linked to MultiCC and is protected' };
-  const stat = fs.statSync(filePath);
-  fs.unlinkSync(filePath);
-  for (const extra of [
-    path.join(path.dirname(filePath), id),
-    path.join(CLAUDE_HOME, 'tasks', id),
-    path.join(CLAUDE_HOME, 'session-env', id),
-  ]) {
-    try { fs.rmSync(extra, { recursive: true, force: true }); } catch (_) {}
-  }
-  return { ok: true, freed: stat.size };
-}
+// ── Agent resources (extracted to src/skills.js) ──
+// Reads core state (directories, persistedSessions) injected once via init().
+const skillsModule = require('./src/skills');
+skillsModule.init({ directories, persistedSessions });
+const {
+  listInstalledSkills, listClaudeHistory, removeClaudeHistorySession,
+} = skillsModule;
 
 app.get('/api/agent-resources/skills', (req, res) => {
   const skills = listInstalledSkills();
@@ -2527,260 +2382,15 @@ app.get('/api/download', (req, res) => {
   }
 });
 
-// ── Voice Refine Worker (global, starts with server) ──
-const VOICE_EXAMPLES_FILE = path.join(__dirname, 'voice_examples.json');
-const WHISPER_VOCAB_FILE = path.join(__dirname, 'whisper_vocab.json');
 
-function loadVoiceExamples() {
-  try {
-    if (fs.existsSync(VOICE_EXAMPLES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8'));
-      return Array.isArray(data) ? data.slice(-5) : [];
-    }
-  } catch (_) {}
-  return [];
-}
-
-function appendVoiceExample(entry) {
-  let data = [];
-  try {
-    if (fs.existsSync(VOICE_EXAMPLES_FILE)) {
-      data = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8'));
-      if (!Array.isArray(data)) data = [];
-    }
-  } catch (_) {}
-  data.push(entry);
-  if (data.length > 50) data = data.slice(-50);
-  try {
-    fs.writeFileSync(VOICE_EXAMPLES_FILE, JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.error('[multicc] Failed to write voice_examples.json:', e.message);
-  }
-}
-
-// ── Whisper vocabulary (user-corrected terms) ──
-function loadWhisperVocab() {
-  try {
-    if (fs.existsSync(WHISPER_VOCAB_FILE)) {
-      const data = JSON.parse(fs.readFileSync(WHISPER_VOCAB_FILE, 'utf8'));
-      return Array.isArray(data) ? data : [];
-    }
-  } catch (_) {}
-  return [];
-}
-
-function saveWhisperVocab(vocab) {
-  try {
-    fs.writeFileSync(WHISPER_VOCAB_FILE, JSON.stringify(vocab, null, 2));
-  } catch (e) {
-    console.error('[multicc] Failed to write whisper_vocab.json:', e.message);
-  }
-}
-
-/**
- * Extract correction terms by diffing raw STT output against user's final edit.
- * Segments text into tokens, finds words the user replaced/added.
- * Returns an array of { wrong, correct } pairs.
- */
-function extractCorrections(raw, userFinal) {
-  if (!raw || !userFinal || raw === userFinal) return [];
-
-  // Tokenize: split into Chinese chars / English words / mixed tokens
-  const tokenize = s => s.match(/[a-zA-Z][a-zA-Z0-9_./-]*/g) || [];
-
-  const rawTokens = new Set(tokenize(raw).map(t => t.toLowerCase()));
-  const finalTokens = tokenize(userFinal);
-
-  const corrections = [];
-  for (const token of finalTokens) {
-    // Token appears in userFinal but NOT in raw → user corrected something to this
-    if (token.length > 1 && !rawTokens.has(token.toLowerCase())) {
-      corrections.push(token);
-    }
-  }
-  return corrections;
-}
-
-/**
- * Merge new correction terms into whisper_vocab.json (deduplicated).
- * Each entry: { term, count, lastSeen }
- */
-function mergeWhisperVocab(newTerms) {
-  if (!newTerms || newTerms.length === 0) return;
-  const vocab = loadWhisperVocab();
-  const termMap = new Map(vocab.map(v => [v.term.toLowerCase(), v]));
-
-  for (const term of newTerms) {
-    const key = term.toLowerCase();
-    if (termMap.has(key)) {
-      const existing = termMap.get(key);
-      existing.count = (existing.count || 1) + 1;
-      existing.lastSeen = new Date().toISOString();
-      // Keep the casing from the latest correction
-      existing.term = term;
-    } else {
-      termMap.set(key, { term, count: 1, lastSeen: new Date().toISOString() });
-    }
-  }
-
-  // Sort by count desc, keep top 100
-  const sorted = [...termMap.values()].sort((a, b) => b.count - a.count).slice(0, 100);
-  saveWhisperVocab(sorted);
-  console.log(`[multicc/stt] Whisper vocab updated: ${sorted.length} terms, added: ${newTerms.join(', ')}`);
-}
-
-// ── Backfill: seed whisper_vocab.json from existing voice_examples on first run ──
-(function backfillWhisperVocab() {
-  try {
-    if (fs.existsSync(WHISPER_VOCAB_FILE)) return; // already initialized
-    if (!fs.existsSync(VOICE_EXAMPLES_FILE)) return;
-    const examples = JSON.parse(fs.readFileSync(VOICE_EXAMPLES_FILE, 'utf8'));
-    if (!Array.isArray(examples)) return;
-    const allTerms = [];
-    for (const ex of examples) {
-      const corrections = extractCorrections(ex.raw, ex.userFinal);
-      allTerms.push(...corrections);
-    }
-    if (allTerms.length > 0) {
-      mergeWhisperVocab(allTerms);
-      console.log(`[multicc/stt] Backfilled whisper_vocab.json from ${examples.length} voice examples`);
-    }
-  } catch (e) {
-    console.error('[multicc/stt] Backfill error:', e.message);
-  }
-})();
-
-// ── OpenRouter API configuration for voice refinement ──
-let OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-let OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001';
-let OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-
-// ── Whisper STT configuration ──
-let WHISPER_API_KEY = process.env.WHISPER_API_KEY || '';
-let WHISPER_BASE_URL = process.env.WHISPER_BASE_URL || 'https://openrouter.ai/api/v1';
-let WHISPER_MODEL = process.env.WHISPER_MODEL || 'whisper-large-v3-turbo';
-let WHISPER_LANGUAGE = process.env.WHISPER_LANGUAGE || 'zh';
-let WHISPER_PROMPT = process.env.WHISPER_PROMPT || '';
-
-/**
- * Build a prompt for Whisper STT to improve recognition of technical terms.
- * Sources (in order):
- *   1. WHISPER_PROMPT — user-configured static terms (from settings / .env)
- *   2. whisper_vocab.json — auto-accumulated from user corrections (feedback)
- * Whisper prompt limit is ~224 tokens, so we keep it concise.
- */
-function buildWhisperPrompt() {
-  const parts = [];
-
-  // 1. User-configured static prompt (highest priority)
-  if (WHISPER_PROMPT) parts.push(WHISPER_PROMPT.trim());
-
-  // 2. Load accumulated vocabulary from user corrections
-  try {
-    const vocab = loadWhisperVocab();
-    if (vocab.length > 0) {
-      // Already sorted by count desc in mergeWhisperVocab; take top 40
-      const terms = vocab.slice(0, 40).map(v => v.term);
-      parts.push(terms.join(', '));
-    }
-  } catch (_) {}
-
-  const prompt = parts.join('. ');
-  // Whisper prompt is limited to ~224 tokens; truncate to ~500 chars as safety margin
-  return prompt.length > 500 ? prompt.slice(0, 500) : prompt;
-}
-
-/**
- * Call OpenRouter API with streaming for voice refinement.
- * Replaces the old CLI spawn approach for much lower latency.
- * Supports concurrent requests (no sequential queue needed).
- */
-async function callVoiceAPI(prompt, { reqId, onStart, onFirstToken, onChunk, onDone, onError }) {
-  if (typeof onStart === 'function') onStart();
-
-  if (!OPENROUTER_API_KEY) {
-    onError('OPENROUTER_API_KEY 环境变量未设置');
-    return;
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 60000);
-
-  try {
-    const apiStart = Date.now();
-    console.log(`[multicc/voice][${reqId}] Sending request to OpenRouter (model: ${OPENROUTER_MODEL})`);
-    const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        stream: true,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`OpenRouter API ${response.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let firstTokenSent = false;
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) continue;
-          const data = trimmed.slice(6);
-          if (data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const content = parsed.choices?.[0]?.delta?.content;
-            if (content) {
-              if (!firstTokenSent) {
-                firstTokenSent = true;
-                if (typeof onFirstToken === 'function') onFirstToken(Date.now() - apiStart);
-              }
-              onChunk(content);
-            }
-          } catch (_) { /* skip non-JSON lines */ }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    clearTimeout(timeout);
-    onDone();
-  } catch (err) {
-    clearTimeout(timeout);
-    if (err.name === 'AbortError') {
-      onChunk('[超时：AI处理超过60秒，已中止]');
-      onDone();
-    } else {
-      onError(err.message);
-    }
-  }
-}
-
-console.log(`[multicc/voice] Voice API initialized (OpenRouter, model: ${OPENROUTER_MODEL})`);
+// ── Voice domain (extracted to src/voice.js) ──
+// Functions are safe to destructure (never reassigned); config is read through
+// `voice.cfg.X` so hot-reload via the settings route stays visible — see src/voice.js.
+const voice = require('./src/voice');
+const {
+  loadVoiceExamples, appendVoiceExample, loadWhisperVocab, saveWhisperVocab,
+  extractCorrections, mergeWhisperVocab, buildWhisperPrompt, callVoiceAPI,
+} = voice;
 
 // ── File upload for chat mode ──
 app.post('/api/upload', upload.single('file'), (req, res) => {
@@ -2915,24 +2525,24 @@ app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: '未收到音频文件' });
   }
 
-  const apiKey = WHISPER_API_KEY || OPENROUTER_API_KEY;
+  const apiKey = voice.cfg.WHISPER_API_KEY || voice.cfg.OPENROUTER_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: 'WHISPER_API_KEY 或 OPENROUTER_API_KEY 未设置' });
   }
 
   console.log(`[multicc/stt][${reqId}] File: ${req.file.originalname}, size: ${req.file.size}, mime: ${req.file.mimetype}`);
-  console.log(`[multicc/stt][${reqId}] Forwarding to ${WHISPER_BASE_URL}/audio/transcriptions (model: ${WHISPER_MODEL})`);
+  console.log(`[multicc/stt][${reqId}] Forwarding to ${voice.cfg.WHISPER_BASE_URL}/audio/transcriptions (model: ${voice.cfg.WHISPER_MODEL})`);
 
   const t0 = Date.now();
   try {
     const formData = new FormData();
     const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
     formData.append('file', blob, req.file.originalname || 'audio.webm');
-    formData.append('model', WHISPER_MODEL);
+    formData.append('model', voice.cfg.WHISPER_MODEL);
 
     // Add language hint to skip auto-detection
-    if (WHISPER_LANGUAGE) {
-      formData.append('language', WHISPER_LANGUAGE);
+    if (voice.cfg.WHISPER_LANGUAGE) {
+      formData.append('language', voice.cfg.WHISPER_LANGUAGE);
     }
 
     // Add prompt to guide vocabulary and style recognition
@@ -2942,7 +2552,7 @@ app.post('/api/voice/stt', upload.single('file'), async (req, res) => {
       console.log(`[multicc/stt][${reqId}] Whisper prompt (${whisperPrompt.length} chars): ${whisperPrompt.slice(0, 120)}...`);
     }
 
-    const response = await fetch(`${WHISPER_BASE_URL}/audio/transcriptions`, {
+    const response = await fetch(`${voice.cfg.WHISPER_BASE_URL}/audio/transcriptions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -3059,16 +2669,10 @@ app.post('/api/settings/voice', (req, res) => {
   voiceAsr.applyConfig(updates);
   // Update in-memory env + module-level constants
   for (const [k, v] of Object.entries(updates)) process.env[k] = v;
-  if (updates.OPENROUTER_API_KEY) OPENROUTER_API_KEY = updates.OPENROUTER_API_KEY;
-  if (updates.OPENROUTER_MODEL) OPENROUTER_MODEL = updates.OPENROUTER_MODEL;
-  if (updates.OPENROUTER_BASE_URL) OPENROUTER_BASE_URL = updates.OPENROUTER_BASE_URL;
-  if (updates.WHISPER_API_KEY) WHISPER_API_KEY = updates.WHISPER_API_KEY;
-  if (updates.WHISPER_MODEL) WHISPER_MODEL = updates.WHISPER_MODEL;
-  if (updates.WHISPER_BASE_URL) WHISPER_BASE_URL = updates.WHISPER_BASE_URL;
-  if (updates.WHISPER_LANGUAGE) WHISPER_LANGUAGE = updates.WHISPER_LANGUAGE;
-  if (updates.WHISPER_PROMPT !== undefined) WHISPER_PROMPT = updates.WHISPER_PROMPT;
-  console.log(`[multicc/voice] Settings updated: model=${OPENROUTER_MODEL}, baseUrl=${OPENROUTER_BASE_URL}, key=${OPENROUTER_API_KEY ? 'set' : 'empty'}`);
-  console.log(`[multicc/stt] Settings updated: model=${WHISPER_MODEL}, baseUrl=${WHISPER_BASE_URL}, key=${WHISPER_API_KEY ? 'set' : 'empty'}`);
+  // Hot-reload the voice module's in-memory config (was: reassigning module-level lets).
+  voice.applyEnvUpdates(updates);
+  console.log(`[multicc/voice] Settings updated: model=${voice.cfg.OPENROUTER_MODEL}, baseUrl=${voice.cfg.OPENROUTER_BASE_URL}, key=${voice.cfg.OPENROUTER_API_KEY ? 'set' : 'empty'}`);
+  console.log(`[multicc/stt] Settings updated: model=${voice.cfg.WHISPER_MODEL}, baseUrl=${voice.cfg.WHISPER_BASE_URL}, key=${voice.cfg.WHISPER_API_KEY ? 'set' : 'empty'}`);
   res.json({ ok: true });
 });
 
@@ -4457,7 +4061,8 @@ function runChatTurn(sessionName, text, opts = {}) {
         }
         setSessionStatus(sessionName, { status: 'idle', currentFile: null });
         scheduleIntentClassify(cs, sessionName);
-        firePostTurnTriggers(sessionName, cs);
+        // Decoupled via the bus so chat doesn't depend on the triggers domain.
+        bus.emit('chat:turn-complete', sessionName, cs);
       }
       // Drop claude's `system init` — server already sent its own
       if (evt.type === 'system' && evt.subtype === 'init') return;
@@ -4579,10 +4184,11 @@ function runChatTurn(sessionName, text, opts = {}) {
         if (cs.originDispatchId) {
           const did = cs.originDispatchId;
           cs.originDispatchId = null;
-          finalizeDispatch(did, sessionName, finalText);
+          // Decoupled via the bus so chat doesn't depend on the gateway domain.
+          bus.emit('chat:dispatch-complete', did, sessionName, finalText);
         } else if (persisted.type === 'gateway') {
           // Gateway's own turn: detect a dispatch marker → stage pending confirmation.
-          handleGatewayTurnComplete(finalText);
+          bus.emit('chat:gateway-turn-complete', finalText);
         }
       } catch (e) {
         console.error('[multicc/dispatch] post-turn hook failed:', e.message);
@@ -4596,6 +4202,11 @@ function runChatTurn(sessionName, text, opts = {}) {
 
   return true;
 }
+// Chat domain owns runChatTurn; other domains reach it without require()-ing chat:
+//  • fire-and-forget (triggers): bus event 'chat:run'
+//  • need the return value (gateway): registry service 'chat.runTurn'
+bus.on('chat:run', (sessionName, text, opts) => runChatTurn(sessionName, text, opts));
+services.provide('chat.runTurn', runChatTurn);
 
 // ── Chat mode: stream-json WebSocket ──
 function handleChatWs(ws, req, urlObj) {
@@ -5069,7 +4680,8 @@ function fireTrigger(sessionId, trigger, reason) {
   const prompt = (trigger.prompt && trigger.prompt.trim()) || DEFAULT_TRIGGER_PROMPT;
   appendEvent(persisted.dirId, 'trigger_fired', `${triggerLabel(trigger)} · ${reason}`, sessionId);
   chatBroadcast(sessionId, { type: 'system', subtype: 'trigger_fired', trigger: triggerLabel(trigger), reason });
-  runChatTurn(sessionId, prompt, { originTrigger: true });
+  // Decoupled via the bus so triggers doesn't depend on the chat domain.
+  bus.emit('chat:run', sessionId, prompt, { originTrigger: true });
 }
 
 // Called after every chat turn's `result`. Fires post-turn triggers, but never
@@ -5082,6 +4694,8 @@ function firePostTurnTriggers(sessionId, cs) {
     if (t.enabled && t.type === 'post-turn') fireTrigger(sessionId, t, 'post-turn');
   }
 }
+// Triggers domain owns this handler; chat emits 'chat:turn-complete' after every turn.
+bus.on('chat:turn-complete', firePostTurnTriggers);
 
 function buildFileWatchers(sessionId, persisted) {
   const triggers = (persisted.triggers || []).filter((t) => t.enabled && t.type === 'file-change');
