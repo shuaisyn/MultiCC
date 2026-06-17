@@ -33,6 +33,7 @@ const gitPush = require('./git-push');
 const crypto = require('crypto');
 const bus = require('./src/bus');
 const services = require('./src/services');
+const state = require('./src/state');
 const app = express();
 
 // ── Access token authentication (cookie-based login) ──
@@ -1283,6 +1284,10 @@ bus.on('chat:dispatch-complete', finalizeDispatch);
 // { id, tmuxName, ttyPath, outputStream, fifoPath, buffer: string[], clients: Set<ws>, createdAt, lastActivity, cwd, exitCheckTimer }
 const sessions = new Map();
 
+// Publish the three core Maps to the shared state registry (same references).
+// Extracted modules read these via require('./src/state') — no bespoke injection.
+Object.assign(state, { sessions, directories, persistedSessions });
+
 function generateId() {
   let id = '';
   while (id.length < 8) id += Math.random().toString(36).slice(2);
@@ -1573,12 +1578,10 @@ app.get('/api/sessions', (req, res) => {
 });
 
 // ── Agent resources (extracted to src/skills.js) ──
-// Reads core state (directories, persistedSessions) injected once via init().
-const skillsModule = require('./src/skills');
-skillsModule.init({ directories, persistedSessions });
+// Reads core state (directories, persistedSessions) from the shared state registry.
 const {
   listInstalledSkills, listClaudeHistory, removeClaudeHistorySession,
-} = skillsModule;
+} = require('./src/skills');
 
 app.get('/api/agent-resources/skills', (req, res) => {
   const skills = listInstalledSkills();

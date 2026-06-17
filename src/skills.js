@@ -3,22 +3,17 @@
 // mutable state here.
 //
 // It needs read access to two core Maps (directories, persistedSessions) to know
-// which project roots to scan and which Claude sessions are linked. Those Maps
-// are mutated-but-never-reassigned, so holding the reference (injected once via
-// init()) is safe — kept inside `_deps` so we never shadow with a stale binding.
+// which project roots to scan and which Claude sessions are linked. It reads them
+// from the shared state registry at call time (never destructured), so the live
+// references are always current.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const state = require('./state');
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
 const SKILL_FILE = 'SKILL.md';
-
-const _deps = { directories: new Map(), persistedSessions: new Map() };
-function init({ directories, persistedSessions } = {}) {
-  if (directories) _deps.directories = directories;
-  if (persistedSessions) _deps.persistedSessions = persistedSessions;
-}
 
 function readFileSlice(filePath, start, length) {
   const fd = fs.openSync(filePath, 'r');
@@ -83,8 +78,8 @@ function listInstalledSkills() {
   const projectRoots = new Set();
   projectRoots.add(process.cwd());
   projectRoots.add(path.join(__dirname, '..'));
-  for (const d of _deps.directories.values()) if (d.path) projectRoots.add(d.path);
-  for (const s of _deps.persistedSessions.values()) if (s.worktreePath) projectRoots.add(s.worktreePath);
+  for (const d of state.directories.values()) if (d.path) projectRoots.add(d.path);
+  for (const s of state.persistedSessions.values()) if (s.worktreePath) projectRoots.add(s.worktreePath);
   for (const root of projectRoots) {
     scanSkillRoot(path.join(root, '.claude', 'skills'), 'claude', 'project', 3, skills, seen);
     scanSkillRoot(path.join(root, '.codex', 'skills'), 'codex', 'project', 3, skills, seen);
@@ -96,7 +91,7 @@ function listInstalledSkills() {
 }
 
 function claudeLinkedSessionIds() {
-  return new Set([..._deps.persistedSessions.values()]
+  return new Set([...state.persistedSessions.values()]
     .filter(s => (s.cli || 'claude') === 'claude' && s.cliSessionId)
     .map(s => s.cliSessionId));
 }
@@ -177,7 +172,6 @@ function removeClaudeHistorySession(project, id) {
 }
 
 module.exports = {
-  init,
   listInstalledSkills,
   listClaudeHistory,
   claudeHistoryFile,
