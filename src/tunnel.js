@@ -21,7 +21,7 @@ const PHDDNS_APP = '/Applications/PhDDNS.app';
 // down; enabling a dead URL would just exercise the restart path on a loop).
 const DEFAULT_CONFIG = {
   phddns:    { enabled: false, url: 'https://1129874apfc68.vicp.fun/manage' },
-  tailscale: { enabled: false, url: '' },
+  tailscale: { enabled: false, url: '', funnel: false, funnelPort: 3000 },
   intervalSec: 30,
   failThreshold: 2,
   restartCooldownSec: 120,
@@ -111,6 +111,24 @@ async function restartTailscale() {
   // Gentle: re-establish the connection without bouncing tailscaled.
   const r = await execShell(TAILSCALE_BIN, ['up']);
   return r.ok ? '已执行 tailscale up' : `tailscale up 失败: ${r.stderr.slice(0, 120)}`;
+}
+
+// Turn public-internet Funnel on/off (Tailscale CLI v1.84+ syntax):
+//   on  → `tailscale funnel --bg <port>`
+//   off → `tailscale funnel reset`
+// Returns { ok, message }.
+async function setFunnel(on, port) {
+  const p = Number.isFinite(port) && port > 0 ? Math.floor(port) : 3000;
+  const args = on ? ['funnel', '--bg', String(p)] : ['funnel', 'reset'];
+  const r = await execShell(TAILSCALE_BIN, args);
+  if (r.ok) return { ok: true, message: on ? `已开启 Funnel 公网访问 (端口 ${p})` : '已关闭所有 Funnel' };
+  return { ok: false, message: `Funnel 操作失败: ${(r.stderr || '').slice(0, 200)}` };
+}
+
+// Read-only Funnel status text from tailscale.
+async function funnelStatus() {
+  const r = await execShell(TAILSCALE_BIN, ['funnel', 'status']);
+  return (r.stdout || r.stderr || '').trim();
 }
 
 const RESTARTERS = { phddns: restartPhddns, tailscale: restartTailscale };
@@ -226,4 +244,4 @@ async function restartNow(name) {
   }
 }
 
-module.exports = { init, applyConfig, getStatus, restartNow, loadConfig, availability };
+module.exports = { init, applyConfig, getStatus, restartNow, loadConfig, availability, setFunnel, funnelStatus };

@@ -2492,6 +2492,29 @@ app.post('/api/tunnel/restart/:provider', async (req, res) => {
   }
 });
 
+// Toggle Tailscale Funnel (public-internet exposure) for a port.
+// Body: { on: bool, port?: number }
+app.post('/api/tunnel/funnel', async (req, res) => {
+  try {
+    const on = !!(req.body && req.body.on);
+    const port = req.body && Number(req.body.port);
+    const result = await tunnel.setFunnel(on, port);
+    const status = await tunnel.funnelStatus();
+    res.status(result.ok ? 200 : 400).json({ ...result, status });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Read-only Funnel status (CLI output).
+app.get('/api/tunnel/funnel', async (req, res) => {
+  try {
+    res.json({ status: await tunnel.funnelStatus() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // macOS system power settings
 app.get('/api/settings/power', (req, res) => {
   if (!macosPower.isAvailable()) {

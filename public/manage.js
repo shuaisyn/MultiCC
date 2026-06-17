@@ -2634,6 +2634,9 @@ async function loadTunnelSettings() {
     document.getElementById('tnl-ts-enabled').checked = !!c.tailscale.enabled;
     document.getElementById('tnl-ts-url').value = c.tailscale.url || '';
     document.getElementById('tnl-ts-status').textContent = tnlFmtStatus(pr.tailscale || {}, c.tailscale);
+    document.getElementById('tnl-ts-funnel').checked = !!c.tailscale.funnel;
+    document.getElementById('tnl-ts-funnelport').value = c.tailscale.funnelPort || 3000;
+    loadFunnelStatus();
     // advanced
     document.getElementById('tnl-interval').value = c.intervalSec;
     document.getElementById('tnl-failthreshold').value = c.failThreshold;
@@ -2653,8 +2656,11 @@ async function saveTunnelSettings() {
     tailscale: {
       enabled: document.getElementById('tnl-ts-enabled').checked,
       url: document.getElementById('tnl-ts-url').value.trim(),
+      funnel: document.getElementById('tnl-ts-funnel').checked,
     },
   };
+  const fp = parseInt(document.getElementById('tnl-ts-funnelport').value, 10);
+  if (Number.isFinite(fp) && fp > 0) body.tailscale.funnelPort = fp;
   const iv = numOr('tnl-interval'); if (iv) body.intervalSec = iv;
   const ft = numOr('tnl-failthreshold'); if (ft) body.failThreshold = ft;
   const cd = numOr('tnl-cooldown'); if (cd !== undefined) body.restartCooldownSec = cd;
@@ -2684,6 +2690,39 @@ async function restartTunnel(provider) {
     if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
     if (msg) { msg.textContent = data.message || '已触发重启'; msg.className = 'status-text ok'; }
     setTimeout(loadTunnelSettings, 1500);
+  } catch (e) {
+    if (msg) { msg.textContent = '失败: ' + e.message; msg.className = 'status-text err'; }
+  }
+}
+
+// Read-only Funnel status text (tailscale funnel status output).
+async function loadFunnelStatus() {
+  const el = document.getElementById('tnl-ts-funnelstatus');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/tunnel/funnel' + tokenQS('?'));
+    const data = await res.json();
+    el.textContent = (data.status && data.status.trim()) || '未开启 (No serve config)';
+  } catch (_) { el.textContent = '—'; }
+}
+
+// Apply the Funnel checkbox: open/close public-internet exposure on the port.
+async function applyFunnel() {
+  const msg = document.getElementById('tnl-ts-msg');
+  const on = document.getElementById('tnl-ts-funnel').checked;
+  const port = parseInt(document.getElementById('tnl-ts-funnelport').value, 10) || 3000;
+  if (on && !confirm(`确定开启 Funnel 公网访问？\n这会把端口 ${port} 暴露到整个互联网（任何人凭 URL 可访问）。\n请确认已设置足够强的 ACCESS_TOKEN。`)) return;
+  if (msg) { msg.textContent = on ? '正在开启 Funnel…' : '正在关闭 Funnel…'; msg.className = 'status-text'; }
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (_urlToken) headers['X-Access-Token'] = _urlToken;
+    const res = await fetch('/api/tunnel/funnel', { method: 'POST', headers, body: JSON.stringify({ on, port }) });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || data.message || ('HTTP ' + res.status));
+    if (msg) { msg.textContent = data.message || '完成'; msg.className = 'status-text ok'; }
+    // Persist the funnel flag/port into config too, then refresh status.
+    saveTunnelSettings();
+    setTimeout(loadFunnelStatus, 1200);
   } catch (e) {
     if (msg) { msg.textContent = '失败: ' + e.message; msg.className = 'status-text err'; }
   }
