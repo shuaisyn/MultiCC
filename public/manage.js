@@ -2616,7 +2616,59 @@ function tnlFmtStatus(p, prov) {
   return s;
 }
 
+// ── Access token (external-access login password) ──
+async function loadAccessToken() {
+  const input = document.getElementById('tnl-token');
+  const hint = document.getElementById('tnl-token-hint');
+  const btn = document.getElementById('tnl-token-save');
+  if (!input) return;
+  try {
+    const res = await fetch('/api/settings/access-token' + tokenQS('?'));
+    const d = await res.json();
+    if (d.canEdit) {
+      // localhost: editable. Show placeholder reflecting current state.
+      input.disabled = false;
+      input.readOnly = false;
+      input.value = '';
+      input.placeholder = d.hasToken ? '已设置（留空保存=清除；输入新值=修改）' : '未设置';
+      if (hint) { hint.textContent = '· 本机可修改'; hint.style.color = 'var(--faint)'; }
+      if (btn) btn.disabled = false;
+    } else {
+      // remote: read-only masked.
+      input.disabled = true;
+      input.readOnly = true;
+      input.value = d.masked || '';
+      input.placeholder = d.hasToken ? '' : '未设置';
+      if (hint) { hint.textContent = '· 仅本机可修改'; hint.style.color = 'var(--faint)'; }
+      if (btn) btn.disabled = true;
+    }
+  } catch (_) {}
+}
+
+async function saveAccessToken() {
+  const input = document.getElementById('tnl-token');
+  const msg = document.getElementById('tnl-token-msg');
+  if (!input || input.disabled) return;
+  const token = input.value;
+  if (token.includes('****')) { if (msg) { msg.textContent = '未修改'; msg.className = 'status-text'; } return; }
+  if (token.trim() && !confirm('保存后，外网/局域网访问都需要用此密码登录，旧的登录会话会失效。确定？')) return;
+  if (!token.trim() && !confirm('留空保存将清除访问密码，任何人凭 URL 即可访问。确定？')) return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (_urlToken) headers['X-Access-Token'] = _urlToken;
+    const res = await fetch('/api/settings/access-token', { method: 'POST', headers, body: JSON.stringify({ token }) });
+    const d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || ('HTTP ' + res.status));
+    if (msg) { msg.textContent = d.hasToken ? '已保存' : '已清除'; msg.className = 'status-text ok'; }
+    showToast('访问密码已更新');
+    loadAccessToken();
+  } catch (e) {
+    if (msg) { msg.textContent = '错误: ' + e.message; msg.className = 'status-text err'; }
+  }
+}
+
 async function loadTunnelSettings() {
+  loadAccessToken();
   try {
     const res = await fetch('/api/settings/tunnel' + tokenQS('?'));
     const st = await res.json();
