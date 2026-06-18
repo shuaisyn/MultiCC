@@ -504,6 +504,18 @@
             勾选并配置后，服务会每隔一段时间探活对应的外网 URL；连续失败达阈值时自动重启对应穿透服务。监控运行在服务进程内，不会出现多份看门狗互相打架。
           </div>
 
+          <!-- 访问密码 ACCESS_TOKEN -->
+          <div class="settings-card">
+            <div class="sc-header">访问密码 (ACCESS_TOKEN) <span id="tnl-token-hint" style="font-size:11px;font-weight:400;color:var(--faint);"></span></div>
+            <div class="sc-body">
+              <div style="font-size:12px;color:var(--faint);line-height:1.6;margin-bottom:8px;">
+                外网访问的登录密码。<b>未设置时任何人凭 URL 即可访问</b>——开启公网 Funnel / 花生壳前务必设置。出于安全，仅可在本机 (localhost) 打开本页时修改，其它设备只能看到掩码。
+              </div>
+              <div class="setting-row"><label>访问密码</label><input id="tnl-token" type="text" placeholder="未设置" autocomplete="off" /></div>
+            </div>
+            <div class="sc-footer"><button class="btn btn-green" id="tnl-token-save" onclick="saveAccessToken()">保存</button><span class="status-text" id="tnl-token-msg"></span></div>
+          </div>
+
           <!-- 花生壳 -->
           <div class="settings-card">
             <div class="sc-header">花生壳 (PhDDNS) <span id="tnl-ph-avail" style="font-size:11px;font-weight:400;color:var(--faint);"></span></div>

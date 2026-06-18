@@ -37,7 +37,9 @@ const state = require('./src/state');
 const app = express();
 
 // ── Access token authentication (cookie-based login) ──
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+// `let` (not const): editable at runtime via /api/settings/access-token from
+// localhost, hot-reloaded without restart (persisted to .env).
+let ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 
 // Signed cookie: no server-side storage needed, survives restarts
 function signToken(data) {
@@ -71,11 +73,18 @@ function isExternalProxy(req) {
   return host.endsWith('.ts.net') || host.endsWith('.ngrok.io') || host.endsWith('.ngrok-free.app');
 }
 
+// True only for requests physically originating from this machine (not a
+// reverse proxy forwarding external traffic). Used both for the localhost
+// auth bypass and to gate editing the access token.
+function isLocalRequest(req) {
+  const ip = req.ip || req.connection.remoteAddress;
+  return (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req);
+}
+
 function isAuthenticated(req) {
   if (!ACCESS_TOKEN) return true;
   // Localhost allowed — unless it's a reverse proxy forwarding external traffic
-  const ip = req.ip || req.connection.remoteAddress;
-  if ((ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req)) return true;
+  if (isLocalRequest(req)) return true;
   // Cookie auth (HMAC-signed, survives server restart)
   const cookies = parseCookies(req.headers.cookie);
   if (cookies.multicc_auth && verifyAuthCookie(cookies.multicc_auth)) return true;
@@ -85,7 +94,10 @@ function isAuthenticated(req) {
   return false;
 }
 
-if (ACCESS_TOKEN) {
+// Always register login routes + auth middleware (no-op while ACCESS_TOKEN is
+// empty, see isAuthenticated). This lets a token set later via the localhost UI
+// take effect immediately, without restarting the server.
+{
   // Login page & handler
   app.get('/login', (req, res) => {
     const error = req.query.error ? '<p style="color:#f85149;margin-bottom:16px;">密码错误</p>' : '';
@@ -2538,6 +2550,34 @@ app.get('/api/tunnel/funnel', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── Access token (external-access login password) ──
+// Readable anywhere (masked); editable ONLY from localhost. Persisted to .env
+// and hot-reloaded so changes apply without a server restart.
+app.get('/api/settings/access-token', (req, res) => {
+  const t = ACCESS_TOKEN || '';
+  res.json({
+    hasToken: !!t,
+    masked: t ? (t.length > 4 ? '****' + t.slice(-4) : '****') : '',
+    canEdit: isLocalRequest(req),
+  });
+});
+
+app.post('/api/settings/access-token', (req, res) => {
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({ error: '访问密码仅可在本机 (localhost) 打开本页时修改' });
+  }
+  const raw = req.body && req.body.token;
+  if (typeof raw !== 'string' || raw.includes('****')) {
+    return res.status(400).json({ error: '无有效改动' });
+  }
+  const token = raw.trim();
+  writeEnvFile({ ACCESS_TOKEN: token });
+  process.env.ACCESS_TOKEN = token;
+  ACCESS_TOKEN = token; // hot-reload: signToken/isAuthenticated read this live
+  console.log(`[multicc/auth] ACCESS_TOKEN ${token ? 'updated' : 'cleared'} via localhost UI`);
+  res.json({ ok: true, hasToken: !!token });
 });
 
 // macOS system power settings
