@@ -2380,6 +2380,7 @@ webpush.setVapidDetails('mailto:multicc@localhost', vapidKeys.pubKey, vapidKeys.
 // push.js sends through the instance configured by setVapidDetails() above.
 const push = require('./src/push');
 const tunnel = require('./src/tunnel');
+const chatStream = require('./src/chat-stream');
 
 // ── Server Info (LAN IP for QR code) ──
 app.get('/api/server-info', (req, res) => {
@@ -3387,6 +3388,66 @@ function resolveRolePrompt(persisted) {
   return (dir && dir.rolePrompt) || null;
 }
 
+// Apply one claude-shaped stream-json event to chat session state, then forward
+// it to clients. Shared by the per-turn spawn path (handleLine) and the
+// persistent streaming path (runChatTurnStreaming) so the two never drift.
+// The `result` event is the turn boundary: it saves the assistant message,
+// returns the session to idle, and fires post-turn hooks.
+function applyClaudeChatEvent(cs, sessionName, evt, forward) {
+  if (evt.type === 'assistant' && evt.message?.content) {
+    for (const block of evt.message.content) {
+      if (block.type === 'text') {
+        cs.currentAssistantText += block.text;
+        setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
+      }
+      if (block.type === 'tool_use') {
+        cs.currentToolCalls.push({ name: block.name, input: block.input, id: block.id });
+        const editTools = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
+        if (editTools.includes(block.name)) {
+          setSessionStatus(sessionName, { status: 'editing', currentFile: block.input?.file_path || null });
+        } else if (block.name === 'Bash') {
+          setSessionStatus(sessionName, { status: 'running', currentFile: null });
+        } else {
+          setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
+        }
+      }
+    }
+  }
+  if (evt.type === 'user' && evt.message?.content) {
+    for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
+      if (r.type === 'tool_result') {
+        const tc = cs.currentToolCalls.find(t => t.id === r.tool_use_id);
+        if (tc) {
+          tc.result = typeof r.content === 'string' ? r.content :
+            Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
+            JSON.stringify(r.content);
+          tc.is_error = r.is_error || false;
+          if (tc.result && tc.result.length > 1000) tc.result = tc.result.slice(0, 1000) + '...';
+        }
+      }
+    }
+  }
+  if (evt.type === 'result') {
+    cs.currentCost = evt.total_cost_usd || null;
+    if (cs.currentAssistantText || cs.currentToolCalls.length) {
+      appendChatMessage(sessionName, {
+        role: 'assistant', content: cs.currentAssistantText,
+        tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+        cost: cs.currentCost, ts: Date.now(),
+      });
+      cs.chatTurnCount++;
+      cs._resultSaved = true;
+    }
+    setSessionStatus(sessionName, { status: 'idle', currentFile: null });
+    scheduleIntentClassify(cs, sessionName);
+    // Decoupled via the bus so chat doesn't depend on the triggers domain.
+    bus.emit('chat:turn-complete', sessionName, cs);
+  }
+  // Drop claude's `system init` — server already sent its own
+  if (evt.type === 'system' && evt.subtype === 'init') return;
+  forward(evt);
+}
+
 function runChatTurn(sessionName, text, opts = {}) {
   const { isFirstTurn: forceFirstTurn, originDispatchId, originTrigger } = opts;
   const persisted = persistedSessions.get(sessionName);
@@ -3492,6 +3553,17 @@ function runChatTurn(sessionName, text, opts = {}) {
   }
 
   const rolePrompt = resolveRolePrompt(persisted);
+
+  // ── Streaming path (flag-gated, claude only) ──
+  // Persistent process kept warm across turns so a turn that ends in a
+  // "waiting for external data" state leaves a live, in-context process ready
+  // to continue (fed by the next message / the waiting-injector) instead of a
+  // dead one needing a cold --resume. Default sessions use the per-turn spawn
+  // path below, unchanged.
+  if (persisted.streaming && cs.cli === 'claude') {
+    return runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt);
+  }
+
   const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn, rolePrompt });
   console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
@@ -3603,59 +3675,8 @@ function runChatTurn(sessionName, text, opts = {}) {
         return;  // unknown event type: drop
       }
 
-      // ── Claude: unchanged path ──
-      if (evt.type === 'assistant' && evt.message?.content) {
-        for (const block of evt.message.content) {
-          if (block.type === 'text') {
-            cs.currentAssistantText += block.text;
-            setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
-          }
-          if (block.type === 'tool_use') {
-            cs.currentToolCalls.push({ name: block.name, input: block.input, id: block.id });
-            const editTools = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
-            if (editTools.includes(block.name)) {
-              setSessionStatus(sessionName, { status: 'editing', currentFile: block.input?.file_path || null });
-            } else if (block.name === 'Bash') {
-              setSessionStatus(sessionName, { status: 'running', currentFile: null });
-            } else {
-              setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
-            }
-          }
-        }
-      }
-      if (evt.type === 'user' && evt.message?.content) {
-        for (const r of (Array.isArray(evt.message.content) ? evt.message.content : [evt.message.content])) {
-          if (r.type === 'tool_result') {
-            const tc = cs.currentToolCalls.find(t => t.id === r.tool_use_id);
-            if (tc) {
-              tc.result = typeof r.content === 'string' ? r.content :
-                Array.isArray(r.content) ? r.content.map(c => c.text || '').join('') :
-                JSON.stringify(r.content);
-              tc.is_error = r.is_error || false;
-              if (tc.result && tc.result.length > 1000) tc.result = tc.result.slice(0, 1000) + '...';
-            }
-          }
-        }
-      }
-      if (evt.type === 'result') {
-        cs.currentCost = evt.total_cost_usd || null;
-        if (cs.currentAssistantText || cs.currentToolCalls.length) {
-          appendChatMessage(sessionName, {
-            role: 'assistant', content: cs.currentAssistantText,
-            tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
-            cost: cs.currentCost, ts: Date.now(),
-          });
-          cs.chatTurnCount++;
-          cs._resultSaved = true;
-        }
-        setSessionStatus(sessionName, { status: 'idle', currentFile: null });
-        scheduleIntentClassify(cs, sessionName);
-        // Decoupled via the bus so chat doesn't depend on the triggers domain.
-        bus.emit('chat:turn-complete', sessionName, cs);
-      }
-      // Drop claude's `system init` — server already sent its own
-      if (evt.type === 'system' && evt.subtype === 'init') return;
-      forward(evt);
+      // ── Claude: shared with the streaming path ──
+      applyClaudeChatEvent(cs, sessionName, evt, forward);
     };
 
     const forward = (evt) => {
@@ -3796,6 +3817,99 @@ function runChatTurn(sessionName, text, opts = {}) {
 //  • need the return value (gateway): registry service 'chat.runTurn'
 bus.on('chat:run', (sessionName, text, opts) => runChatTurn(sessionName, text, opts));
 services.provide('chat.runTurn', runChatTurn);
+
+// ── Streaming chat turn (persistent process; see runChatTurn's streaming branch) ──
+// Feeds the prompt into the session's long-lived `claude` process and forwards
+// events through the SAME applyClaudeChatEvent() the per-turn path uses, so the
+// UI sees identical events. The turn boundary is the `result` event (handled
+// inside applyClaudeChatEvent); finalizeStreamingTurn() then does the
+// process-independent cleanup (stream_end, gateway回流) WITHOUT killing the proc.
+function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt) {
+  const sysPrompt = rolePrompt ? `${MULTICC_IMG_HINT}\n\n${rolePrompt}` : MULTICC_IMG_HINT;
+  const model = persisted.model || claudeDefaultModel();
+  const extraArgs = CLAUDE_CHAT_DISALLOWED_TOOLS.length
+    ? ['--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(',')] : [];
+
+  chatStream.ensure(sessionName, {
+    cmd: cliProviders.claude.cmd,
+    cwd: cs.cwd,
+    sessionId: persisted.cliSessionId,
+    model, sysPrompt, extraArgs,
+    env: {
+      MULTICC_SESSION_ID: sessionName,
+      MULTICC_DIR_ID: persisted.dirId || '',
+      MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
+    },
+  });
+
+  // A new user message interrupts any in-flight turn (matches the per-turn
+  // path's "kill previous turn"). The killed turn's promise rejects → its
+  // finalize is a no-op because _streamTurnSeq has advanced (guard below).
+  const st = chatStream.status(sessionName);
+  if (st && st.busy) {
+    console.log(`[multicc/chat] [${sessionName}] (streaming) new message mid-turn → interrupting previous`);
+    cs._killReason = 'new_user_message';
+    chatStream.cancel(sessionName);
+  }
+  const mySeq = cs._streamTurnSeq = (cs._streamTurnSeq || 0) + 1;
+
+  const forward = (evt) => {
+    cs.streamReplay.push(evt);
+    if (cs.streamReplay.length > 500) cs.streamReplay.shift();
+    chatBroadcast(sessionName, evt);
+  };
+
+  console.log(`[multicc/chat] [${sessionName}] (streaming) send turn=${cs.chatTurnCount} model=${model} status=${JSON.stringify(chatStream.status(sessionName))}`);
+  chatStream.send(sessionName, promptText, (evt) => {
+    if (evt.type === 'system' && evt.subtype === 'init') return; // server already sent its own init
+    applyClaudeChatEvent(cs, sessionName, evt, forward);
+  })
+    .then(() => finalizeStreamingTurn(sessionName, cs, persisted, mySeq))
+    .catch((err) => {
+      console.warn(`[multicc/chat] [${sessionName}] (streaming) turn ended early: ${err.message}`);
+      finalizeStreamingTurn(sessionName, cs, persisted, mySeq);
+    });
+
+  return true;
+}
+
+// Process-independent end-of-turn cleanup for the streaming path. Guarded by
+// the turn sequence so a superseded (interrupted) turn's late completion can't
+// clobber the turn that replaced it.
+function finalizeStreamingTurn(sessionName, cs, persisted, seq) {
+  if (seq !== undefined && cs._streamTurnSeq !== seq) return; // superseded by a newer turn
+  cs.isStreaming = false;
+  cs.streamReplay = [];
+  // applyClaudeChatEvent already saved on the `result` event (cs._resultSaved);
+  // this only fires for an interrupted/aborted turn that has partial output.
+  if (!cs._resultSaved && (cs.currentAssistantText || cs.currentToolCalls.length)) {
+    appendChatMessage(sessionName, {
+      role: 'assistant', content: cs.currentAssistantText,
+      tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
+      cost: cs.currentCost, ts: Date.now(),
+    });
+    cs.chatTurnCount++;
+  }
+  const finalText = cs.currentAssistantText;
+  cs.currentAssistantText = '';
+  cs.currentToolCalls = [];
+  cs._resultSaved = false;
+  setSessionStatus(sessionName, { status: 'idle', currentFile: null });
+  chatBroadcast(sessionName, { type: 'stream_end' });
+
+  // Gateway/dispatch回流 — same hooks the per-turn close handler fires.
+  try {
+    if (cs.originDispatchId) {
+      const did = cs.originDispatchId;
+      cs.originDispatchId = null;
+      bus.emit('chat:dispatch-complete', did, sessionName, finalText);
+    } else if (persisted.type === 'gateway') {
+      bus.emit('chat:gateway-turn-complete', finalText);
+    }
+  } catch (e) {
+    console.error('[multicc/dispatch] post-turn hook failed:', e.message);
+  }
+}
 
 // ── Chat mode: stream-json WebSocket ──
 function handleChatWs(ws, req, urlObj) {

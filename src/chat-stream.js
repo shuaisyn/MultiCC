@@ -79,12 +79,17 @@ function spawnProc(name, cfg) {
   s.lineBuf = '';
   s.stderrTail = '';
 
-  proc.stdout.on('data', (chunk) => onStdout(name, chunk));
+  // Guard every handler against a STALE proc: a SIGTERM'd process can still emit
+  // buffered stdout or fire 'exit' after it has been replaced by a respawn.
+  // Ignoring events from a proc that is no longer s.proc prevents an old turn
+  // from corrupting the state of the new one.
+  proc.stdout.on('data', (chunk) => { if (sessions.get(name)?.proc === proc) onStdout(name, chunk); });
   proc.stderr.on('data', (chunk) => {
+    if (sessions.get(name)?.proc !== proc) return;
     s.stderrTail = (s.stderrTail + chunk.toString()).slice(-1000);
   });
-  proc.on('exit', (code, signal) => onExit(name, code, signal));
-  proc.on('error', (err) => onExit(name, null, null, err));
+  proc.on('exit', (code, signal) => { if (sessions.get(name)?.proc === proc) onExit(name, code, signal); });
+  proc.on('error', (err) => { if (sessions.get(name)?.proc === proc) onExit(name, null, null, err); });
 
   return proc;
 }
