@@ -104,8 +104,7 @@ class _AssistantBubble extends StatelessWidget {
                   text: message.content,
                   isStreaming: message.isStreaming,
                 ),
-              if (hasTools)
-                ...message.toolCalls.map((tc) => ToolCardWidget(toolCall: tc)),
+              if (hasTools) ToolCallGroup(toolCalls: message.toolCalls),
               if (!hasText && !hasTools && message.isStreaming)
                 const _StreamingDot(),
             ],
