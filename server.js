@@ -158,6 +158,11 @@ function isAuthenticated(req) {
     // Wait-callback endpoint is secured by its own per-wait token so external
     // (off-box) systems can deliver results without the ACCESS_TOKEN cookie.
     if (req.method === 'POST' && /^\/api\/wait\/[^/]+\/resolve$/.test(req.path)) return next();
+    // Share recipient routes: the share page and its scoped API self-gate on the
+    // share token (and per-share password), so they bypass ACCESS_TOKEN. NOTE:
+    // admin share management lives under /api/sessions/* and stays gated.
+    if (/^\/share\/[^/]+$/.test(req.path)) return next();
+    if (/^\/api\/share\/[^/]+\/(auth|session)$/.test(req.path)) return next();
     if (isAuthenticated(req)) return next();
     // Redirect HTML requests to login, reject API calls with 403
     if (req.headers.accept?.includes('text/html') || (!req.path.startsWith('/api/') && req.method === 'GET')) {
@@ -1437,6 +1442,7 @@ app.delete('/api/directories/:id', (req, res) => {
       chatSessions.delete(s.id);
     }
     waitInjector.cancelForSession(s.id);
+    share.removeForSession(s.id);
     if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
     teardownTriggers(s.id);
     purgeNotesForSession(s.id);
@@ -1643,6 +1649,72 @@ app.patch('/api/sessions/:id', (req, res) => {
   res.json(s);
 });
 
+// ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
+// The link is built from the request host so a share created via the public
+// (tunnel) URL is reachable externally; created on localhost it'll be a local link.
+app.post('/api/sessions/:id/share', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  if (s.type === 'aux') return res.status(400).json({ error: 'cannot share system session' });
+  const b = req.body || {};
+  try {
+    const rec = share.create(s.id, {
+      access: b.access, password: b.password,
+      expiresAt: b.expiresAt, label: b.label || s.label || s.id,
+    });
+    const base = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, ...rec, url: `${base}/share/${rec.token}` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.get('/api/sessions/:id/shares', (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.json({ shares: share.listForSession(req.params.id).map(r => ({ ...r, url: `${base}/share/${r.token}` })) });
+});
+
+app.delete('/api/sessions/:id/share/:token', (req, res) => {
+  const r = share.get(req.params.token);
+  if (r && r.sessionId !== req.params.id) return res.status(400).json({ error: 'token does not belong to this session' });
+  res.json({ ok: share.remove(req.params.token) });
+});
+
+// ── Share recipient endpoints (NO ACCESS_TOKEN; gated by the share token only) ──
+// The page; the inline JS reads the token from the URL and self-gates.
+app.get('/share/:token', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'share.html'));
+});
+
+// Submit the share password → mint the per-share auth cookie.
+app.post('/api/share/:token/auth', (req, res) => {
+  const token = req.params.token;
+  const r = share.get(token);
+  if (!r) return res.status(404).json({ error: 'share not found or expired' });
+  if (!share.verifyPassword(token, (req.body || {}).password)) {
+    return res.status(403).json({ error: '密码错误' });
+  }
+  res.setHeader('Set-Cookie',
+    `${share.cookieName(token)}=${share.authCookieValue(r)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+  res.json({ ok: true, access: r.access });
+});
+
+// Scoped read of the shared session: meta + history. 401 if a password is needed.
+app.get('/api/share/:token/session', (req, res) => {
+  const token = req.params.token;
+  const r = share.get(token);
+  if (!r) return res.status(404).json({ error: 'share not found or expired' });
+  const a = share.access(token, { cookies: parseCookies(req.headers.cookie) });
+  if (!a) return res.status(401).json({ needPassword: true });
+  const persisted = persistedSessions.get(r.sessionId);
+  if (!persisted) return res.status(404).json({ error: 'session no longer exists' });
+  res.json({
+    access: a.access,
+    sessionId: r.sessionId,
+    label: persisted.label || r.sessionId,
+    cli: persisted.cli || 'claude',
+    messages: loadChatHistory(r.sessionId),
+  });
+});
+
 // ── Per-session auto-triggers ──
 // Written by the bundled multicc-trigger skill (via localhost) or the manage UI;
 // read by the trigger runtime (file-watch / cron / post-turn).
@@ -1790,6 +1862,7 @@ app.delete('/api/sessions/:id', (req, res) => {
     chatSessions.delete(id);
   }
   waitInjector.cancelForSession(id);
+  share.removeForSession(id);
   // Remove the session's git worktree + branch.
   const persisted = persistedSessions.get(id);
   if (persisted && persisted.worktreePath && persisted.branch) {
@@ -2415,6 +2488,7 @@ const push = require('./src/push');
 const tunnel = require('./src/tunnel');
 const chatStream = require('./src/chat-stream');
 const waitInjector = require('./src/wait-injector');
+const share = require('./src/share');
 
 // ── Server Info (LAN IP for QR code) ──
 app.get('/api/server-info', (req, res) => {
@@ -4128,16 +4202,21 @@ function handleChatWs(ws, req, urlObj) {
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
+      // Heartbeat is always allowed.
+      if (msg.type === 'ping') {
+        try { ws.send(JSON.stringify({ type: 'pong' })); } catch (_) {}
+        return;
+      }
+      // ── Share-scope gate ──
+      // view  = read-only: drop everything except ping.
+      // operate = read-write: allow user_message/cancel/typing, but block
+      //   admin/destructive ops (clear_history, etc.) — shares never get those.
+      if (ws._sharePerm === 'view') return;
+      if (ws._sharePerm === 'operate' && !['user_message', 'cancel', 'typing'].includes(msg.type)) return;
+
       // Typing signal: user is composing → cancel pending intent classify
       if (msg.type === 'typing') {
         cancelPendingClassify(cs);
-        return;
-      }
-
-      // App-level heartbeat: lets the client detect a half-open socket (the OS
-      // froze the connection without a close frame) and reconnect.
-      if (msg.type === 'ping') {
-        try { ws.send(JSON.stringify({ type: 'pong' })); } catch (_) {}
         return;
       }
 
@@ -4214,8 +4293,20 @@ function handleChatWs(ws, req, urlObj) {
 wss.on('connection', (ws, req) => {
   const urlObj = new URL(req.url, 'http://localhost');
 
-  // Auth check for WebSocket (cookie, token param, or localhost)
-  if (ACCESS_TOKEN) {
+  // Share-scoped chat WS: a valid share token for the requested session grants
+  // access WITHOUT ACCESS_TOKEN, scoped to that one session at its access level.
+  // ws._sharePerm ('view'|'operate') drives the read-only / read-write gate in
+  // handleChatWs. (Re-validated inside handleChatWs as the authority.)
+  let sharePerm = null;
+  if (urlObj.pathname === '/ws/chat' && urlObj.searchParams.get('share')) {
+    const a = share.access(urlObj.searchParams.get('share'), { cookies: parseCookies(req.headers.cookie) });
+    if (a && a.sessionId === urlObj.searchParams.get('session')) sharePerm = a.access;
+    if (!sharePerm) { ws.close(4003, 'Forbidden'); return; }
+  }
+
+  // Auth check for WebSocket (cookie, token param, or localhost) — bypassed when
+  // a valid share scope is present.
+  if (ACCESS_TOKEN && !sharePerm) {
     const ip = req.socket.remoteAddress;
     const isLocal = (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') && !isExternalProxy(req);
     const cookies = parseCookies(req.headers.cookie);
@@ -4229,6 +4320,7 @@ wss.on('connection', (ws, req) => {
 
   // Route to chat handler if path matches
   if (urlObj.pathname === '/ws/chat') {
+    ws._sharePerm = sharePerm; // null for normal (full) clients
     return handleChatWs(ws, req, urlObj);
   }
 

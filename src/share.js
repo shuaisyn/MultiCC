@@ -1,0 +1,118 @@
+'use strict';
+
+// ── Session sharing: scoped external access to a single chat session ──
+//
+// A share is a long random token that grants access to ONE session at one of
+// two levels, completely separate from the global ACCESS_TOKEN:
+//   • view    — read-only (see messages). Optionally password-gated; with no
+//               password it is a fully public link.
+//   • operate — read-write (send messages / drive the conversation). Password
+//               REQUIRED (operate = running code on the host via the session).
+//
+// Security model: a share token is only ever honored for its own session and
+// its own access level. It cannot reach /manage, other sessions, the filesystem
+// at large, or any admin endpoint — the server gates every share route on
+// share.access() and never falls back to ACCESS_TOKEN for them.
+//
+// Passwords are salted+scrypt hashed. A correct password mints a per-share auth
+// cookie (an opaque value derived from the share's own secret) so the recipient
+// isn't re-prompted every request; the cookie proves nothing about any other
+// share or about ACCESS_TOKEN.
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const FILE = path.join(__dirname, '..', 'shares.json');
+let shares = {}; // token -> record
+
+function load() { try { shares = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch { shares = {}; } }
+function save() { try { fs.writeFileSync(FILE, JSON.stringify(shares, null, 2)); } catch (e) { console.error('[share] save failed:', e.message); } }
+load();
+
+function hashPw(pw, salt) { return crypto.scryptSync(String(pw), salt, 32).toString('hex'); }
+
+function publicRec(r) {
+  return {
+    token: r.token, sessionId: r.sessionId, access: r.access,
+    hasPassword: !!r.pwHash, expiresAt: r.expiresAt || null,
+    createdAt: r.createdAt, label: r.label || null,
+  };
+}
+
+function isExpired(r) { return !!(r && r.expiresAt && Date.now() > r.expiresAt); }
+
+// Create a share. access: 'view'|'operate'. operate requires a password.
+function create(sessionId, { access, password, expiresAt, label } = {}) {
+  const lvl = access === 'operate' ? 'operate' : 'view';
+  if (lvl === 'operate' && !password) {
+    throw new Error('operate share requires a password');
+  }
+  const token = crypto.randomBytes(18).toString('base64url');
+  const rec = {
+    token, sessionId, access: lvl,
+    createdAt: Date.now(),
+    expiresAt: expiresAt ? Number(expiresAt) : null,
+    label: label || null,
+    salt: null, pwHash: null, secret: crypto.randomBytes(16).toString('hex'),
+  };
+  if (password) { rec.salt = crypto.randomBytes(16).toString('hex'); rec.pwHash = hashPw(password, rec.salt); }
+  shares[token] = rec;
+  save();
+  return publicRec(rec);
+}
+
+function get(token) {
+  const r = shares[token];
+  if (!r) return null;
+  if (isExpired(r)) { delete shares[token]; save(); return null; }
+  return r;
+}
+
+function listForSession(sessionId) {
+  return Object.values(shares).filter(r => r.sessionId === sessionId && !isExpired(r)).map(publicRec);
+}
+
+function remove(token) { const had = !!shares[token]; if (had) { delete shares[token]; save(); } return had; }
+
+function removeForSession(sessionId) {
+  let n = 0;
+  for (const t of Object.keys(shares)) if (shares[t].sessionId === sessionId) { delete shares[t]; n++; }
+  if (n) save();
+  return n;
+}
+
+function verifyPassword(token, pw) {
+  const r = get(token);
+  if (!r) return false;
+  if (!r.pwHash) return true; // public
+  if (!pw) return false;
+  const a = Buffer.from(hashPw(pw, r.salt));
+  const b = Buffer.from(r.pwHash, 'hex').length === 32 ? Buffer.from(r.pwHash) : Buffer.from(r.pwHash);
+  try { return a.length === b.length && crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
+// Opaque cookie value minted after a correct password — derived from the
+// share's own secret so it is unforgeable and useless for any other share.
+function authCookieValue(r) {
+  return crypto.createHmac('sha256', r.secret).update(r.token).digest('hex');
+}
+
+// Does this request carry valid access to `token`? Returns null or {access}.
+// cookies: parsed cookie map. provided: a password supplied inline (optional).
+function access(token, { cookies = {}, password } = {}) {
+  const r = get(token);
+  if (!r) return null;
+  if (!r.pwHash) return { access: r.access, sessionId: r.sessionId }; // public link
+  // Password-gated: accept a valid auth cookie or a correct inline password.
+  const cookieName = `multicc_share_${token}`;
+  if (cookies[cookieName] && cookies[cookieName] === authCookieValue(r)) return { access: r.access, sessionId: r.sessionId };
+  if (password && verifyPassword(token, password)) return { access: r.access, sessionId: r.sessionId };
+  return null;
+}
+
+module.exports = {
+  create, get, publicRec, listForSession, remove, removeForSession,
+  verifyPassword, authCookieValue, access,
+  cookieName: (token) => `multicc_share_${token}`,
+};
