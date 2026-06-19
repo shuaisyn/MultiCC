@@ -86,9 +86,17 @@ async function loadSession() {
   if (!r.ok) { const j = await r.json().catch(() => ({})); $('dead-msg').textContent = j.error || '该分享链接不存在或已过期。'; return show('dead'); }
   const data = await r.json();
   ACCESS = data.access; SESSION = data.sessionId;
-  $('hdr-label').textContent = data.label || data.sessionId;
-  $('hdr-badge').textContent = ACCESS === 'operate' ? '可对话' : '只读';
+  $('hdr-label').textContent = data.label || data.sessionId || '分享';
   renderHistory(data.messages || []);
+  if (data.type === 'messages') {
+    // Static snapshot of selected messages — no live session, no WS, no input.
+    $('hdr-badge').textContent = '消息快照';
+    show('app');
+    $('composer').style.display = 'none';
+    setStatus('这是分享的消息快照（只读）。');
+    return;
+  }
+  $('hdr-badge').textContent = ACCESS === 'operate' ? '可对话' : '只读';
   show('app');
   connectWs();
 }

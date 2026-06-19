@@ -1678,6 +1678,33 @@ app.delete('/api/sessions/:id/share/:token', (req, res) => {
   res.json({ ok: share.remove(req.params.token) });
 });
 
+// Chat history (admin) — used by the "share selected messages" picker.
+app.get('/api/sessions/:id/history', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  res.json({ messages: loadChatHistory(req.params.id) });
+});
+
+// Create a read-only snapshot share of selected messages (by index into history).
+app.post('/api/sessions/:id/share-messages', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  const b = req.body || {};
+  const history = loadChatHistory(req.params.id);
+  const indices = Array.isArray(b.indices) ? b.indices : [];
+  const picked = indices
+    .map(i => history[i])
+    .filter(Boolean);
+  if (!picked.length) return res.status(400).json({ error: 'no valid messages selected' });
+  try {
+    const rec = share.createMessageShare(s.id, picked, {
+      password: b.password, expiresAt: b.expiresAt, label: b.label || s.label || s.id,
+    });
+    const base = `${req.protocol}://${req.get('host')}`;
+    res.json({ ok: true, ...rec, url: `${base}/share/${rec.token}` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // ── Share recipient endpoints (NO ACCESS_TOKEN; gated by the share token only) ──
 // The page; the inline JS reads the token from the URL and self-gates.
 app.get('/share/:token', (req, res) => {
@@ -1704,10 +1731,15 @@ app.get('/api/share/:token/session', (req, res) => {
   if (!r) return res.status(404).json({ error: 'share not found or expired' });
   const a = share.access(token, { cookies: parseCookies(req.headers.cookie) });
   if (!a) return res.status(401).json({ needPassword: true });
+  // Message snapshot share: static, read-only, independent of the live session.
+  if (r.type === 'messages') {
+    return res.json({ access: 'view', type: 'messages', label: r.label || '消息分享', messages: r.messages || [] });
+  }
   const persisted = persistedSessions.get(r.sessionId);
   if (!persisted) return res.status(404).json({ error: 'session no longer exists' });
   res.json({
     access: a.access,
+    type: 'session',
     sessionId: r.sessionId,
     label: persisted.label || r.sessionId,
     cli: persisted.cli || 'claude',

@@ -1448,7 +1448,9 @@ async function shareApi(method, p, body) {
 }
 
 function shareRow(s) {
-  const lvl = s.access === 'operate' ? '可对话' : (s.hasPassword ? '密码查看' : '公开查看');
+  const lvl = s.type === 'messages'
+    ? `📎 消息快照·${s.messageCount || 0}条${s.hasPassword ? '·密码' : ''}`
+    : (s.access === 'operate' ? '可对话' : (s.hasPassword ? '密码查看' : '公开查看'));
   const exp = s.expiresAt ? `，到期 ${new Date(s.expiresAt).toLocaleString()}` : '';
   return `<div class="share-row" data-token="${s.token}" style="border:1px solid #30363d;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;">
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;"><b style="color:#79c0ff;">${lvl}</b><span style="color:#8b949e;">${exp}</span></div>
@@ -1463,7 +1465,8 @@ async function openShareDialog() {
   box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:560px;max-width:94vw;max-height:90vh;overflow:auto;color:#c9d1d9;';
   box.innerHTML = `
     <div style="font-size:15px;font-weight:600;margin-bottom:4px;">分享此会话（外部网页链接）</div>
-    <div style="font-size:12px;color:#8b949e;line-height:1.6;margin-bottom:14px;">接收方在浏览器打开链接即可。<b style="color:#f0883e;">「可对话」= 对方能通过此会话在你机器上执行操作，务必设强密码、谨慎分享。</b></div>
+    <div style="font-size:12px;color:#8b949e;line-height:1.6;margin-bottom:10px;">接收方在浏览器打开链接即可。<b style="color:#f0883e;">「可对话」= 对方能通过此会话在你机器上执行操作，务必设强密码、谨慎分享。</b></div>
+    <div style="margin-bottom:12px;"><button id="sh-msgmode" style="background:#1b2330;border:1px solid #2d3a4f;border-radius:6px;color:#79c0ff;font-size:12px;padding:6px 10px;cursor:pointer;">✂️ 改为分享指定消息（只读快照）…</button></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
       <select id="sh-access" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 9px;">
         <option value="view">只读查看</option>
@@ -1482,6 +1485,7 @@ async function openShareDialog() {
   overlay.appendChild(box); document.body.appendChild(overlay);
   const close = () => overlay.remove();
   box.querySelector('#sh-close').onclick = close;
+  box.querySelector('#sh-msgmode').onclick = () => { close(); openMessagePicker(); };
   overlay.onclick = (e) => { if (e.target === overlay) close(); };
   const msg = box.querySelector('#sh-msg');
   const listEl = box.querySelector('#sh-list');
@@ -1514,6 +1518,67 @@ async function openShareDialog() {
 }
 
 shareBtn?.addEventListener('click', openShareDialog);
+
+// Pick specific messages → share a read-only snapshot link.
+async function openMessagePicker() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:620px;max-width:94vw;max-height:90vh;display:flex;flex-direction:column;color:#c9d1d9;';
+  box.innerHTML = `
+    <div style="font-size:15px;font-weight:600;margin-bottom:4px;">分享指定消息（只读快照）</div>
+    <div style="font-size:12px;color:#8b949e;margin-bottom:10px;">勾选要分享的消息；生成的是固定快照，原会话变动或删除都不影响。</div>
+    <div id="mp-list" style="flex:1;overflow:auto;border:1px solid #30363d;border-radius:8px;padding:6px;margin-bottom:10px;min-height:120px;">加载中…</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+      <label style="font-size:12px;color:#8b949e;display:flex;gap:4px;align-items:center;cursor:pointer;"><input type="checkbox" id="mp-all"> 全选</label>
+      <span id="mp-count" style="font-size:12px;color:#8b949e;">已选 0 条</span>
+      <input id="mp-pw" placeholder="密码（可留空=公开）" style="flex:1;min-width:140px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 9px;">
+      <select id="mp-exp" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 9px;">
+        <option value="0">永不过期</option><option value="24">1 天</option><option value="168">7 天</option></select>
+    </div>
+    <div id="mp-msg" style="font-size:12px;min-height:16px;margin-bottom:8px;"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;">
+      <button id="mp-cancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;">关闭</button>
+      <button id="mp-go" style="background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;">生成链接</button>
+    </div>`;
+  overlay.appendChild(box); document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  box.querySelector('#mp-cancel').onclick = close;
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  const listEl = box.querySelector('#mp-list'), countEl = box.querySelector('#mp-count'), msgEl = box.querySelector('#mp-msg');
+  const updateCount = () => { countEl.textContent = `已选 ${listEl.querySelectorAll('input[type=checkbox]:checked').length} 条`; };
+
+  let msgs = [];
+  try {
+    const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/history`));
+    const d = await r.json(); msgs = d.messages || [];
+  } catch (e) { listEl.textContent = '加载失败：' + e.message; return; }
+  if (!msgs.length) { listEl.textContent = '暂无消息'; return; }
+  const escH = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  listEl.innerHTML = msgs.map((m, i) => {
+    const who = m.role === 'user' ? '我' : 'AI';
+    const preview = escH((m.content || '').replace(/\s+/g, ' ').slice(0, 120)) || (m.tools && m.tools.length ? `（${m.tools.length} 个工具调用）` : '（空）');
+    return `<label style="display:flex;gap:8px;align-items:flex-start;padding:6px;border-bottom:1px solid #21262d;cursor:pointer;font-size:12px;">
+      <input type="checkbox" data-i="${i}" style="margin-top:2px;">
+      <span><b style="color:${m.role === 'user' ? '#79c0ff' : '#e7eaee'}">${who}</b> <span style="color:#8b949e">${preview}</span></span></label>`;
+  }).join('');
+  listEl.querySelectorAll('input[type=checkbox]').forEach(c => c.onchange = updateCount);
+  box.querySelector('#mp-all').onchange = (e) => { listEl.querySelectorAll('input[type=checkbox]').forEach(c => c.checked = e.target.checked); updateCount(); };
+
+  box.querySelector('#mp-go').onclick = async () => {
+    const indices = [...listEl.querySelectorAll('input[type=checkbox]:checked')].map(c => parseInt(c.dataset.i, 10));
+    if (!indices.length) { msgEl.style.color = '#f85149'; msgEl.textContent = '请至少选择一条消息'; return; }
+    const password = box.querySelector('#mp-pw').value.trim();
+    const hrs = parseInt(box.querySelector('#mp-exp').value, 10);
+    const body = { indices }; if (password) body.password = password; if (hrs > 0) body.expiresAt = Date.now() + hrs * 3600 * 1000;
+    try {
+      const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/share-messages`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await res.json(); if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`);
+      navigator.clipboard?.writeText(d.url);
+      msgEl.style.color = '#3fb950'; msgEl.textContent = '已生成并复制：' + d.url;
+    } catch (e) { msgEl.style.color = '#f85149'; msgEl.textContent = e.message; }
+  };
+}
 
 updateRoleBtn();
 loadSessionModel();

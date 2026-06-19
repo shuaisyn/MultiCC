@@ -35,6 +35,8 @@ function hashPw(pw, salt) { return crypto.scryptSync(String(pw), salt, 32).toStr
 function publicRec(r) {
   return {
     token: r.token, sessionId: r.sessionId, access: r.access,
+    type: r.type || 'session',
+    messageCount: r.type === 'messages' ? (r.messages ? r.messages.length : 0) : undefined,
     hasPassword: !!r.pwHash, expiresAt: r.expiresAt || null,
     createdAt: r.createdAt, label: r.label || null,
   };
@@ -62,6 +64,29 @@ function create(sessionId, { access, password, expiresAt, label } = {}) {
   return publicRec(rec);
 }
 
+// Create a read-only snapshot share of selected messages. The messages are
+// COPIED at share time, so the link is stable even if the session later changes
+// or is deleted, and it never exposes the live session. access is always 'view'.
+function createMessageShare(sessionId, messages, { password, expiresAt, label } = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) throw new Error('no messages to share');
+  const token = crypto.randomBytes(18).toString('base64url');
+  const rec = {
+    token, sessionId, access: 'view', type: 'messages',
+    messages: messages.map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: typeof m.content === 'string' ? m.content : '',
+      tools: Array.isArray(m.tools) ? m.tools.map(t => ({ name: t.name, input: t.input })) : undefined,
+      ts: m.ts || null,
+    })),
+    createdAt: Date.now(), expiresAt: expiresAt ? Number(expiresAt) : null,
+    label: label || null, salt: null, pwHash: null, secret: crypto.randomBytes(16).toString('hex'),
+  };
+  if (password) { rec.salt = crypto.randomBytes(16).toString('hex'); rec.pwHash = hashPw(password, rec.salt); }
+  shares[token] = rec;
+  save();
+  return publicRec(rec);
+}
+
 function get(token) {
   const r = shares[token];
   if (!r) return null;
@@ -75,9 +100,14 @@ function listForSession(sessionId) {
 
 function remove(token) { const had = !!shares[token]; if (had) { delete shares[token]; save(); } return had; }
 
+// Drop a session's LIVE shares when the session is deleted. Message snapshots
+// are independent copies (their content lives in the share record), so they
+// survive — the shared excerpt link keeps working after the session is gone.
 function removeForSession(sessionId) {
   let n = 0;
-  for (const t of Object.keys(shares)) if (shares[t].sessionId === sessionId) { delete shares[t]; n++; }
+  for (const t of Object.keys(shares)) {
+    if (shares[t].sessionId === sessionId && (shares[t].type || 'session') !== 'messages') { delete shares[t]; n++; }
+  }
   if (n) save();
   return n;
 }
@@ -112,7 +142,7 @@ function access(token, { cookies = {}, password } = {}) {
 }
 
 module.exports = {
-  create, get, publicRec, listForSession, remove, removeForSession,
+  create, createMessageShare, get, publicRec, listForSession, remove, removeForSession,
   verifyPassword, authCookieValue, access,
   cookieName: (token) => `multicc_share_${token}`,
 };
