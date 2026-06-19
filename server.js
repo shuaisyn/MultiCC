@@ -155,6 +155,9 @@ function isAuthenticated(req) {
     // Allow login page, static assets
     if (req.path === '/login' || req.path === '/logout') return next();
     if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|json)$/i.test(req.path)) return next();
+    // Wait-callback endpoint is secured by its own per-wait token so external
+    // (off-box) systems can deliver results without the ACCESS_TOKEN cookie.
+    if (req.method === 'POST' && /^\/api\/wait\/[^/]+\/resolve$/.test(req.path)) return next();
     if (isAuthenticated(req)) return next();
     // Redirect HTML requests to login, reject API calls with 403
     if (req.headers.accept?.includes('text/html') || (!req.path.startsWith('/api/') && req.method === 'GET')) {
@@ -307,6 +310,16 @@ const MULTICC_IMG_HINT = [
   `  curl -s http://127.0.0.1:${process.env.PORT || 3000}/api/cron -H 'Content-Type: application/json' \\`,
   `    -d '{"name":"任务名","dirPath":"<当前工作目录的绝对路径>","cron":"0 9 * * *","prompt":"到点要执行的完整指令"}'`,
   'cron 为标准 5 段（分 时 日 月 周，本地时区），如 "0 9 * * *" 表示每天 9:00。dirPath 用你当前的工作目录即可。登记后告诉用户可在 /manage 的「定时任务」里查看与管理。仅在用户明确要求定时/周期执行时才登记。',
+  '',
+  '【等待外部结果，别空等】当你需要「等某个后台任务/部署/接口/第三方返回后再继续」时，不要只在回复里说“我等一下”然后停下——那样这一轮就结束了、不会自动继续。请改用 multicc 的等待接口登记，到点 multicc 会自动把结果作为下一条消息发回给你、你就能接着做：',
+  '  ① 轮询（你能用命令/URL 查状态时）：',
+  `     curl -s $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/wait -H 'Content-Type: application/json' \\`,
+  `       -d '{"mode":"poll","pollCmd":"<查询状态的shell命令>","untilContains":"<出现即视为完成的关键字>","intervalSec":15,"maxChecks":40}'`,
+  '     （也可用 "pollUrl" 代替 pollCmd，用 "untilRegex" 代替 untilContains。命令在你的工作目录下执行。）',
+  '  ② 回调（由外部系统在完成时主动通知）：',
+  `     curl -s $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/wait -H 'Content-Type: application/json' -d '{"mode":"callback"}'`,
+  '     返回里的 callbackUrl 交给外部系统，让它在完成时 POST 结果到该 URL（body 放 {"data":"..."}）。',
+  '  登记成功后，正常结束本轮即可——条件满足/回调到达时 multicc 会自动续接，无需用户手动催。',
 ].join('\n');
 
 const cliProviders = {
@@ -1423,6 +1436,7 @@ app.delete('/api/directories/:id', (req, res) => {
       chatStream.close(s.id);
       chatSessions.delete(s.id);
     }
+    waitInjector.cancelForSession(s.id);
     if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
     teardownTriggers(s.id);
     purgeNotesForSession(s.id);
@@ -1618,6 +1632,13 @@ app.patch('/api/sessions/:id', (req, res) => {
     if (!s.streaming) chatStream.close(s.id); // tear down any warm process
     appendEvent(s.dirId, 'session_streaming_changed', `${s.label || s.id} → ${s.streaming ? '流式常驻' : '逐轮'}`, s.id);
   }
+  if (req.body.autoContinue !== undefined) {
+    // D fallback: auto-nudge the session to continue when a turn ends only
+    // "waiting on a background task" (guarded; see wait-injector).
+    s.autoContinue = !!req.body.autoContinue;
+    if (!s.autoContinue) waitInjector.resetAuto(s.id);
+    appendEvent(s.dirId, 'session_autocontinue_changed', `${s.label || s.id} → ${s.autoContinue ? '自动接力' : '关闭'}`, s.id);
+  }
   savePersistedSessions();
   res.json(s);
 });
@@ -1766,6 +1787,7 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (chat.pendingClassifyTimer) clearTimeout(chat.pendingClassifyTimer);
     chatSessions.delete(id);
   }
+  waitInjector.cancelForSession(id);
   // Remove the session's git worktree + branch.
   const persisted = persistedSessions.get(id);
   if (persisted && persisted.worktreePath && persisted.branch) {
@@ -2390,6 +2412,7 @@ webpush.setVapidDetails('mailto:multicc@localhost', vapidKeys.pubKey, vapidKeys.
 const push = require('./src/push');
 const tunnel = require('./src/tunnel');
 const chatStream = require('./src/chat-stream');
+const waitInjector = require('./src/wait-injector');
 
 // ── Server Info (LAN IP for QR code) ──
 app.get('/api/server-info', (req, res) => {
@@ -3151,12 +3174,17 @@ const sessionSummaries = new Map();  // sessionId → { summary, ts } — aux-AI
 // line 2 = optional short task summary. Tolerant of blank/extra lines.
 function parseClassifyResult(text) {
   const lines = String(text || '').trim().split('\n').map(l => l.trim()).filter(Boolean);
-  const state = (lines[0] || '').toUpperCase().startsWith('W') ? 'waiting' : 'completed';
+  const first = (lines[0] || '').toUpperCase();
+  // B = waiting on a background task/external data (no user action needed) — the
+  // auto-continue (D) trigger. For notify purposes B still counts as 'waiting'
+  // so a session with auto-continue OFF still surfaces to the user.
+  const background = first.startsWith('B');
+  const state = (first.startsWith('W') || background) ? 'waiting' : 'completed';
   let summary = lines.slice(1).join(' ').trim();
   // Strip a leading bullet/label the model sometimes adds, and cap length.
   summary = summary.replace(/^(第?2?行[:：]?|摘要[:：]?|总结[:：]?|[-*·]\s*)/, '').trim();
   if (summary.length > 40) summary = summary.slice(0, 40);
-  return { state, summary };
+  return { state, summary, background };
 }
 
 // Store an aux-AI task summary for a session and push it to the workspace board.
@@ -3344,7 +3372,10 @@ function scheduleIntentClassify(cs, sessionName) {
       id: taskId,
       type: 'intent_classify',
       prompt: `你是一个意图分析器。判断以下 AI 助手回复的结尾状态。请严格输出两行：
-第1行：仅一个字母——C = 任务已完成，不需要用户操作；W = 正在等待用户回复或决策
+第1行：仅一个字母——
+  C = 任务已完成，不需要任何后续动作
+  W = 正在等待用户回复、确认或决策（需要用户操作）
+  B = 正在等待某个后台任务/外部数据/第三方返回后才能继续，且无需用户操作（例如“等部署完成”“等接口返回”“稍后再查”）
 第2行：用不超过 20 个汉字概括它最近在做的事（动词开头，如“修复登录页样式”），无法概括就留空。
 
 回复内容：
@@ -3353,7 +3384,18 @@ ${tail}`,
     }).then(result => {
       cs.pendingClassifyTaskId = null;
       if (result.cancelled) return;
-      const { state, summary } = parseClassifyResult(result.text);
+      const { state, summary, background } = parseClassifyResult(result.text);
+      // D (auto-continue): the turn only paused for a background task/external
+      // data and the session opted in → keep it moving silently (no user notify),
+      // unless an explicit A/B wait already covers this session.
+      const persistedRec = persistedSessions.get(sessionName);
+      if (background && persistedRec?.autoContinue && !waitInjector.hasWait(sessionName)) {
+        setSessionSummary(sessionId, summary);
+        console.log(`[multicc/aux] Intent classify for ${sessionName}: background → auto-continue`);
+        waitInjector.autoContinue(sessionName, { cwd: cs.cwd });
+        return;
+      }
+      waitInjector.resetAuto(sessionName); // done / waiting-on-user → reset D's counter
       const msg = state === 'waiting' ? '等待操作' : '任务已完成';
       // This aux-AI verdict is the single source of truth for "is the turn done
       // or waiting?". Fan it out to every channel from here so nothing re-judges:
@@ -3458,12 +3500,15 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
 }
 
 function runChatTurn(sessionName, text, opts = {}) {
-  const { isFirstTurn: forceFirstTurn, originDispatchId, originTrigger } = opts;
+  const { isFirstTurn: forceFirstTurn, originDispatchId, originTrigger, originContinue } = opts;
   const persisted = persistedSessions.get(sessionName);
   if (!persisted) {
     console.warn(`[multicc/chat] runChatTurn: no persisted record for ${sessionName}`);
     return false;
   }
+  // A real (non-auto-continue) message means the user/trigger is driving again →
+  // reset the D auto-continue guard so a future background-wait gets fresh budget.
+  if (!originContinue) waitInjector.resetAuto(sessionName);
   // Ensure session-level state exists even when no WS client is connected.
   let cs = chatSessions.get(sessionName);
   if (!cs) {
@@ -3844,6 +3889,62 @@ function runChatTurn(sessionName, text, opts = {}) {
 //  • need the return value (gateway): registry service 'chat.runTurn'
 bus.on('chat:run', (sessionName, text, opts) => runChatTurn(sessionName, text, opts));
 services.provide('chat.runTurn', runChatTurn);
+
+// ── Wait injector: continue a session when external data arrives (A/B/D) ──
+waitInjector.init({
+  // All continuations route through runChatTurn → streaming sessions get the
+  // warm process (queued if busy), default sessions get a --resume turn.
+  inject: (session, text) => runChatTurn(session, text, { originContinue: true }),
+  isBusy: (session) => {
+    const cs = chatSessions.get(session);
+    if (cs && cs.claudeProc) return true;
+    const st = chatStream.status(session);
+    return !!(st && st.busy);
+  },
+  exec: (cmd, cwd) => new Promise((resolve) => {
+    require('child_process').exec(cmd, { cwd, timeout: 20000, maxBuffer: 1024 * 1024, env: process.env },
+      (err, stdout, stderr) => resolve({ stdout: stdout || '', stderr: stderr || '', code: err ? (err.code || 1) : 0 }));
+  }),
+  log: (m) => console.log('[multicc/wait]', m),
+});
+
+// Register a wait — called by the model via localhost (MULTICC_BASE_URL) when it
+// needs to pause for external data instead of ending the turn dead.
+//   poll:     { mode:'poll', pollCmd|pollUrl, untilContains|untilRegex, intervalSec?, maxChecks?, injectPrefix? }
+//   callback: { mode:'callback', injectPrefix?, timeoutSec? } → returns a callbackUrl
+app.post('/api/sessions/:id/wait', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  const b = req.body || {};
+  try {
+    const reg = waitInjector.register({
+      session: s.id, mode: b.mode, cwd: cwdForSession(s),
+      pollCmd: b.pollCmd, pollUrl: b.pollUrl,
+      untilContains: b.untilContains, untilRegex: b.untilRegex,
+      intervalSec: b.intervalSec, maxChecks: b.maxChecks,
+      injectPrefix: b.injectPrefix, timeoutSec: b.timeoutSec,
+    });
+    const callbackUrl = `${req.protocol}://${req.get('host')}/api/wait/${reg.id}/resolve?token=${reg.token}`;
+    res.json({ ok: true, ...reg, callbackUrl });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Resolve a callback wait — the external system POSTs its result here. Secured
+// by the per-wait token (exempt from ACCESS_TOKEN so off-box callers can reach it).
+app.post('/api/wait/:wid/resolve', (req, res) => {
+  const token = req.query.token || req.headers['x-wait-token'] || (req.body && req.body.token);
+  const data = (req.body && req.body.data !== undefined) ? req.body.data : (req.body ?? '');
+  const r = waitInjector.resolve(req.params.wid, token, data);
+  res.status(r.ok ? 200 : 400).json(r);
+});
+
+app.get('/api/sessions/:id/waits', (req, res) => {
+  res.json({ waits: waitInjector.listForSession(req.params.id), stats: waitInjector.stats() });
+});
+
+app.delete('/api/wait/:wid', (req, res) => {
+  res.json(waitInjector.cancel(req.params.wid));
+});
 
 // ── Streaming chat turn (persistent process; see runChatTurn's streaming branch) ──
 // Feeds the prompt into the session's long-lived `claude` process and forwards
