@@ -34,6 +34,7 @@ const crypto = require('crypto');
 const bus = require('./src/bus');
 const services = require('./src/services');
 const state = require('./src/state');
+const artifacts = require('./src/artifacts');
 const app = express();
 
 // ── Access token authentication (cookie-based login) ──
@@ -163,6 +164,10 @@ function isAuthenticated(req) {
     // admin share management lives under /api/sessions/* and stays gated.
     if (/^\/share\/[^/]+$/.test(req.path)) return next();
     if (/^\/api\/share\/[^/]+\/(auth|session)$/.test(req.path)) return next();
+    // Temp artifacts (multicc-artifact skill): the random <id> in the path is an
+    // unguessable capability token, so artifact links open without ACCESS_TOKEN —
+    // same model as /share/:token above (keep regex in sync with src/artifacts.js).
+    if (/^\/artifacts\/[A-Za-z0-9_-]+(?:\/|$)/.test(req.path)) return next();
     if (isAuthenticated(req)) return next();
     // Redirect HTML requests to login, reject API calls with 403
     if (req.headers.accept?.includes('text/html') || (!req.path.startsWith('/api/') && req.method === 'GET')) {
@@ -3195,6 +3200,11 @@ app.get('/api/apk-info', (req, res) => {
     res.json({ exists: false });
   }
 });
+
+// Temp artifacts produced by the multicc-artifact skill (served from
+// ~/.multicc/artifacts). Mounted before the public static handler so /artifacts
+// is claimed first; auth is bypassed via the capability <id> (see middleware).
+artifacts.mount(app);
 
 app.use(express.static(path.join(__dirname, 'public'), {
   extensions: ['html'],
