@@ -230,3 +230,56 @@ class Directory {
   int get totalSessions =>
       claudeTerminalCount + claudeChatCount + codexTerminalCount + codexChatCount;
 }
+
+/// A multicc-native scheduled (cron) task. Mirrors the `toView` shape returned
+/// by the server's /api/cron endpoints (see cron-tasks.js).
+class CronTask {
+  final String id;
+  final String name;
+  final String dirId;
+  final String dirName;
+  final String cli; // 'claude' | 'codex'
+  final String prompt;
+  final String cron; // 5-field expression: minute hour day-of-month month day-of-week
+  final bool enabled;
+  final String createdBy;
+  final int? lastRunAt; // epoch ms
+  final String? lastStatus; // 'ok' | 'error' | 'spawn-failed' | null
+  final String lastError;
+  final int runCount;
+  final int? nextRunAt; // epoch ms
+
+  CronTask({
+    required this.id,
+    required this.name,
+    required this.dirId,
+    required this.dirName,
+    required this.cli,
+    required this.prompt,
+    required this.cron,
+    required this.enabled,
+    this.createdBy = 'user',
+    this.lastRunAt,
+    this.lastStatus,
+    this.lastError = '',
+    this.runCount = 0,
+    this.nextRunAt,
+  });
+
+  factory CronTask.fromJson(Map<String, dynamic> json) => CronTask(
+        id: (json['id'] ?? '').toString(),
+        name: (json['name'] ?? '').toString(),
+        dirId: (json['dirId'] ?? '').toString(),
+        dirName: (json['dirName'] ?? '').toString(),
+        cli: (json['cli'] ?? 'claude').toString(),
+        prompt: (json['prompt'] ?? '').toString(),
+        cron: (json['cron'] ?? '').toString(),
+        enabled: json['enabled'] == true,
+        createdBy: (json['createdBy'] ?? 'user').toString(),
+        lastRunAt: (json['lastRunAt'] as num?)?.toInt(),
+        lastStatus: json['lastStatus']?.toString(),
+        lastError: (json['lastError'] ?? '').toString(),
+        runCount: (json['runCount'] as num?)?.toInt() ?? 0,
+        nextRunAt: (json['nextRunAt'] as num?)?.toInt(),
+      );
+}

@@ -190,6 +190,47 @@ class SessionService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  /// Fetch the persisted chat history for a session. Returns the raw message
+  /// maps (role/content/ts/tools/cost) in their server-side order — the index
+  /// of each entry is the authoritative index for [shareMessages].
+  Future<List<Map<String, dynamic>>> fetchHistory(String id) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/sessions/$id/history')), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final list = (data['messages'] as List? ?? []);
+    return list.map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
+  /// Create a read-only snapshot share of selected messages (by index into the
+  /// session history). Returns the share record incl. `url`.
+  Future<Map<String, dynamic>> shareMessages(
+    String id, {
+    required List<int> indices,
+    String? password,
+    String? label,
+  }) async {
+    final body = <String, dynamic>{'indices': indices};
+    if (password != null && password.isNotEmpty) body['password'] = password;
+    if (label != null && label.isNotEmpty) body['label'] = label;
+    final res = await http
+        .post(
+          Uri.parse(_url('/api/sessions/$id/share-messages')),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<void> updateSessionLabel(String id, String? label) async {
     final res = await http
         .patch(
@@ -313,6 +354,23 @@ class SessionService {
       final err = _tryParseError(res.body);
       throw Exception(err ?? '${res.statusCode}');
     }
+  }
+
+  /// Push all of a directory's worktree branches (and the base branch) to the
+  /// configured git remote. Returns the parsed server response: on success
+  /// `{ok: true, pushed, before: {ahead, remote, remoteBranch}, ...}`. On HTTP
+  /// error sets `ok: false` + `error`.
+  Future<Map<String, dynamic>> pushDirectory(String id) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/directories/$id/push')), headers: _headers)
+        .timeout(const Duration(seconds: 60));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['ok'] = false;
+      map['error'] ??= _tryParseError(res.body) ?? '${res.statusCode}';
+    }
+    return map;
   }
 
   Future<void> deleteDirectory(String id, {bool force = true}) async {

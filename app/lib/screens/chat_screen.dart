@@ -18,6 +18,7 @@ import '../widgets/model_picker.dart';
 import '../widgets/thinking_indicator.dart';
 import 'memo_screen.dart';
 import 'settings_screen.dart';
+import 'share_messages_screen.dart';
 
 /// Reusable chat view — expects a ChatProvider in the widget tree
 /// (provided by MainShell via ChangeNotifierProvider.value).
@@ -331,6 +332,15 @@ class _Header extends StatelessWidget {
             onClear: () => _confirmClear(context, provider),
             onSettings: () => _openSettings(context, settings),
             onShare: () => _shareFromSession(context, provider.sessionName, settings),
+            onShareMessages: () => Navigator.push(
+              context,
+              MaterialPageRoute<void>(
+                builder: (_) => ShareMessagesScreen(
+                  sessionId: provider.sessionName,
+                  settings: settings,
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -818,6 +828,7 @@ class _HeaderOverflowMenu extends StatelessWidget {
   final VoidCallback onClear;
   final VoidCallback onSettings;
   final VoidCallback onShare;
+  final VoidCallback onShareMessages;
   const _HeaderOverflowMenu({
     required this.mergeReady,
     required this.onRole,
@@ -826,6 +837,7 @@ class _HeaderOverflowMenu extends StatelessWidget {
     required this.onClear,
     required this.onSettings,
     required this.onShare,
+    required this.onShareMessages,
   });
 
   @override
@@ -855,6 +867,9 @@ class _HeaderOverflowMenu extends StatelessWidget {
           case 'share':
             onShare();
             break;
+          case 'share-msgs':
+            onShareMessages();
+            break;
           case 'settings':
             onSettings();
             break;
@@ -866,6 +881,8 @@ class _HeaderOverflowMenu extends StatelessWidget {
         _item('memo', Icons.sticky_note_2_outlined, '项目备忘',
             const Color(0xFFe7eaee)),
         _item('share', Icons.share_outlined, '分享会话',
+            const Color(0xFFe7eaee)),
+        _item('share-msgs', Icons.checklist_rtl_outlined, '分享选定消息',
             const Color(0xFFe7eaee)),
         _item(
           'merge',

@@ -11,6 +11,8 @@ import '../services/background_service.dart';
 import '../services/settings_service.dart';
 import '../theme.dart';
 import '../widgets/model_picker.dart';
+import 'agent_resources_screen.dart';
+import 'cron_screen.dart';
 import 'main_shell.dart';
 
 /// Unified in-app settings page. Covers app-local config (server connection,
@@ -303,9 +305,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
           _Section(
+            title: '管理',
+            children: [
+              _NavTile(
+                icon: Icons.alarm_rounded,
+                title: '定时任务',
+                subtitle: '到点自动唤起会话执行指令（cron）',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => CronScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.dataset_outlined,
+                title: 'Agent 资源 / 缓存',
+                subtitle: 'Skills、Claude 历史会话清理、临时上传缓存',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => AgentResourcesScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          _Section(
             title: '服务端设置',
             children: [
-              const _Hint('定时任务、语音密钥、推送通道、WeChat 桥接等属于服务器全局设置，请在网页管理台配置。'),
+              const _Hint('语音密钥、推送通道、WeChat 桥接、外网穿透、macOS 电源等服务器全局/敏感设置，请在网页管理台配置。'),
               const SizedBox(height: 10),
               SizedBox(
                 width: double.infinity,
@@ -390,6 +420,49 @@ class _Hint extends StatelessWidget {
         padding: const EdgeInsets.only(top: 8),
         child: Text(text, style: const TextStyle(color: AppColors.faint, fontSize: 12, height: 1.5)),
       );
+}
+
+class _NavTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  const _NavTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: AppColors.accent),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: const TextStyle(
+                          color: AppColors.text, fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(subtitle,
+                      style: const TextStyle(color: AppColors.faint, fontSize: 12)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: AppColors.faint, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _Tile extends StatelessWidget {

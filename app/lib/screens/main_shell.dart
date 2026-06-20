@@ -616,6 +616,20 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                       ),
                       IconButton(
                         icon: const Icon(
+                          Icons.cloud_upload_outlined,
+                          size: 19,
+                          color: Color(0xFF8a909b),
+                        ),
+                        tooltip: 'Push to remote (git push)',
+                        onPressed: () => _pushDirectory(context),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 36,
+                          minHeight: 36,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(
                           Icons.drive_file_rename_outline_rounded,
                           size: 19,
                           color: Color(0xFF8a909b),
@@ -867,6 +881,40 @@ class _DirectoryCardState extends State<_DirectoryCard> {
           backgroundColor: const Color(0xFFff6b63),
         ),
       );
+    }
+  }
+
+  Future<void> _pushDirectory(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('正在推送到远程…'), duration: Duration(seconds: 30)),
+    );
+    try {
+      final r = await widget.mgr.service.pushDirectory(widget.directory.id);
+      if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+      if (r['ok'] == true) {
+        final before = (r['before'] as Map?) ?? const {};
+        final ahead = before['ahead'] ?? 0;
+        final remote = before['remote'] ?? 'origin';
+        final branch = before['remoteBranch'] ?? '';
+        final msg = r['pushed'] == true
+            ? '已推送 $ahead 个提交 → $remote/$branch'
+            : '无待推送提交';
+        messenger.showSnackBar(SnackBar(content: Text(msg)));
+      } else {
+        messenger.showSnackBar(SnackBar(
+          content: Text('推送失败：${r['error'] ?? '未知错误'}'),
+          backgroundColor: const Color(0xFFff6b63),
+        ));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(
+        content: Text('推送失败：$e'),
+        backgroundColor: const Color(0xFFff6b63),
+      ));
     }
   }
 
