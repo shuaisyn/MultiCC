@@ -2038,10 +2038,29 @@ function openGoalModal() {
   goalPrecheckBtn.style.display = '';
   goalPrecheckBtn.disabled = false;
   goalPrecheckBtn.textContent = '预检';
+  loadGoalDims();   // default the checkboxes to the global config
   goalModal.classList.add('open');
   goalTaskEl.focus();
 }
 function closeGoalModal() { goalModal.classList.remove('open'); }
+
+// Default the per-send dimension checkboxes to the saved global config.
+async function loadGoalDims() {
+  const boxes = document.querySelectorAll('#goal-dims input[data-dim]');
+  try {
+    const res = await fetch(withToken('/api/settings/goal'));
+    const d = await res.json();
+    const dims = d.dimensions || {};
+    boxes.forEach(cb => { cb.checked = dims[cb.dataset.dim] !== false; });
+  } catch (_) {
+    boxes.forEach(cb => { cb.checked = true; });
+  }
+}
+function collectGoalDims() {
+  const dims = {};
+  document.querySelectorAll('#goal-dims input[data-dim]').forEach(cb => { dims[cb.dataset.dim] = cb.checked; });
+  return dims;
+}
 
 function goalList(title, items) {
   if (!items || !items.length) return '';
