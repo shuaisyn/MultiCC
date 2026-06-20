@@ -60,3 +60,6 @@ app/ios/DerivedData/
 multicc.memo.md
 **/multicc.memo.md
 tunnel-config.json
+
+# Goal 预检配置（运行时，保持本地）
+goal-config.json

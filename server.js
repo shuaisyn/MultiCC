@@ -3178,17 +3178,49 @@ app.post('/api/aux/enqueue', (req, res) => {
 
 // ── Goal-mode precheck ──
 // Before a task is sent in "Goal 模式" (target-driven, run autonomously to
-// completion, self-verify), the aux-AI judges whether it's well-formed enough:
-// clear objective, clear done-criteria, bounded scope, independently executable.
+// completion, self-verify), the aux-AI judges whether it's well-formed enough.
+// Which criteria ("限制") are checked is configurable per-dimension, plus a
+// minimum pass score — globally in goal-config.json (settings panels) and
+// per-send (the chat 🎯 dialog can override the dimensions for one check).
 // Returns a verdict + a rewritten "goal-ready" version the user can accept/edit.
-function buildGoalPrecheckPrompt(task) {
+const GOAL_DIMENSIONS = {
+  objective:  '目标明确：清楚要达成什么结果，而非含糊方向。',
+  criteria:   '完成标准明确：有可判断「做完了」的验收标准或可观察的产出。',
+  scope:      '范围清晰：边界明确，不至于无限发散。',
+  executable: '可独立执行：代理无需再追问关键信息即可开工，或缺失信息能用合理默认补足。',
+};
+const GOAL_CONFIG_DEFAULT = { dimensions: { objective: true, criteria: true, scope: true, executable: true }, minScore: 60 };
+const GOAL_CONFIG_FILE = path.join(__dirname, 'goal-config.json');
+
+function normalizeGoalConfig(c) {
+  c = c || {};
+  const dims = {};
+  for (const k of Object.keys(GOAL_DIMENSIONS)) {
+    dims[k] = (c.dimensions && typeof c.dimensions[k] === 'boolean') ? c.dimensions[k] : GOAL_CONFIG_DEFAULT.dimensions[k];
+  }
+  let minScore = parseInt(c.minScore, 10);
+  if (!Number.isFinite(minScore)) minScore = GOAL_CONFIG_DEFAULT.minScore;
+  minScore = Math.max(0, Math.min(100, minScore));
+  return { dimensions: dims, minScore };
+}
+
+let goalConfig;
+try { goalConfig = normalizeGoalConfig(JSON.parse(fs.readFileSync(GOAL_CONFIG_FILE, 'utf8'))); }
+catch (_) { goalConfig = normalizeGoalConfig(null); }
+function saveGoalConfig() {
+  try { fs.writeFileSync(GOAL_CONFIG_FILE, JSON.stringify(goalConfig, null, 2)); }
+  catch (e) { console.warn('[multicc/goal] save config failed:', e.message); }
+}
+
+function buildGoalPrecheckPrompt(task, dims) {
+  const keys = Object.keys(GOAL_DIMENSIONS).filter(k => dims[k]);
+  // Never send an empty rubric — fall back to all dimensions if none enabled.
+  const list = (keys.length ? keys : Object.keys(GOAL_DIMENSIONS))
+    .map((k, i) => `${i + 1}. ${GOAL_DIMENSIONS[k]}`).join('\n');
   return `你是「任务质量审查助手」。下面是用户想交给一个自主 AI 编程代理、以「Goal 模式」（目标驱动、自主规划并执行到完成、最后自检验证）执行的任务。
 
-请判断它是否满足 Goal 模式的要求，标准：
-1. 目标明确：清楚要达成什么结果，而非含糊方向。
-2. 完成标准明确：有可判断「做完了」的验收标准或可观察的产出。
-3. 范围清晰：边界明确，不至于无限发散。
-4. 可独立执行：代理无需再追问关键信息即可开工，或缺失信息能用合理默认补足。
+请只依据以下启用的标准判断它是否满足要求：
+${list}
 
 只输出一个 JSON 对象，不要任何额外文字、不要 markdown 代码块，字段如下：
 {
@@ -3200,7 +3232,7 @@ function buildGoalPrecheckPrompt(task) {
   "revised": "改写后可直接执行的 Goal-ready 任务描述，含目标与完成标准；若原任务已经很好可与原文基本一致"
 }
 
-score 为 0-100 的整数符合度评分。所有文本字段用与用户任务相同的语言填写。
+score 为 0-100 的整数符合度评分，只针对上面启用的标准评分。所有文本字段用与用户任务相同的语言填写。
 
 用户任务：
 <<<
@@ -3232,11 +3264,38 @@ function parseGoalVerdict(text) {
   };
 }
 
+// Goal precheck config (global defaults; the chat dialog may override dimensions
+// per-send). dimensionLabels lets both UIs render the criteria without hardcoding.
+app.get('/api/settings/goal', (req, res) => {
+  res.json({ ...goalConfig, dimensionLabels: GOAL_DIMENSIONS });
+});
+app.post('/api/settings/goal', (req, res) => {
+  goalConfig = normalizeGoalConfig(req.body || {});
+  saveGoalConfig();
+  res.json({ ok: true, ...goalConfig });
+});
+
 app.post('/api/goal/precheck', (req, res) => {
-  const task = (req.body?.task || '').trim();
+  const body = req.body || {};
+  const task = (body.task || '').trim();
   if (!task) return res.status(400).json({ error: 'task required' });
-  auxQueue.enqueue({ type: 'goal_check', prompt: buildGoalPrecheckPrompt(task), meta: { taskLen: task.length } })
-    .then(result => res.json({ ok: true, ...parseGoalVerdict(result.text) }))
+  // Per-send dimensions override the global default when provided; minScore too.
+  const dims = (body.dimensions && typeof body.dimensions === 'object')
+    ? normalizeGoalConfig({ dimensions: body.dimensions }).dimensions
+    : goalConfig.dimensions;
+  let minScore = parseInt(body.minScore, 10);
+  if (!Number.isFinite(minScore)) minScore = goalConfig.minScore;
+  minScore = Math.max(0, Math.min(100, minScore));
+  auxQueue.enqueue({ type: 'goal_check', prompt: buildGoalPrecheckPrompt(task, dims), meta: { taskLen: task.length } })
+    .then(result => {
+      const v = parseGoalVerdict(result.text);
+      // Below-threshold scores are downgraded even if the AI said "ok".
+      if (minScore > 0 && v.verdict === 'ok' && v.score < minScore) {
+        v.verdict = 'needs_work';
+        v.issues = [`符合度 ${v.score} 低于设定阈值 ${minScore}`, ...v.issues];
+      }
+      res.json({ ok: true, ...v, dimensions: dims, minScore });
+    })
     .catch(err => res.json({ ok: false, error: err?.message || 'aux failed' }));
 });
 
