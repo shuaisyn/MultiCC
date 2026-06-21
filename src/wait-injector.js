@@ -230,8 +230,15 @@ function stats() {
   return { waits: waits.size, autoSessions: autoState.size };
 }
 
+// Busy-safe delivery of arbitrary text into a session as a new turn. Reuses the
+// same fireInject guard (retry while the session's turn is in flight) so callers
+// outside the wait machinery — e.g. routing a dispatched sub-task's result back
+// to the session that dispatched it — never interrupt an in-flight turn and
+// naturally serialise when several results land at once.
+function safeInject(session, text) { fireInject(session, text); }
+
 module.exports = {
   init, register, resolve, cancel, cancelForSession,
-  listForSession, hasWait, tick, autoContinue, resetAuto, stats,
+  listForSession, hasWait, tick, autoContinue, resetAuto, stats, safeInject,
   _waits: waits, // for tests
 };

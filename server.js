@@ -910,7 +910,7 @@ function handleGatewayControl(rawText) {
 
 // Deliver a confirmed dispatch to its target session, creating an ephemeral chat
 // for terminal-only targets. Returns { ok, chatId } or { ok:false, error }.
-async function dispatchToSession(targetId, message) {
+async function dispatchToSession(targetId, message, opts = {}) {
   const v = validateDispatchTarget(targetId);
   if (!v.ok) return { ok: false, error: v.error };
   const rec = v.rec;
@@ -937,7 +937,7 @@ async function dispatchToSession(targetId, message) {
   if (cs && cs.claudeProc) return { ok: false, error: `${targetId} 正在忙，稍后再试` };
 
   const dispatchId = crypto.randomUUID();
-  dispatchRuns.set(dispatchId, { targetId, chatSessionId: chatId, createdAt: Date.now() });
+  dispatchRuns.set(dispatchId, { targetId, chatSessionId: chatId, replyTo: opts.replyTo || null, createdAt: Date.now() });
   // Registry call (not a bus event): we need runChatTurn's boolean back to
   // detect an immediate launch failure. Avoids a static require of the chat domain.
   const ok = services.call('chat.runTurn', chatId, message, { originDispatchId: dispatchId });
@@ -945,16 +945,67 @@ async function dispatchToSession(targetId, message) {
   return { ok: true, chatId };
 }
 
-// A dispatched turn finished → push its final text back to the gateway/WeChat.
+// A dispatched turn finished → route its final text back to whoever dispatched
+// it: a normal session (the commander) gets it injected as a new turn so it can
+// aggregate; a gateway/WeChat dispatch falls back to pushToGateway.
 function finalizeDispatch(dispatchId, sessionName, finalText) {
   const run = dispatchRuns.get(dispatchId);
   dispatchRuns.delete(dispatchId);
   const targetId = run ? run.targetId : sessionName;
   const text = (finalText || '').trim() || '（本次运行没有产生文本输出）';
-  pushToGateway(`【${targetId} 回复】\n${text}`);
+  const targetRec = persistedSessions.get(targetId);
+  const label = (targetRec && targetRec.label) ? `${targetId}（${targetRec.label}）` : targetId;
+  const replyTo = run && run.replyTo;
+  if (replyTo && persistedSessions.get(replyTo)) {
+    // Busy-safe: if several parallel dispatches finish at once they serialise
+    // into the dispatcher one turn at a time instead of clobbering each other.
+    waitInjector.safeInject(replyTo, `【${label} 回复】\n${text}`);
+  } else {
+    pushToGateway(`【${targetId} 回复】\n${text}`);
+  }
 }
 // Gateway domain owns this handler; chat emits when a dispatched turn finishes.
 bus.on('chat:dispatch-complete', finalizeDispatch);
+
+// ── Generalised cross-session dispatch (any chat session, not just the gateway) ──
+// A session emits one or more <<dispatch target="SID">self-contained task</dispatch>>
+// markers in its reply. On turn completion we run each on its target sibling and
+// route the result back to the dispatcher (see finalizeDispatch). This is the
+// real primitive behind "the commander splits work onto provider-specific
+// sibling sessions" — e.g. handing a chunk to a DeepSeek-backed session.
+//
+// Autonomous (no confirm step — the dispatcher is the user's own agent, unlike
+// the remote-human WeChat gateway). Targets are restricted to non-system sessions
+// in the SAME directory. A dispatched worker's own turn carries originDispatchId
+// and is handled by the回流 branch above, so workers cannot re-dispatch (mirrors
+// "a fork can't fork").
+const DISPATCH_RE_G = /<<dispatch\s+target="([^"]+)"\s*>([\s\S]*?)<\/dispatch>>/g;
+function parseAllDispatchMarkers(text) {
+  if (!text) return [];
+  const out = [];
+  for (const m of text.matchAll(DISPATCH_RE_G)) {
+    const target = (m[1] || '').trim();
+    const message = (m[2] || '').trim();
+    if (target && message) out.push({ target, message });
+  }
+  return out;
+}
+function maybeDispatchFromChatTurn(dispatcherId, finalText) {
+  const markers = parseAllDispatchMarkers(finalText);
+  if (!markers.length) return;
+  const from = persistedSessions.get(dispatcherId);
+  if (!from) return;
+  for (const mk of markers) {
+    if (mk.target === dispatcherId) continue;                       // no self-dispatch
+    const v = validateDispatchTarget(mk.target);
+    if (!v.ok) { waitInjector.safeInject(dispatcherId, `⚠️ 无法分发给 ${mk.target}：${v.error}`); continue; }
+    if (v.rec.dirId !== from.dirId) { waitInjector.safeInject(dispatcherId, `⚠️ 只能分发给同目录会话，已跳过 ${mk.target}`); continue; }
+    appendEvent(from.dirId, 'dispatch', `→ ${v.rec.label || mk.target}`, dispatcherId);
+    dispatchToSession(mk.target, mk.message, { replyTo: dispatcherId })
+      .then(r => { if (!r.ok) waitInjector.safeInject(dispatcherId, `⚠️ 分发给 ${mk.target} 失败：${r.error}`); })
+      .catch(e => waitInjector.safeInject(dispatcherId, `⚠️ 分发 ${mk.target} 异常：${e.message}`));
+  }
+}
 
 // ── Session management ──
 // { id, tmuxName, ttyPath, outputStream, fifoPath, buffer: string[], clients: Set<ws>, createdAt, lastActivity, cwd, exitCheckTimer }
@@ -4431,6 +4482,9 @@ function runChatTurn(sessionName, text, opts = {}) {
         } else if (persisted.type === 'gateway') {
           // Gateway's own turn: detect a dispatch marker → stage pending confirmation.
           bus.emit('chat:gateway-turn-complete', finalText);
+        } else if (persisted.type !== 'aux') {
+          // Any other chat session: a <<dispatch>> marker fans work out to siblings.
+          maybeDispatchFromChatTurn(sessionName, finalText);
         }
       } catch (e) {
         console.error('[multicc/dispatch] post-turn hook failed:', e.message);
@@ -4633,6 +4687,8 @@ function finalizeStreamingTurn(sessionName, cs, persisted, seq) {
       bus.emit('chat:dispatch-complete', did, sessionName, finalText);
     } else if (persisted.type === 'gateway') {
       bus.emit('chat:gateway-turn-complete', finalText);
+    } else if (persisted.type !== 'aux') {
+      maybeDispatchFromChatTurn(sessionName, finalText);
     }
   } catch (e) {
     console.error('[multicc/dispatch] post-turn hook failed:', e.message);
