@@ -418,7 +418,8 @@ async function startBridge() {
 
 function stopBridge() {
   _running = false;
-  if (_wsClient) { try { _wsClient.stop?.(); } catch (_) {} _wsClient = null; }
+  // SDK WSClient exposes close() (not stop()); guard for version differences.
+  if (_wsClient) { try { (_wsClient.close || _wsClient.stop)?.call(_wsClient); } catch (_) {} _wsClient = null; }
   _disconnectChatWs();
   _apiClient = null;
   _log('system', 'Feishu bridge stopped');
