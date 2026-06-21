@@ -265,13 +265,23 @@ class ChatService {
 
   /// Returns false if the socket isn't healthy — the caller should not show the
   /// message as sent. Also kicks off a reconnect so the next attempt can work.
-  bool send(String text) {
+  ///
+  /// When [goal] is true the message is flagged as a Goal-mode send and the
+  /// server applies the per-send execution limits in [goalLimits] (maxRounds →
+  /// claude --max-turns; maxBudget → advisory token budget). There is no global
+  /// limit config — blank/0 means unlimited for that dimension.
+  bool send(String text, {bool goal = false, Map<String, dynamic>? goalLimits}) {
     if (_channel == null || _state != ChatConnectionState.connected) {
       connect();
       return false;
     }
     try {
-      _channel!.sink.add(jsonEncode({'type': 'user_message', 'text': text}));
+      final payload = <String, dynamic>{'type': 'user_message', 'text': text};
+      if (goal) {
+        payload['goal'] = true;
+        payload['goalLimits'] = goalLimits ?? <String, dynamic>{};
+      }
+      _channel!.sink.add(jsonEncode(payload));
       isStreaming = true;
       return true;
     } catch (_) {

@@ -418,6 +418,33 @@ class _InputBarState extends State<InputBar> {
     );
   }
 
+  // Compact labeled number field for the per-send execution limits.
+  Widget _goalNumField(TextEditingController ctrl, String label, String hint) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(color: Color(0xFF8a909b), fontSize: 11)),
+        const SizedBox(height: 4),
+        TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.number,
+          style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: const TextStyle(color: Color(0xFF454b54)),
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            filled: true,
+            fillColor: const Color(0xFF070809),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF20242b))),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF20242b))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF6aa3ff))),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _goalSection(String title, List<String> items) {
     if (items.isEmpty) return const SizedBox.shrink();
     return Column(
@@ -435,6 +462,9 @@ class _InputBarState extends State<InputBar> {
   Future<void> _showGoalSheet(ChatProvider provider) async {
     final taskCtrl = TextEditingController(text: _ctrl.text.trim());
     final revisedCtrl = TextEditingController();
+    // Per-send execution limits (no global config): default 40 rounds, no budget.
+    final roundsCtrl = TextEditingController(text: '40');
+    final budgetCtrl = TextEditingController();
     final Map<String, bool> dims = {'objective': true, 'criteria': true, 'scope': true, 'executable': true};
     await _loadGoalDimsInto(dims); // default checkboxes to the global config
     if (!mounted) return;
@@ -442,11 +472,23 @@ class _InputBarState extends State<InputBar> {
     Map<String, dynamic>? verdict; // null until prechecked
     String? error;
 
+    // Collect the per-send limits; blank → omitted so the server uses its hard
+    // default (rounds=40), 0 → explicitly unlimited for that dimension.
+    Map<String, dynamic> collectLimits() {
+      final limits = <String, dynamic>{};
+      final r = int.tryParse(roundsCtrl.text.trim());
+      if (r != null) limits['maxRounds'] = r;
+      final b = int.tryParse(budgetCtrl.text.trim());
+      if (b != null) limits['maxBudget'] = b;
+      return limits;
+    }
+
     void sendGoal(String task) {
       final t = task.trim();
       if (t.isEmpty) return;
+      final limits = collectLimits();
       Navigator.pop(context);
-      provider.sendMessage(_goalWrap(t));
+      provider.sendMessage(_goalWrap(t), goal: true, goalLimits: limits);
       _ctrl.clear();
       setState(() {
         _hasText = false;
@@ -501,6 +543,14 @@ class _InputBarState extends State<InputBar> {
                       );
                     }).toList(),
                   ),
+                  const SizedBox(height: 12),
+                  const Text('执行限制（本次发送，留空或 0 = 不限制）', style: TextStyle(color: Color(0xFF8a909b), fontSize: 12)),
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    Expanded(child: _goalNumField(roundsCtrl, '轮次上限 (--max-turns)', '40')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _goalNumField(budgetCtrl, 'token 预算', '不限')),
+                  ]),
                   if (verdict != null) ...[
                     const SizedBox(height: 12),
                     Container(

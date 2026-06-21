@@ -3194,17 +3194,21 @@ const GOAL_DIMENSIONS = {
   scope:      '范围清晰：边界明确，不至于无限发散。',
   executable: '可独立执行：代理无需再追问关键信息即可开工，或缺失信息能用合理默认补足。',
 };
-// maxRounds → caps the agent's autonomous turns for one goal task (claude
-//   `--max-turns N`, a hard CLI-level limit). 0 = 不限制.
-// maxBudget → an advisory output-token budget injected into the goal prompt so
-//   the agent self-stops near the cap (the CLI has no hard token-budget flag).
-//   0 = 不限制.
+// Goal precheck config is global (a quality-gate preference). The execution
+// limits (maxRounds / maxBudget), by contrast, are decided per-send in the goal
+// dialog and are NOT persisted globally — see resolveGoalLimits.
 const GOAL_CONFIG_DEFAULT = {
   dimensions: { objective: true, criteria: true, scope: true, executable: true },
   minScore: 60,
-  maxRounds: 40,
-  maxBudget: 0,
 };
+// Per-send execution limits. These are the hard client/server defaults used when
+// a goal send omits a value; they are intentionally not stored in goal-config.json.
+// maxRounds → caps the agent's autonomous turns (claude `--max-turns N`, hard
+//   CLI-level limit). 0 = 不限制.
+// maxBudget → advisory output-token budget injected into the goal prompt so the
+//   agent self-stops near the cap (no hard CLI flag). 0 = 不限制.
+const GOAL_ROUNDS_DEFAULT = 40;    // fallback round cap when a send omits it
+const GOAL_BUDGET_DEFAULT = 0;     // fallback budget (0 = unlimited)
 const GOAL_ROUNDS_MAX = 200;       // sanity ceiling for --max-turns
 const GOAL_BUDGET_MAX = 5000000;   // sanity ceiling for the advisory token budget
 const GOAL_CONFIG_FILE = path.join(__dirname, 'goal-config.json');
@@ -3222,19 +3226,18 @@ function normalizeGoalConfig(c) {
     dims[k] = (c.dimensions && typeof c.dimensions[k] === 'boolean') ? c.dimensions[k] : GOAL_CONFIG_DEFAULT.dimensions[k];
   }
   const minScore = clampInt(c.minScore, 0, 100, GOAL_CONFIG_DEFAULT.minScore);
-  const maxRounds = clampInt(c.maxRounds, 0, GOAL_ROUNDS_MAX, GOAL_CONFIG_DEFAULT.maxRounds);
-  const maxBudget = clampInt(c.maxBudget, 0, GOAL_BUDGET_MAX, GOAL_CONFIG_DEFAULT.maxBudget);
-  return { dimensions: dims, minScore, maxRounds, maxBudget };
+  return { dimensions: dims, minScore };
 }
 
-// Effective limits for one goal send: per-send override (from the client) wins
-// over the saved global config; anything missing/invalid falls back to config.
+// Effective limits for one goal send: taken purely from the per-send override
+// the client supplies in the goal dialog. There is no global limit config — a
+// missing/blank value falls back to the hard default (rounds=40, budget=0).
 function resolveGoalLimits(override) {
   const o = override && typeof override === 'object' ? override : {};
   const maxRounds = (o.maxRounds != null && o.maxRounds !== '')
-    ? clampInt(o.maxRounds, 0, GOAL_ROUNDS_MAX, goalConfig.maxRounds) : goalConfig.maxRounds;
+    ? clampInt(o.maxRounds, 0, GOAL_ROUNDS_MAX, GOAL_ROUNDS_DEFAULT) : GOAL_ROUNDS_DEFAULT;
   const maxBudget = (o.maxBudget != null && o.maxBudget !== '')
-    ? clampInt(o.maxBudget, 0, GOAL_BUDGET_MAX, goalConfig.maxBudget) : goalConfig.maxBudget;
+    ? clampInt(o.maxBudget, 0, GOAL_BUDGET_MAX, GOAL_BUDGET_DEFAULT) : GOAL_BUDGET_DEFAULT;
   return { maxRounds, maxBudget };
 }
 

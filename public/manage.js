@@ -1729,10 +1729,6 @@ async function loadGoalSettings() {
     }
     const ms = document.getElementById('goal-min-score');
     if (ms) ms.value = (d.minScore != null ? d.minScore : 60);
-    const mr = document.getElementById('goal-max-rounds');
-    if (mr) mr.value = (d.maxRounds != null ? d.maxRounds : 40);
-    const mb = document.getElementById('goal-max-budget');
-    if (mb) mb.value = (d.maxBudget != null ? d.maxBudget : 0);
   } catch (_) {}
 }
 
@@ -1745,15 +1741,11 @@ async function saveGoalSettings() {
   }
   let minScore = parseInt(document.getElementById('goal-min-score').value, 10);
   if (!Number.isFinite(minScore)) minScore = 60;
-  let maxRounds = parseInt(document.getElementById('goal-max-rounds').value, 10);
-  if (!Number.isFinite(maxRounds)) maxRounds = 40;
-  let maxBudget = parseInt(document.getElementById('goal-max-budget').value, 10);
-  if (!Number.isFinite(maxBudget)) maxBudget = 0;
   try {
     const res = await fetch('/api/settings/goal' + tokenQS('?'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dimensions, minScore, maxRounds, maxBudget }),
+      body: JSON.stringify({ dimensions, minScore }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     status.textContent = 'Saved';

@@ -333,10 +333,10 @@ class ChatProvider extends ChangeNotifier {
 
   // ── Public actions ─────────────────────────────────────────────────────────
 
-  void sendMessage(String text) {
+  void sendMessage(String text, {bool goal = false, Map<String, dynamic>? goalLimits}) {
     final t = text.trim();
     if (t.isEmpty) return;
-    final ok = _service.send(t);
+    final ok = _service.send(t, goal: goal, goalLimits: goalLimits);
     if (!ok) {
       // Half-open / dead socket — don't pretend the message was sent.
       _addSystemMsg('⚠️ 连接已断开，正在重连…重连后请重试。');

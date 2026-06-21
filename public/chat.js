@@ -2070,14 +2070,15 @@ function closeGoalModal() { goalModal.classList.remove('open'); }
 // Default the per-send dimension checkboxes to the saved global config.
 async function loadGoalDims() {
   const boxes = document.querySelectorAll('#goal-dims input[data-dim]');
+  // Execution limits are per-send only (no global config): seed with the hard
+  // client default each time (40 rounds / no budget cap). Blank or 0 = unlimited.
+  if (goalMaxRoundsEl) goalMaxRoundsEl.value = '40';
+  if (goalMaxBudgetEl) goalMaxBudgetEl.value = '';
   try {
     const res = await fetch(withToken('/api/settings/goal'));
     const d = await res.json();
     const dims = d.dimensions || {};
     boxes.forEach(cb => { cb.checked = dims[cb.dataset.dim] !== false; });
-    // Limits default to the global config too (blank input → use server config).
-    if (goalMaxRoundsEl) goalMaxRoundsEl.value = (d.maxRounds != null ? d.maxRounds : '');
-    if (goalMaxBudgetEl) goalMaxBudgetEl.value = (d.maxBudget != null ? d.maxBudget : '');
   } catch (_) {
     boxes.forEach(cb => { cb.checked = true; });
   }
