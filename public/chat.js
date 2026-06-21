@@ -1421,6 +1421,28 @@ function updateRoleBtn() {
     : '设置该会话的角色提示词（下一轮对话生效）';
 }
 
+// ── Agent-preset (role library) helpers for the web role editor ──
+// The web role editor was a bare textarea; these let it offer the same preset
+// roles the app does, with featured presets pinned first.
+let _agentPresetIndexCache = null;
+async function fetchAgentPresetIndex() {
+  if (_agentPresetIndexCache) return _agentPresetIndexCache;
+  try {
+    const res = await fetch(withToken('/api/agent-presets'));
+    if (!res.ok) return null;
+    _agentPresetIndexCache = await res.json();
+    return _agentPresetIndexCache;
+  } catch (_) { return null; }
+}
+async function fetchAgentPresetPrompt(id) {
+  try {
+    const res = await fetch(withToken('/api/agent-presets/' + encodeURIComponent(id)));
+    if (!res.ok) return null;
+    const d = await res.json();
+    return d.prompt || null;
+  } catch (_) { return null; }
+}
+
 // WebView-safe editor (native prompt/confirm are unreliable in Android WebViews).
 function showRolePromptEditor(current) {
   return new Promise((resolve) => {
@@ -1432,6 +1454,59 @@ function showRolePromptEditor(current) {
     msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:10px;';
     msg.textContent = '该会话的角色提示词（下一轮对话生效）';
     box.appendChild(msg);
+
+    // Preset-role picker — mirrors the app's role library; featured pinned first.
+    const presetRow = document.createElement('div');
+    presetRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;';
+    const presetLabel = document.createElement('span');
+    presetLabel.textContent = '预设角色';
+    presetLabel.style.cssText = 'font-size:12px;color:#8b949e;white-space:nowrap;';
+    const presetSel = document.createElement('select');
+    presetSel.style.cssText = 'flex:1;min-width:0;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:7px 10px;outline:none;';
+    const ph = document.createElement('option');
+    ph.value = ''; ph.textContent = '从预设角色填入…（加载中）';
+    presetSel.appendChild(ph);
+    presetRow.appendChild(presetLabel);
+    presetRow.appendChild(presetSel);
+    box.appendChild(presetRow);
+    fetchAgentPresetIndex().then((idx) => {
+      if (!idx) { ph.textContent = '预设角色加载失败'; return; }
+      ph.textContent = '从预设角色填入…';
+      const presets = idx.presets || [];
+      const byId = {};
+      for (const p of presets) byId[p.id] = p;
+      const feat = (idx.featured || []).map((id) => byId[id]).filter(Boolean);
+      if (feat.length) {
+        const og = document.createElement('optgroup'); og.label = '⭐ 推荐';
+        for (const p of feat) {
+          const o = document.createElement('option');
+          o.value = p.id; o.textContent = `${p.emoji || ''} ${p.name}`.trim();
+          og.appendChild(o);
+        }
+        presetSel.appendChild(og);
+      }
+      for (const c of (idx.categories || [])) {
+        const items = presets.filter((x) => x.category === c.key);
+        if (!items.length) continue;
+        const og = document.createElement('optgroup'); og.label = c.label || c.key;
+        for (const p of items) {
+          const o = document.createElement('option');
+          o.value = p.id; o.textContent = `${p.emoji || ''} ${p.name}`.trim();
+          og.appendChild(o);
+        }
+        presetSel.appendChild(og);
+      }
+    });
+    presetSel.addEventListener('change', async () => {
+      const id = presetSel.value;
+      presetSel.value = '';
+      if (!id) return;
+      presetSel.disabled = true;
+      const prompt = await fetchAgentPresetPrompt(id);
+      presetSel.disabled = false;
+      if (prompt) { ta.value = prompt; ta.focus(); }
+      else addSystemMsg('预设角色加载失败');
+    });
 
     const ta = document.createElement('textarea');
     ta.value = current || '';
