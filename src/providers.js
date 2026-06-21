@@ -238,6 +238,14 @@ function resolveSpawnEnv(session) {
     for (const k of Object.keys(src)) {
       if (/^ANTHROPIC_/.test(k) && typeof src[k] === 'string') env[k] = src[k];
     }
+    // When routing to a custom base URL, explicitly unset ANTHROPIC_API_KEY so the
+    // provider's ANTHROPIC_AUTH_TOKEN is actually used. Claude CLI precedence:
+    //   ANTHROPIC_API_KEY > OAuth/keychain > ANTHROPIC_AUTH_TOKEN
+    // Without this, a parent-process ANTHROPIC_API_KEY would silently override the
+    // provider's token, making the switch look successful but route nowhere.
+    if (env.ANTHROPIC_BASE_URL) {
+      env.ANTHROPIC_API_KEY = '';
+    }
     return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name };
   }
 
