@@ -9,6 +9,7 @@ import '../providers/chat_provider.dart';
 import '../providers/session_manager.dart';
 import '../services/session_service.dart';
 import '../services/settings_service.dart';
+import '../services/manage_service.dart';
 import '../services/workspace_service.dart';
 import '../widgets/conflict_diff_dialog.dart';
 import '../widgets/session_diff_dialog.dart';
@@ -790,6 +791,71 @@ class _DirectoryCardState extends State<_DirectoryCard> {
   Future<void> _createSession(SessionCli cli, SessionKind kind) async {
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
+
+    // Step 1: pick a provider (both claude & codex)
+    final appType = cli == SessionCli.codex ? 'codex' : 'claude';
+    String? provider;
+    try {
+      final d = await ManageService(settings: widget.settings).fetchProviders(appType);
+      final providers = (d['providers'] as List? ?? [])
+          .map((e) => (e as Map).cast<String, dynamic>())
+          .toList();
+      if (providers.isNotEmpty) {
+        final picked = await showModalBottomSheet<String>(
+          context: context,
+          backgroundColor: const Color(0xFF0f1115),
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+          ),
+          builder: (_) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(18, 16, 18, 8),
+                  child: Text(
+                    '选择该会话使用的 Provider',
+                    style: TextStyle(
+                      color: Color(0xFFf2f4f7),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                ListTile(
+                  dense: true,
+                  title: const Text('默认登录 / 订阅', style: TextStyle(color: Color(0xFFe7eaee), fontSize: 14)),
+                  trailing: provider == null ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a)) : null,
+                  onTap: () => Navigator.pop(_, ''),
+                ),
+                for (final p in providers)
+                  ListTile(
+                    dense: true,
+                    title: Text(
+                      (p['name'] as String? ?? '') + (p['isOfficial'] == true ? ' · 订阅' : ''),
+                      style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+                    ),
+                    subtitle: p['model'] != null && (p['model'] as String).isNotEmpty
+                        ? Text(p['model'] as String, style: const TextStyle(color: Color(0xFF8a909b), fontSize: 11))
+                        : null,
+                    trailing: p['id'] == provider ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a)) : null,
+                    onTap: () => Navigator.pop(_, p['id'] as String),
+                  ),
+                const SizedBox(height: 6),
+              ],
+            ),
+          ),
+        );
+        if (picked == null) return; // cancelled
+        if (!mounted) return;
+        provider = picked.isEmpty ? null : picked;
+      }
+    } catch (_) {
+      // If provider fetch fails, continue without provider selection
+    }
+
+    // Step 2: pick a model (claude only)
     String? model;
     if (cli == SessionCli.claude) {
       final picked = await showClaudeModelPicker(context, current: widget.settings.defaultModel);
@@ -803,6 +869,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         cli: cli,
         kind: kind,
         model: model,
+        provider: provider,
       );
       if (!mounted) return;
       // Auto-open the freshly created session

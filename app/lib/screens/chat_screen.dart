@@ -318,7 +318,7 @@ class _Header extends StatelessWidget {
           const SizedBox(width: 4),
           // Model switch — claude sessions only (codex has no model concept here).
           if (provider.cli == SessionCli.claude) ...[
-            _ModelChip(sessionId: provider.sessionName),
+            _ModelChip(sessionId: provider.sessionName, settings: settings),
             const SizedBox(width: 4),
           ],
           // Provider switch — both claude & codex have providers.
@@ -408,19 +408,72 @@ class _Header extends StatelessWidget {
 }
 
 /// Compact model indicator + switcher for the chat header. Reads the current
-/// per-session model from SessionManager; tap to switch (next turn applies).
-class _ModelChip extends StatelessWidget {
+/// per-session model AND provider from SessionManager; when a custom provider
+/// is active, its default model is shown instead of a bare "默认".
+/// Tap to switch (next turn applies).
+class _ModelChip extends StatefulWidget {
   final String sessionId;
-  const _ModelChip({required this.sessionId});
+  final SettingsService settings;
+  const _ModelChip({required this.sessionId, required this.settings});
+
+  @override
+  State<_ModelChip> createState() => _ModelChipState();
+}
+
+class _ModelChipState extends State<_ModelChip> {
+  List<Map<String, dynamic>> _providers = [];
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final d = await ManageService(settings: widget.settings).fetchProviders('claude');
+      if (!mounted) return;
+      setState(() {
+        _providers = (d['providers'] as List? ?? [])
+            .map((e) => (e as Map).cast<String, dynamic>())
+            .toList();
+        _loaded = true;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loaded = true);
+    }
+  }
+
+  /// Effective model label: explicit session model, or provider's default model,
+  /// or "默认" if neither.
+  String _modelLabel(Session? s) {
+    if (s == null) return '默认';
+    // Explicit session model always wins.
+    if (s.model != null && s.model!.isNotEmpty) {
+      return claudeModelShortName(s.model);
+    }
+    // Check if a custom provider supplies a default model.
+    final pid = s.provider;
+    if (pid != null && pid.isNotEmpty) {
+      for (final p in _providers) {
+        if (p['id'] == pid) {
+          final m = p['model'] as String?;
+          if (m != null && m.isNotEmpty) return m;
+        }
+      }
+    }
+    return '默认';
+  }
 
   @override
   Widget build(BuildContext context) {
     final mgr = context.watch<SessionManager>();
     Session? s;
     for (final x in mgr.sessions) {
-      if (x.id == sessionId) { s = x; break; }
+      if (x.id == widget.sessionId) { s = x; break; }
     }
-    final label = claudeModelShortName(s?.model);
+    final label = _modelLabel(s);
     return Tooltip(
       message: '切换该会话使用的模型（下一轮对话生效）',
       child: GestureDetector(

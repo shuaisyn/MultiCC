@@ -409,10 +409,12 @@ class SessionService {
     required SessionKind kind,
     String? label,
     String? model,
+    String? provider,
   }) async {
     final body = <String, dynamic>{'cli': cli.name, 'kind': kind.name};
     if (label != null && label.isNotEmpty) body['label'] = label;
     if (model != null && model.isNotEmpty) body['model'] = model;
+    if (provider != null) body['provider'] = provider;
     final res = await http
         .post(
           Uri.parse(_url('/api/directories/$dirId/sessions')),
