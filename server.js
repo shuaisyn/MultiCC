@@ -5248,16 +5248,37 @@ function flushInFlightChats() {
   }
   return n;
 }
+const SHUTDOWN_GRACE_MS = 60000;   // max time to let in-flight turns finish
 function gracefulShutdown(sig) {
   if (_shuttingDown) return;
   _shuttingDown = true;
-  try {
-    const n = flushInFlightChats();
-    console.log(`[multicc] ${sig} → flushed ${n} in-flight chat message(s), exiting`);
-  } catch (e) {
-    console.error(`[multicc] shutdown flush error: ${e.message}`);
+  // Exit cleanly, flushing anything still unsaved as a safety net (covers turns
+  // that didn't reach `result` in time, or new turns started during drain).
+  const finish = (why) => {
+    let n = 0;
+    try { n = flushInFlightChats(); } catch (e) { console.error(`[multicc] shutdown flush error: ${e.message}`); }
+    console.log(`[multicc] ${sig} → ${why}; flushed ${n} partial message(s), exiting`);
+    process.exit(0);
+  };
+  // Snapshot turns that are mid-flight right now and let them finish so their
+  // FULL assistant message is persisted normally (not a half-written partial).
+  // A turn is in flight while its child process is still alive (proc 'close'
+  // nulls cs.claudeProc after the result is saved).
+  const draining = new Set();
+  for (const [name, cs] of chatSessions) {
+    if (cs && cs.claudeProc) draining.add(name);
   }
-  process.exit(0);
+  if (draining.size === 0) return finish('no in-flight turns');
+  console.log(`[multicc] ${sig} → draining ${draining.size} in-flight turn(s) before exit (grace ${SHUTDOWN_GRACE_MS}ms)`);
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    for (const name of [...draining]) {
+      const cs = chatSessions.get(name);
+      if (!cs || !cs.claudeProc) draining.delete(name);   // that turn finished + saved
+    }
+    if (draining.size === 0) { clearInterval(timer); finish('all turns drained'); }
+    else if (Date.now() - t0 > SHUTDOWN_GRACE_MS) { clearInterval(timer); finish('grace timeout'); }
+  }, 300);
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
