@@ -4244,6 +4244,19 @@ function runChatTurn(sessionName, text, opts = {}) {
           scheduleIntentClassify(cs, sessionName);
           return;
         }
+        // ── Codex error / turn failure ──
+        // codex emits {type:'error'} / {type:'turn.failed'} when the provider
+        // rejects the request (bad/expired token, wrong base_url, etc). Without
+        // handling them the message is dropped: the turn yields no text, the
+        // close handler wastes a retry on the same broken provider, and the user
+        // only ever sees a garbled stderr tail. Surface codex's own clean error
+        // and flag the turn so the pointless retry is skipped.
+        if (evt.type === 'error' || evt.type === 'turn.failed') {
+          const emsg = (evt.message || (evt.error && evt.error.message) || '未知错误').toString();
+          cs._codexError = emsg;
+          forward({ type: 'error', error: `Codex 出错：${emsg}` });
+          return;
+        }
         return;  // unknown event type: drop
       }
 
@@ -4311,7 +4324,9 @@ function runChatTurn(sessionName, text, opts = {}) {
 
       // If spawn yielded no assistant text and it's not a user-initiated kill, retry
       // once with a fresh session id (covers resume-failed / session-id conflict cases).
-      if (!isRetry && !cs.currentAssistantText && !killReason) {
+      // A reported codex error (cs._codexError) is a real provider failure, not a
+      // resume glitch — retrying would just hit the same wall, so skip it.
+      if (!isRetry && !cs.currentAssistantText && !killReason && !cs._codexError) {
         const stderrTail = stderrBuf.slice(-300).trim();
         const reason = stderrTail.includes('already in use') ? 'session-id conflict'
           : stderrTail.includes('No conversation found') || stderrTail.includes('session not found') ? 'resume target missing'
@@ -4355,6 +4370,7 @@ function runChatTurn(sessionName, text, opts = {}) {
       cs.currentAssistantText = '';
       cs.currentToolCalls = [];
       cs._resultSaved = false;
+      cs._codexError = null;
 
       setSessionStatus(sessionName, { status: 'idle', currentFile: null });
       chatBroadcast(sessionName, { type: 'stream_end' });
