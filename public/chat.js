@@ -2176,8 +2176,8 @@ function closeGoalModal() { goalModal.classList.remove('open'); }
 async function loadGoalDims() {
   const boxes = document.querySelectorAll('#goal-dims input[data-dim]');
   // Execution limits are per-send only (no global config): seed with the hard
-  // client default each time (40 rounds / no budget cap). Blank or 0 = unlimited.
-  if (goalMaxRoundsEl) goalMaxRoundsEl.value = '40';
+  // client default each time (200 rounds / no budget cap). Blank or 0 = unlimited.
+  if (goalMaxRoundsEl) goalMaxRoundsEl.value = '200';
   if (goalMaxBudgetEl) goalMaxBudgetEl.value = '';
   try {
     const res = await fetch(withToken('/api/settings/goal'));

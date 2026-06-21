@@ -462,8 +462,8 @@ class _InputBarState extends State<InputBar> {
   Future<void> _showGoalSheet(ChatProvider provider) async {
     final taskCtrl = TextEditingController(text: _ctrl.text.trim());
     final revisedCtrl = TextEditingController();
-    // Per-send execution limits (no global config): default 40 rounds, no budget.
-    final roundsCtrl = TextEditingController(text: '40');
+    // Per-send execution limits (no global config): default 200 rounds, no budget.
+    final roundsCtrl = TextEditingController(text: '200');
     final budgetCtrl = TextEditingController();
     final Map<String, bool> dims = {'objective': true, 'criteria': true, 'scope': true, 'executable': true};
     await _loadGoalDimsInto(dims); // default checkboxes to the global config
@@ -473,7 +473,7 @@ class _InputBarState extends State<InputBar> {
     String? error;
 
     // Collect the per-send limits; blank → omitted so the server uses its hard
-    // default (rounds=40), 0 → explicitly unlimited for that dimension.
+    // default (rounds=200), 0 → explicitly unlimited for that dimension.
     Map<String, dynamic> collectLimits() {
       final limits = <String, dynamic>{};
       final r = int.tryParse(roundsCtrl.text.trim());
