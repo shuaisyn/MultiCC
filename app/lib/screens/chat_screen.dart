@@ -468,12 +468,31 @@ class _ModelChipState extends State<_ModelChip> {
     return '默认';
   }
 
+  /// True when the session's custom provider supplies its own model (so the
+  /// claude `--model` switch is moot — the provider's ANTHROPIC_MODEL wins).
+  bool _providerSuppliesModel(String? pid) {
+    if (pid == null || pid.isEmpty) return false;
+    for (final p in _providers) {
+      if (p['id'] == pid) return (p['model'] as String?)?.isNotEmpty == true;
+    }
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     final mgr = context.watch<SessionManager>();
     Session? s;
     for (final x in mgr.sessions) {
       if (x.id == widget.sessionId) { s = x; break; }
+    }
+    // When the model is dictated by a custom provider (provider has its own
+    // model and the session didn't explicitly override it), the standalone
+    // model chip is both redundant (the provider chip already says deepseek)
+    // and wide enough to overflow the header row — hide it.
+    if (s != null &&
+        (s.model == null || s.model!.isEmpty) &&
+        _providerSuppliesModel(s.provider)) {
+      return const SizedBox.shrink();
     }
     final label = _modelLabel(s);
     return Tooltip(
