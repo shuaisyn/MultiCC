@@ -1212,6 +1212,7 @@ app.get('/api/sessions', (req, res) => {
         label: p.label || null,
         model: p.model || null,
         rolePrompt: p.rolePrompt || null,
+        provider: p.provider || null,  // cc-switch provider id; null = default login
         cwd,
         createdAt: p.createdAt,
         mergeState: p.dirId ? gitWorktreeMergeState(directories.get(p.dirId), p) : null,
@@ -1588,6 +1589,8 @@ app.get('/api/directories/:id/sessions', (req, res) => {
       return {
         id: s.id, dirId: s.dirId, cli: s.cli, kind: s.kind,
         cliSessionId: s.cliSessionId || null, label: s.label || null,
+        model: s.model || null, rolePrompt: s.rolePrompt || null,
+        provider: s.provider || null,  // cc-switch provider id; null = default login
         createdAt: s.createdAt,
         branch: s.branch || null,
         worktreePath: s.worktreePath || null,
@@ -1905,10 +1908,11 @@ app.get('/api/sessions/:id', (req, res) => {
   const rolePrompt = persisted?.rolePrompt || null;
   const streaming = !!persisted?.streaming;
   const autoContinue = !!persisted?.autoContinue;
+  const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, streaming, autoContinue });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, provider, streaming, autoContinue });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, streaming, autoContinue });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, provider, streaming, autoContinue });
   }
 });
 
