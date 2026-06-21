@@ -827,7 +827,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                   dense: true,
                   title: const Text('默认登录 / 订阅', style: TextStyle(color: Color(0xFFe7eaee), fontSize: 14)),
                   trailing: provider == null ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a)) : null,
-                  onTap: () => Navigator.pop(_, ''),
+                  onTap: () => Navigator.pop(context, ''),
                 ),
                 for (final p in providers)
                   ListTile(
@@ -840,7 +840,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                         ? Text(p['model'] as String, style: const TextStyle(color: Color(0xFF8a909b), fontSize: 11))
                         : null,
                     trailing: p['id'] == provider ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a)) : null,
-                    onTap: () => Navigator.pop(_, p['id'] as String),
+                    onTap: () => Navigator.pop(context, p['id'] as String),
                   ),
                 const SizedBox(height: 6),
               ],
