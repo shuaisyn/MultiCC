@@ -479,6 +479,19 @@ function showActiveSessions(ev) {
   showSessionListPopup(ev, list, '🟢', '没有活跃的会话');
 }
 
+// Popup from the "定时任务" KPI tile: each task as "name · cron · dir", click opens
+// that task (edit/run modal).
+function showCronTasks(ev) {
+  ev.stopPropagation();
+  const tasks = (typeof _cronTasksCache !== 'undefined' && _cronTasksCache) ? _cronTasksCache : [];
+  const items = tasks.map(t => ({
+    label: `${t.enabled ? '⏰' : '⏸'} ${t.name || '(未命名)'} · ${t.cron}${t.dirName ? ' · ' + t.dirName : ''}`,
+    onclick: () => openCronModal(t.id),
+  }));
+  if (!items.length) items.push({ label: '还没有定时任务，点这里去登记', onclick: () => setView('cron') });
+  showPopoverMenu(ev.currentTarget, items);
+}
+
 function renderDirectoryBlock(dir, dirSessions) {
   const openClass = _expandedDirs.has(dir.id) ? ' open' : '';
   const id = dir.id;
@@ -1973,6 +1986,7 @@ async function loadCronTasks() {
   try {
     const res = await fetch('/api/cron' + tokenQS('?'));
     const tasks = await res.json();
+    _cronTasksCache = tasks;   // keep for the KPI popup
     const cnt = document.getElementById('cron-count');
     if (cnt) cnt.textContent = tasks.length ? `(${tasks.length})` : '';
     if (!tasks.length) {
