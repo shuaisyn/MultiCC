@@ -349,6 +349,8 @@ const MULTICC_IMG_HINT = [
   '     可选字段：cwd（默认你的工作目录）、intervalSec（轮询间隔秒，默认 10）、maxChecks（最多检查次数，默认 360≈1 小时）。返回里有 taskId 与 logPath；用 GET $MULTICC_BASE_URL/api/detached/<taskId> 可随时查实时状态与日志尾巴。',
   '  登记后正常结束本轮即可，任务完成时 multicc 会自动续接。若需中途向用户报进度，配合下面「边做边报」用 GET /api/detached/<taskId> tail 日志即可，不要前台死等。',
   '  ⚠️ 典型违规场景（这些都必须用 run-detached，不能用 Bash run_in_background）：等构建/打包/部署/长测试跑完；轮询某文件出现某关键字；**等多个子会话/兄弟会话把结果写进各自文件后再汇总**（比如 dispatch 出去几个会话后守着它们的 chat_history json）；等第三方接口/部署状态变化。判断标准很简单：只要这一步是「我先发起、然后要等它在未来某刻完成、完成后我才继续」，就用 run-detached 或前台同步跑，绝不用 run_in_background 守。run-detached 同样支持轮询（intervalSec/maxChecks）和自定义 pollCmd，能覆盖上面所有场景，且跨轮不丢、自动续接。',
+  '  🚫【绝对禁令，无例外】不要给 Bash 工具传 `run_in_background: true`。在 chat 会话里这个参数起的后台进程会被回收，等于白跑。需要后台 → run-detached；需要尽快拿结果 → 前台同步跑（给足 timeout）。这条不是建议而是禁令：multicc 会在每一轮结束后检查你是否用了 `run_in_background`，一旦发现就会自动给你发一条纠正消息把你拉回正轨——所以与其被纠正，不如一开始就别用。唯一可接受的「后台」是 multicc 的 run-detached 接口，没有第二种。',
+
   '',
   '【长任务边做边报进度】（multicc 统一体验约定）当某件事要跑较久（构建/打包/部署/批处理/长等待）时，默认采用「边等边报」：优先用上面的 run-detached 把它放后台（这样不会被回收），运行期间每隔约 25–30 秒主动向用户冒一句简短进度（在做什么、已约 Ns、最新一行关键输出），任务完成后再给最终结果。进度做法：用一个会在约 25 秒后自行退出的后台计时命令把自己周期性唤醒，每次被唤醒就 tail 一下任务输出（或 GET /api/detached/<taskId>）、报一句进度，直到任务完成为止。',
   '不要一启动就长时间静默、让对话框看起来像卡住；也不要只说「我等一下」就停下不续接。这是面向所有 multicc 用户的统一约定，请默认遵循。',
