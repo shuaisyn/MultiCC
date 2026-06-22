@@ -3141,8 +3141,14 @@ function pushOnInput(sessionId) {
 }
 
 function triggerPush(sessionId, type, message) {
-  const mon = pushMonitors.get(sessionId);
-  if (!mon) return;
+  // A pushMonitor is created lazily by the TERMINAL output path (pushOnOutput),
+  // so chat sessions never had one — and the old `if (!mon) return` here meant
+  // every chat completion push was silently dropped (totalSent stayed 0). That
+  // killed the ONLY lock-screen-capable channel for chat: notifications then
+  // only worked while the app held a live WebSocket (screen on / foreground).
+  // The monitor's only job in this function is the per-session cooldown stamp,
+  // so create it on demand. Terminal callers already have one → no-op for them.
+  const mon = initPushMonitor(sessionId);
 
   const now = Date.now();
   if (now - mon.lastPushTime < PUSH_COOLDOWN) return; // cooldown
