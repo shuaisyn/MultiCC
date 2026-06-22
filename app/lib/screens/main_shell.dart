@@ -17,6 +17,7 @@ import '../widgets/model_picker.dart';
 import 'chat_screen.dart';
 import 'memo_screen.dart';
 import 'settings_screen.dart';
+import 'cron_screen.dart';
 import 'terminal_screen.dart';
 
 // Brand colors used to distinguish Claude vs Codex sessions.
@@ -374,9 +375,14 @@ class _DirectoryListBody extends StatelessWidget {
             ),
           ),
         ],
-        bottom: const PreferredSize(
-          preferredSize: Size.fromHeight(1),
-          child: Divider(height: 1, color: Color(0xFF20242b)),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(57),
+          child: Column(
+            children: [
+              _KpiRow(settings: settings),
+              const Divider(height: 1, color: Color(0xFF20242b)),
+            ],
+          ),
         ),
       ),
       body: _buildBody(context, mgr),
@@ -465,6 +471,154 @@ class _DirectoryListBody extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  KPI ROW — tappable summary tiles (active / waiting / cron), mirror of web
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _KpiRow extends StatelessWidget {
+  final SettingsService settings;
+  const _KpiRow({required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final mgr = context.watch<SessionManager>();
+    final active = mgr.activeSessions.length;
+    final waiting = mgr.waitingSessions.length;
+    return Container(
+      color: const Color(0xFF0f1115),
+      padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+      child: Row(
+        children: [
+          _KpiTile(
+            label: '活跃会话', value: '$active', color: const Color(0xFF3ad6c5),
+            onTap: () => _showSessionSheet(context, mgr, '活跃会话', mgr.activeSessions, '🟢'),
+          ),
+          const SizedBox(width: 8),
+          _KpiTile(
+            label: '等待输入', value: '$waiting', color: const Color(0xFFe3b341),
+            onTap: () => _showSessionSheet(context, mgr, '等待输入', mgr.waitingSessions, '⏳'),
+          ),
+          const SizedBox(width: 8),
+          _KpiTile(
+            label: '定时任务', value: null, color: const Color(0xFF6aa3ff),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => CronScreen(settings: settings))),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _KpiTile extends StatelessWidget {
+  final String label;
+  final String? value;
+  final Color color;
+  final VoidCallback onTap;
+  const _KpiTile({required this.label, required this.value, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          decoration: BoxDecoration(
+            color: const Color(0xFF14171c),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFF20242b)),
+          ),
+          child: Row(
+            children: [
+              Container(width: 7, height: 7, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(label,
+                  style: const TextStyle(color: Color(0xFF8a909b), fontSize: 12),
+                  overflow: TextOverflow.ellipsis),
+              ),
+              if (value != null) ...[
+                const SizedBox(width: 4),
+                Text(value!, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w700)),
+              ] else
+                const Icon(Icons.chevron_right, size: 16, color: Color(0xFF5b616c)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Bottom-sheet list of sessions ("dir / alias"); tap an entry to jump to it.
+void _showSessionSheet(BuildContext context, SessionManager mgr, String title,
+    List<Session> sessions, String prefix) {
+  String dirName(String? dirId) {
+    for (final d in mgr.directories) {
+      if (d.id == dirId) return d.name;
+    }
+    return '';
+  }
+
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: const Color(0xFF0f1115),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+    builder: (sheetCtx) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
+            child: Row(children: [
+              Text('$prefix $title',
+                style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 15, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              Text('${sessions.length}',
+                style: const TextStyle(color: Color(0xFF8a909b), fontSize: 13)),
+            ]),
+          ),
+          if (sessions.isEmpty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 8, 18, 24),
+              child: Align(alignment: Alignment.centerLeft,
+                child: Text('没有符合的会话', style: TextStyle(color: Color(0xFF5b616c), fontSize: 13))),
+            )
+          else
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: sessions.length,
+                itemBuilder: (_, i) {
+                  final s = sessions[i];
+                  final alias = (s.label?.isNotEmpty == true) ? s.label! : s.id;
+                  final dir = dirName(s.dirId);
+                  return ListTile(
+                    dense: true,
+                    leading: Text(prefix, style: const TextStyle(fontSize: 16)),
+                    title: Text(dir.isNotEmpty ? '$dir / $alias' : alias,
+                      style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+                      overflow: TextOverflow.ellipsis),
+                    trailing: const Icon(Icons.arrow_forward_ios, size: 13, color: Color(0xFF5b616c)),
+                    onTap: () {
+                      Navigator.of(sheetCtx).pop();
+                      mgr.openSession(s);
+                      mgr.switchToSession(s.id);
+                    },
+                  );
+                },
+              ),
+            ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  PROJECT CARD — one per directory, expanded by default
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -503,10 +657,18 @@ class _DirectoryCardState extends State<_DirectoryCard> {
   void dispose() {
     _workspace.removeListener(_onStatusChange);
     _workspace.dispose();
+    widget.mgr.reportWaiting(widget.directory.id, const {}); // drop stale entries
     super.dispose();
   }
 
   void _onStatusChange() {
+    // Report this directory's waiting sessions up to the manager so the global
+    // "等待输入" KPI reflects every directory, then repaint the card.
+    final waiting = _workspace.statuses.entries
+        .where((e) => e.value.status == 'waiting')
+        .map((e) => e.key)
+        .toSet();
+    widget.mgr.reportWaiting(widget.directory.id, waiting);
     if (mounted) setState(() {});
   }
 

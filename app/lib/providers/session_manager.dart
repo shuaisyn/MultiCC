@@ -31,6 +31,37 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
   List<Directory> _directories = [];
   List<Directory> get directories => List.unmodifiable(_directories);
 
+  // ── Global "waiting for input" aggregation ────────────────────────────────
+  // Each _DirectoryCard owns a WorkspaceService with a live status map; it
+  // reports its currently-waiting session ids here so the dashboard KPI can show
+  // a directory-spanning view (the app has no single global workspace socket).
+  final Map<String, Set<String>> _waitingByDir = {};
+  Set<String> get waitingSessionIds =>
+      _waitingByDir.values.expand((s) => s).toSet();
+
+  /// A _DirectoryCard reports the set of session ids waiting on user input in
+  /// its directory. Notifies listeners only when the aggregate actually changes.
+  void reportWaiting(String dirId, Set<String> ids) {
+    final prev = _waitingByDir[dirId] ?? const <String>{};
+    if (prev.length == ids.length && prev.containsAll(ids)) return;
+    if (ids.isEmpty) {
+      _waitingByDir.remove(dirId);
+    } else {
+      _waitingByDir[dirId] = ids;
+    }
+    notifyListeners();
+  }
+
+  /// Sessions currently active (running), excluding the aux helper session.
+  List<Session> get activeSessions =>
+      _sessions.where((s) => s.active && !s.isAux).toList();
+
+  /// Sessions currently waiting on user input (resolved from the aggregate).
+  List<Session> get waitingSessions {
+    final ids = waitingSessionIds;
+    return _sessions.where((s) => ids.contains(s.id) && !s.isAux).toList();
+  }
+
   bool _loadingSessions = true;
   bool get loadingSessions => _loadingSessions;
   String? _sessionsError;
