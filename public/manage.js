@@ -222,9 +222,16 @@ async function loadDashboard() {
     const sessions = await sessRes.json();
     _cachedDirectories = directories;
     _cachedSessions = sessions;
-    // Default: expand all directories on first load
+    // Default expand: only directories that have an active session (keeps the
+    // board calm). Fall back to expanding all when nothing is active.
     if (_expandedDirs.size === 0 && directories.length > 0) {
-      for (const d of directories) _expandedDirs.add(d.id);
+      const activeDirIds = new Set(
+        sessions.filter(s => s.active && s.type !== 'aux').map(s => s.dirId));
+      if (activeDirIds.size) {
+        for (const id of activeDirIds) if (id) _expandedDirs.add(id);
+      } else {
+        for (const d of directories) _expandedDirs.add(d.id);
+      }
     }
     renderDashboard(directories, sessions);
     syncMonitors(sessions);
@@ -369,15 +376,35 @@ function showPopoverMenu(triggerEl, items) {
   }, 0);
 }
 
+function showNewSessionMenu(ev, dirId) {
+  ev.stopPropagation();
+  showPopoverMenu(ev.currentTarget, [
+    { label: '+ Claude Chat', onclick: () => newSessionInDir(dirId, 'claude', 'chat') },
+    { label: '+ Claude Terminal', onclick: () => newSessionInDir(dirId, 'claude', 'terminal') },
+    { sep: true },
+    { label: '+ Codex Chat', onclick: () => newSessionInDir(dirId, 'codex', 'chat') },
+    { label: '+ Codex Terminal', onclick: () => newSessionInDir(dirId, 'codex', 'terminal') },
+  ]);
+}
+
 function showDirMenu(ev, dirId) {
   ev.stopPropagation();
   const dir = (_cachedDirectories || []).find(d => d.id === dirId);
-  showPopoverMenu(ev.currentTarget, [
-    { label: '改名', onclick: () => renameDirectory(dirId) },
-    { label: `默认角色提示词${dir?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeDirectoryRole(dirId) },
-    { sep: true },
-    { label: '删除目录', danger: true, onclick: () => deleteDirectory(dirId) },
-  ]);
+  const ps = dir?.pushState || {};
+  const items = [];
+  // Git push moved off the header into this menu (P2: declutter the dir header).
+  if (ps.available !== false && ps.hasRemote) {
+    const label = ps.ahead > 0
+      ? `↑ 推送 ${ps.ahead} 个提交`
+      : (ps.behind > 0 ? `↓ 落后 ${ps.behind}（需先 pull）` : '✓ Git 已同步');
+    items.push({ label, onclick: () => pushDirectory(dirId) });
+    items.push({ sep: true });
+  }
+  items.push({ label: '改名', onclick: () => renameDirectory(dirId) });
+  items.push({ label: `默认角色提示词${dir?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeDirectoryRole(dirId) });
+  items.push({ sep: true });
+  items.push({ label: '删除目录', danger: true, onclick: () => deleteDirectory(dirId) });
+  showPopoverMenu(ev.currentTarget, items);
 }
 
 function showSessionMenu(ev, sessionId) {
@@ -400,6 +427,8 @@ function showSessionMenu(ev, sessionId) {
   items.push({ label: `角色提示词${s?.rolePrompt ? '（已设）' : ''}`, onclick: () => changeSessionRole(sessionId) });
   items.push({ sep: true });
   items.push({ label: mergeLabel, ready: mergeReady, onclick: () => mergeSession(sessionId) });
+  items.push({ sep: true });
+  items.push({ label: '删除会话', danger: true, onclick: () => deleteSession(sessionId) });
   showPopoverMenu(ev.currentTarget, items);
 }
 
@@ -420,23 +449,10 @@ function renderDirectoryBlock(dir, dirSessions) {
 
   const total = dirSessions.length;
   const active = dirSessions.filter(s => s.active).length;
-  const claudeCount = groups.claude_terminal.length + groups.claude_chat.length;
-  const codexCount = groups.codex_terminal.length + groups.codex_chat.length;
+  // Git push state (ahead) surfaces as a tiny dot on the ⋯ menu; the full
+  // action lives inside showDirMenu now (P2: declutter the header).
   const ps = dir.pushState || {};
-  let pushClass = 'no-remote';
-  let pushText = ps.available === false ? 'Git 状态未知' : '未设置 remote';
-  let pushTitle = ps.available === false ? (ps.reason || '无法读取 Git 状态') : '该目录没有设置 Git remote';
-  if (ps.available !== false && ps.hasRemote && ps.ahead > 0) {
-    pushClass = 'pending';
-    pushText = `↑ ${ps.ahead} 待 push`;
-    pushTitle = `点击推送 ${ps.branch || ''} 到 ${ps.remote || ''}/${ps.remoteBranch || ''}`;
-  } else if (ps.available !== false && ps.hasRemote) {
-    pushClass = 'synced';
-    pushText = ps.behind > 0 ? `↓ 落后 ${ps.behind}` : '✓ 已同步';
-    pushTitle = ps.behind > 0
-      ? `本地分支落后 ${ps.remote || ''}/${ps.remoteBranch || ''} ${ps.behind} 个提交`
-      : `已同步到 ${ps.remote || ''}/${ps.remoteBranch || ''}`;
-  }
+  const pushPending = ps.available !== false && ps.hasRemote && ps.ahead > 0;
 
   const renderGroup = (cli, kind, label) => {
     const ss = groups[`${cli}_${kind}`];
@@ -465,20 +481,12 @@ function renderDirectoryBlock(dir, dirSessions) {
           <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
           <div class="dir-meta">
             <span><strong>${total}</strong> sessions</span>
-            ${active > 0 ? `<span class="sep">·</span><span><strong>${active}</strong> active</span>` : ''}
-            ${claudeCount > 0 ? `<span class="cli-mini claude">${claudeCount} Claude</span>` : ''}
-            ${codexCount > 0 ? `<span class="cli-mini codex">${codexCount} Codex</span>` : ''}
-            <button class="dir-push ${pushClass}" title="${escapeHtml(pushTitle)}" onclick="event.stopPropagation(); pushDirectory('${escapeHtml(id)}')">${escapeHtml(pushText)}</button>
+            ${active > 0 ? `<span class="sep">·</span><span class="active-count"><strong>${active}</strong> active</span>` : ''}
           </div>
         </div>
+        <button class="btn add-new btn-sm" title="新建会话" onclick="event.stopPropagation(); showNewSessionMenu(event, '${escapeHtml(id)}')">+ 新建 ▾</button>
         <button class="btn-icon" title="项目备忘 (multicc.memo.md)" onclick="event.stopPropagation(); openMemo('${escapeHtml(id)}')">📝</button>
-        <button class="btn-icon" title="更多操作" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>
-      </div>
-      <div class="dir-actions">
-        <button class="btn add-claude" title="New Claude terminal" onclick="newSessionInDir('${escapeHtml(id)}','claude','terminal')">+ Claude Term</button>
-        <button class="btn add-claude" title="New Claude chat" onclick="newSessionInDir('${escapeHtml(id)}','claude','chat')">+ Claude Chat</button>
-        <button class="btn add-codex" title="New Codex terminal" onclick="newSessionInDir('${escapeHtml(id)}','codex','terminal')">+ Codex Term</button>
-        <button class="btn add-codex" title="New Codex chat" onclick="newSessionInDir('${escapeHtml(id)}','codex','chat')">+ Codex Chat</button>
+        <button class="btn-icon${pushPending ? ' has-pending' : ''}" title="更多操作${pushPending ? `（有 ${ps.ahead} 个提交待 push）` : ''}" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>
       </div>
       <div class="dir-body">
         ${renderEventTimeline(id)}
@@ -537,33 +545,35 @@ function renderSessionRow(s) {
     ? `可合并：${mergeState.dirty ? '有未提交改动' : ''}${mergeState.dirty && mergeState.ahead > 0 ? '，' : ''}${mergeState.ahead > 0 ? `${mergeState.ahead} 个提交领先` : ''}`
     : '把 worktree 合并回基分支';
   const displayName = s.label || s.id;
-  const subtitle = s.label ? `#${s.id}` : (s.cwd || '');
+  const model = s.model ? modelShortName(s.model) : '';
+  const wbFile = (wb && wb.currentFile) ? wb.currentFile.split('/').pop() : '';
+  const sm = _workspaceSummaries.get(s.id);
+  const summary = sm && sm.summary ? sm.summary : '';
 
   const openBtn = s.kind === 'chat'
-    ? `<button class="btn" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}')">Open</button>`
-    : `<button class="btn" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">Open</button>`;
+    ? `<button class="btn btn-sm" onclick="event.stopPropagation(); openSessionChat('${escapeHtml(s.id)}')">Open</button>`
+    : `<button class="btn btn-sm" onclick="event.stopPropagation(); openSessionNewTab('${escapeHtml(s.id)}')">Open</button>`;
 
+  // Lean 2-line card: status is a colour dot (hover for text), the alias is the
+  // headline, and time/model sit in one muted line. cli/kind chips are dropped
+  // (the group header already says "Claude Chats"); #id, delete and the rest
+  // live in the ⋯ menu / title attribute.
   return `
-    <div class="sess-row${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="openSessionInline('${escapeHtml(s.id)}','${escapeHtml(s.kind || 'terminal')}')">
-      <div class="sess-row-top">
-        <span class="cli-chip ${s.cli || 'claude'}">${escapeHtml(s.cli || 'claude')}</span>
-        <span class="kind-chip">${escapeHtml(s.kind || 'terminal')}</span>
-        ${s.model ? `<span class="kind-chip" title="模型：${escapeHtml(s.model)}">${escapeHtml(modelShortName(s.model))}</span>` : ''}
-        <span class="sess-status ${statusCls}" id="sess-status-${escapeHtml(s.id)}">${statusText}</span>
-        <span class="sess-notes" id="sess-notes-${escapeHtml(s.id)}" style="font-size:10px;color:#d29922;${pendingNotes > 0 ? '' : 'display:none'}">${pendingNotes > 0 ? '📨 ' + pendingNotes : ''}</span>
+    <div class="lean${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="openSessionInline('${escapeHtml(s.id)}','${escapeHtml(s.kind || 'terminal')}')">
+      <span class="dot ${statusCls}" id="sess-status-${escapeHtml(s.id)}" title="${escapeHtml(statusText)}"></span>
+      <div class="lean-main">
+        <div class="lean-name" title="#${escapeHtml(s.id)}">${escapeHtml(displayName)}<span class="sess-notes" id="sess-notes-${escapeHtml(s.id)}"${pendingNotes > 0 ? '' : ' style="display:none"'}>${pendingNotes > 0 ? '📨 ' + pendingNotes : ''}</span></div>
+        <div class="lean-meta">
+          <span>${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
+          ${model ? `<span class="sep">·</span><span class="model" title="模型：${escapeHtml(s.model)}">${escapeHtml(model)}</span>` : ''}
+        </div>
+        <div class="sess-file" id="sess-file-${escapeHtml(s.id)}"${wbFile ? '' : ' style="display:none"'}>${wbFile ? '✎ ' + escapeHtml(wbFile) : ''}</div>
+        <div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${summary ? '最近任务：' + escapeHtml(summary) : ''}"${summary ? '' : ' style="display:none"'}>${summary ? '🗒 ' + escapeHtml(summary) : ''}</div>
       </div>
-      <div class="sess-id" title="${escapeHtml(s.id)}">${escapeHtml(displayName)}</div>
-      <div class="sess-label">${escapeHtml(subtitle)}</div>
-      <div class="sess-file" id="sess-file-${escapeHtml(s.id)}" style="font-size:11px;color:#d29922;font-family:monospace;${wb && wb.currentFile ? '' : 'display:none'}">${wb && wb.currentFile ? '✎ ' + escapeHtml(wb.currentFile.split('/').pop()) : ''}</div>
-      ${(() => { const sm = _workspaceSummaries.get(s.id); const t = sm && sm.summary ? sm.summary : ''; return `<div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${t ? '最近任务：' + escapeHtml(t) : ''}" style="${t ? '' : 'display:none'}">${t ? '🗒 ' + escapeHtml(t) : ''}</div>`; })()}
-      <div class="sess-row-bottom">
-        <span class="sess-label">${escapeHtml(formatRelative(s.lastActivity || s.createdAt))}</span>
-        <span class="sess-actions">
-          ${openBtn}
-          <button class="btn-icon${mergeReady ? ' merge-ready' : ''}" id="sess-menu-${escapeHtml(s.id)}" title="${escapeHtml(mergeReady ? mergeTitle + '\n（点击展开更多）' : '更多操作（改名/留言/Diff/合并）')}" onclick="event.stopPropagation(); showSessionMenu(event, '${escapeHtml(s.id)}')">⋯</button>
-          <button class="btn-icon danger" title="Delete session" onclick="event.stopPropagation(); deleteSession('${escapeHtml(s.id)}')">×</button>
-        </span>
-      </div>
+      <span class="lean-actions">
+        ${openBtn}
+        <button class="btn-icon${mergeReady ? ' merge-ready' : ''}" id="sess-menu-${escapeHtml(s.id)}" title="${escapeHtml(mergeReady ? mergeTitle + '（点击展开更多）' : '更多操作（改名/留言/Diff/合并/删除）')}" onclick="event.stopPropagation(); showSessionMenu(event, '${escapeHtml(s.id)}')">⋯</button>
+      </span>
     </div>`;
 }
 
@@ -1430,8 +1440,8 @@ function updateSessionStatusDom(sessionId) {
   const chip = document.getElementById(`sess-status-${sessionId}`);
   if (chip) {
     const info = wbStatusInfo(st.status);
-    chip.textContent = info.text;
-    chip.className = 'sess-status ' + info.cls;
+    chip.className = 'dot ' + info.cls;   // dot conveys status by colour
+    chip.title = info.text;               // text on hover
   }
   const fileEl = document.getElementById(`sess-file-${sessionId}`);
   if (fileEl) {
@@ -1454,32 +1464,29 @@ function eventLabel(evt) {
   }
 }
 
+// Which directories currently have their event timeline expanded. Collapsed by
+// default (P0: the "synced…" block used to eat a lot of vertical space). The set
+// survives live re-renders so an expanded timeline stays open when new events
+// stream in.
+const _expandedEvents = new Set();
+
 function renderEventTimeline(dirId) {
   const events = (_workspaceEvents.get(dirId) || []).slice(-12).reverse();
-  const wrap = (inner) => `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}"
-    style="margin:8px 14px;padding:8px 10px;background:#0d1117;border:1px solid #21262d;border-radius:6px;font-size:11px;line-height:1.7;max-height:260px;overflow-y:auto;">${inner}</div>`;
-  if (!events.length) {
-    return wrap('<div class="wb-event-row" style="color:#6e7681">暂无活动</div>');
-  }
-  const row = (e) => {
-    const t = new Date(e.ts).toLocaleTimeString();
-    return `<div class="wb-event-row"><span style="color:#6e7681">${t}</span> ${escapeHtml(eventLabel(e))}</div>`;
-  };
-  const head = events.slice(0, 2).map(row).join('');
-  const rest = events.slice(2);
-  if (!rest.length) return wrap(head);
-  const restHtml = `<div class="event-extra">${rest.map(row).join('')}</div>
-    <button class="events-toggle" onclick="event.stopPropagation(); toggleEventsBlock(this, ${rest.length})">查看全部 (${rest.length}) ▾</button>`;
-  return wrap(head + restHtml);
+  const n = events.length;
+  const open = _expandedEvents.has(dirId);
+  const rowsHtml = n
+    ? events.map(e => `<div class="wb-event-row"><span class="t">${new Date(e.ts).toLocaleTimeString()}</span> ${escapeHtml(eventLabel(e))}</div>`).join('')
+    : '<div class="wb-event-row dim">暂无活动</div>';
+  return `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}">
+    <button class="events-bar" onclick="event.stopPropagation(); toggleEventsCollapsed('${escapeHtml(dirId)}')">🕔 最近活动${n ? ` (${n})` : ''} <span class="caret">${open ? '▴' : '▾'}</span></button>
+    <div class="wb-events-list"${open ? '' : ' style="display:none"'}>${rowsHtml}</div>
+  </div>`;
 }
 
-function toggleEventsBlock(btn, restCount) {
-  const wrap = btn.closest('.wb-events');
-  if (!wrap) return;
-  const extra = wrap.querySelector('.event-extra');
-  if (!extra) return;
-  const open = extra.classList.toggle('open');
-  btn.textContent = open ? '收起 ▴' : `查看全部 (${restCount}) ▾`;
+function toggleEventsCollapsed(dirId) {
+  if (_expandedEvents.has(dirId)) _expandedEvents.delete(dirId);
+  else _expandedEvents.add(dirId);
+  updateEventTimelineDom(dirId);
 }
 
 function updateEventTimelineDom(dirId) {
