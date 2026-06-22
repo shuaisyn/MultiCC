@@ -479,15 +479,29 @@ function showActiveSessions(ev) {
   showSessionListPopup(ev, list, '🟢', '没有活跃的会话');
 }
 
-// Popup from the "定时任务" KPI tile: each task as "name · cron · dir", click opens
-// that task (edit/run modal).
+// Jump for a cron task: open the session it drives (cron fires into a dedicated
+// chat session, stored as lastSessionId). Never-run tasks have none yet → fall
+// back to the task's edit/run modal.
+function jumpToCronTask(t) {
+  if (t.lastSessionId && (_cachedSessions || []).some(s => s.id === t.lastSessionId)) {
+    openSessionChat(t.lastSessionId);
+  } else {
+    openCronModal(t.id);
+  }
+}
+
+// Popup from the "定时任务" KPI tile: each task as "name · cron · dir"; click jumps
+// to the session it drives (↗) or opens its setup if it hasn't run yet.
 function showCronTasks(ev) {
   ev.stopPropagation();
   const tasks = (typeof _cronTasksCache !== 'undefined' && _cronTasksCache) ? _cronTasksCache : [];
-  const items = tasks.map(t => ({
-    label: `${t.enabled ? '⏰' : '⏸'} ${t.name || '(未命名)'} · ${t.cron}${t.dirName ? ' · ' + t.dirName : ''}`,
-    onclick: () => openCronModal(t.id),
-  }));
+  const items = tasks.map(t => {
+    const live = t.lastSessionId && (_cachedSessions || []).some(s => s.id === t.lastSessionId);
+    return {
+      label: `${t.enabled ? '⏰' : '⏸'} ${t.name || '(未命名)'}${t.dirName ? ' · ' + t.dirName : ''} ${live ? '↗' : '⚙'}`,
+      onclick: () => jumpToCronTask(t),
+    };
+  });
   if (!items.length) items.push({ label: '还没有定时任务，点这里去登记', onclick: () => setView('cron') });
   showPopoverMenu(ev.currentTarget, items);
 }
