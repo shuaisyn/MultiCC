@@ -15,6 +15,13 @@
 //                  session to continue. Guarded: capped consecutive count,
 //                  reset by any real user message, skipped if an explicit
 //                  wait (A/B) is already pending for that session.
+//   E. bgCheck   — chat-only anti-pattern guard: a turn launched a Bash tool with
+//                  run_in_background:true. In a chat session that background
+//                  process gets reaped at turn/context boundary, so the model's
+//                  "I'll wait for it" silently dies. We auto-inject a corrective
+//                  nudge a little after such a turn — same guard shape as D
+//                  (capped count, reset by a real user message, skipped when an
+//                  explicit A/B wait already covers the session).
 //
 // All three converge on inject() → runChatTurn(session, text), which for a
 // streaming session feeds the warm process (queued if a turn is mid-flight) and
@@ -30,12 +37,15 @@ let _log = () => {};
 
 const waits = new Map();        // waitId -> wait spec/state
 const autoState = new Map();    // session -> { count, lastHash }
+const bgState = new Map();      // session -> { count }  — run_in_background guard (E)
 let ticker = null;
 
 const TICK_MS = 1000;
 const DEFAULTS = { intervalSec: 15, maxChecks: 40, timeoutSec: 1800 };
 const MIN_INTERVAL_SEC = 3;
 const MAX_AUTO_CONTINUE = 5;     // consecutive auto-continues before giving up
+const MAX_BG_CHECK = 6;          // consecutive run_in_background nudges before giving up
+const BG_CHECK_DELAY_MS = 25000; // wait ~25s after a bg-launching turn, then nudge
 
 function genId() { return 'w_' + crypto.randomBytes(6).toString('hex'); }
 function genToken() { return crypto.randomBytes(16).toString('hex'); }
@@ -134,6 +144,7 @@ function cancelForSession(session) {
   let n = 0;
   for (const [id, w] of waits) if (w.session === session) { waits.delete(id); n++; }
   autoState.delete(session);
+  bgState.delete(session);
   return n;
 }
 
@@ -215,6 +226,35 @@ function autoContinue(session, opts = {}) {
 // turn ends "done" / "waiting on user".
 function resetAuto(session) { autoState.delete(session); }
 
+// ── run_in_background anti-pattern guard (E) ──
+// Chat-only. Called at a turn boundary when that turn launched a Bash tool with
+// run_in_background:true. In a chat session the spawned process is reaped when
+// the turn/context resets, so the model's "I'll wait for it" never wakes up.
+// We inject a corrective nudge a bit later — keeping the session warm AND
+// steering it onto the supported path (run-detached / immediate BashOutput).
+// Same guard shape as autoContinue: capped count, reset by a real user message,
+// skipped when an explicit A/B wait already covers the session.
+function bgCheck(session, opts = {}) {
+  if (hasWait(session)) { _log(`[wait] bgCheck skip ${session}: explicit wait pending`); return false; }
+  const st = bgState.get(session) || { count: 0 };
+  if (st.count >= MAX_BG_CHECK) {
+    _log(`[wait] bgCheck cap reached for ${session} (${st.count})`);
+    return false;
+  }
+  st.count++;
+  bgState.set(session, st);
+  const nudge = opts.nudge ||
+    '[后台进程检查] 你刚才用 run_in_background 起了后台命令。在 chat 会话里这个后台进程会随本轮/上下文回收被静默杀掉，"稍后再看"通常等不到结果。请现在就处理：① 若任务很快——直接用 BashOutput 把它的输出取回来确认结果；② 若是构建/部署/长任务/轮询等待——改用 multicc 的 run-detached 接口重跑（它由服务以 setsid 启动、跨轮不丢、完成后自动把结果发回给你续接）。不要只停在"等它跑完"。';
+  _log(`[wait] bgCheck ${session} (#${st.count})`);
+  const d = Number(opts.delayMs);
+  const delayMs = Number.isFinite(d) ? Math.max(0, d) : BG_CHECK_DELAY_MS;
+  setTimeout(() => fireInject(session, nudge), delayMs);
+  return true;
+}
+
+// Reset the bgCheck counter — call on a real user message.
+function resetBg(session) { bgState.delete(session); }
+
 // Inject only when the session is free; if a turn is mid-flight, retry shortly
 // so we never interrupt the very work we are waiting on. (Streaming queues
 // internally too, but this keeps default sessions safe.)
@@ -227,7 +267,7 @@ function fireInject(session, text, attempt = 0) {
 }
 
 function stats() {
-  return { waits: waits.size, autoSessions: autoState.size };
+  return { waits: waits.size, autoSessions: autoState.size, bgSessions: bgState.size };
 }
 
 // Busy-safe delivery of arbitrary text into a session as a new turn. Reuses the
@@ -239,6 +279,7 @@ function safeInject(session, text) { fireInject(session, text); }
 
 module.exports = {
   init, register, resolve, cancel, cancelForSession,
-  listForSession, hasWait, tick, autoContinue, resetAuto, stats, safeInject,
+  listForSession, hasWait, tick, autoContinue, resetAuto,
+  bgCheck, resetBg, stats, safeInject,
   _waits: waits, // for tests
 };

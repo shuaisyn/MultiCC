@@ -4174,6 +4174,13 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
           setSessionStatus(sessionName, { status: 'editing', currentFile: block.input?.file_path || null });
         } else if (block.name === 'Bash') {
           setSessionStatus(sessionName, { status: 'running', currentFile: null });
+          // Anti-pattern guard (E): a chat-mode Bash launched with
+          // run_in_background:true will be reaped when the turn/context resets,
+          // so any "I'll wait for it" silently dies. Flag the turn; the result
+          // boundary below schedules a corrective nudge.
+          if (block.input && block.input.run_in_background === true) {
+            cs._sawBgRun = true;
+          }
         } else {
           setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
         }
@@ -4207,6 +4214,19 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
     }
     setSessionStatus(sessionName, { status: 'idle', currentFile: null });
     scheduleIntentClassify(cs, sessionName);
+    // Anti-pattern guard (E): if this turn launched a run_in_background Bash and
+    // didn't register an explicit wait, the background process won't survive the
+    // context reset. Nudge the session onto the supported path (run-detached /
+    // immediate BashOutput). Guarded + capped inside the injector; reset by a
+    // real user message. Chat-only: this code path is the chat event applier.
+    if (cs._sawBgRun) {
+      cs._sawBgRun = false;
+      const persistedRec = persistedSessions.get(sessionName);
+      if (!waitInjector.hasWait(sessionName)) {
+        console.log(`[multicc/chat] [${sessionName}] used run_in_background → scheduling bgCheck nudge`);
+        waitInjector.bgCheck(sessionName, { cwd: cs.cwd });
+      }
+    }
     // Decoupled via the bus so chat doesn't depend on the triggers domain.
     bus.emit('chat:turn-complete', sessionName, cs);
   }
@@ -4224,7 +4244,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   }
   // A real (non-auto-continue) message means the user/trigger is driving again →
   // reset the D auto-continue guard so a future background-wait gets fresh budget.
-  if (!originContinue) waitInjector.resetAuto(sessionName);
+  if (!originContinue) { waitInjector.resetAuto(sessionName); waitInjector.resetBg(sessionName); }
   // Ensure session-level state exists even when no WS client is connected.
   let cs = chatSessions.get(sessionName);
   if (!cs) {
