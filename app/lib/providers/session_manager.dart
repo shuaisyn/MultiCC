@@ -431,6 +431,13 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     await loadDashboard();
   }
 
+  Future<String> fetchSessionMemory(String id) =>
+      _sessionService.fetchSessionMemory(id);
+
+  Future<void> updateSessionMemory(String id, String memory) async {
+    await _sessionService.updateSessionMemory(id, memory);
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   @override

@@ -180,6 +180,35 @@ class SessionService {
     }
   }
 
+  /// Read the session's current distilled memory fresh (the aux AI may have
+  /// updated it since the dashboard list was loaded).
+  Future<String> fetchSessionMemory(String id) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/sessions/$id')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) return '';
+    try {
+      final j = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      return (j['memory'] ?? '').toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> updateSessionMemory(String id, String memory) async {
+    final res = await http
+        .patch(
+          Uri.parse(_url('/api/sessions/$id')),
+          headers: _headers,
+          body: jsonEncode({'memory': memory}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   /// Create an external share link for a session. access: 'view' | 'operate'
   /// ('operate' requires a non-empty password). Returns the share record incl.
   /// `url` (built server-side from the request host, so it matches the base URL

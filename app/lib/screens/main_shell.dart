@@ -1270,6 +1270,8 @@ String _eventLabel(Map<String, dynamic> e) {
       return '🗑 删除会话 ${detail.isNotEmpty ? detail : who}';
     case 'merged':
       return '🔀 $who 合并：$detail';
+    case 'memory_updated':
+      return '🧠 $who ${detail.isNotEmpty ? detail : '更新会话记忆'}';
     case 'synced':
       return '🔄 $who 同步：$detail';
     case 'sync_conflict':

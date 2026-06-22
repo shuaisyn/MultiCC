@@ -1310,6 +1310,8 @@ async function loadSessionModel() {
     // Role prompt applies to every cli; load it first, then the claude-only model.
     _sessionRole = info.rolePrompt || '';
     updateRoleBtn();
+    _sessionMemory = info.memory || '';
+    updateMemoryBtn();
     // Provider switch applies to every cli (claude & codex both have providers).
     _sessionCli = info.cli || 'claude';
     _sessionProvider = info.provider || '';
@@ -1604,6 +1606,90 @@ roleBtn?.addEventListener('click', async () => {
     addSystemMsg('角色保存失败：' + e.message);
   }
 });
+
+/* ── Per-session memory (distilled key problems + solutions) ── */
+const memoryBtn = document.getElementById('memory-btn');
+let _sessionMemory = '';
+
+function updateMemoryBtn() {
+  if (!memoryBtn) return;
+  const set = !!(_sessionMemory && _sessionMemory.trim());
+  memoryBtn.textContent = set ? '🧠 记忆✓' : '🧠 记忆';
+  memoryBtn.title = set
+    ? '该会话已积累记忆（清理历史时辅助 AI 自动提炼的关键问题与解决方式），点击查看/编辑'
+    : '会话记忆：清理历史时辅助 AI 会自动提炼关键问题与解决方式存到这里，可手动查看/编辑';
+}
+
+// Minimal textarea editor; returns the new text or null on cancel.
+function showMemoryEditor(current) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;width:min(640px,94vw);max-height:86vh;display:flex;flex-direction:column;gap:10px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'color:#f0f6fc;font-size:14px;font-weight:600;';
+    title.textContent = '🧠 会话记忆';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'color:#8b949e;font-size:12px;line-height:1.5;';
+    msg.textContent = '辅助 AI 在清理历史时自动提炼的「关键问题 + 解决方式」，会随每轮对话注入给模型。可手动编辑或清空。';
+    const ta = document.createElement('textarea');
+    ta.value = current || '';
+    ta.placeholder = '（还没有积累记忆。聊一段后点 Clear 或历史超长自动滚动时，辅助 AI 会在这里记下关键问题与解决方式。）';
+    ta.style.cssText = 'width:100%;flex:1;min-height:240px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:ui-monospace,monospace;padding:10px;resize:vertical;';
+    const hint = document.createElement('div');
+    hint.style.cssText = 'color:#6e7681;font-size:11px;';
+    hint.textContent = '留空＝清除全部记忆。Ctrl/⌘+Enter 保存，Esc 取消。';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;';
+    const ok = document.createElement('button');
+    ok.textContent = '保存';
+    ok.style.cssText = 'background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;';
+    row.appendChild(cancel); row.appendChild(ok);
+    box.appendChild(title); box.appendChild(msg); box.appendChild(ta); box.appendChild(hint); box.appendChild(row);
+    overlay.appendChild(box); document.body.appendChild(overlay);
+    const close = (r) => { document.removeEventListener('keydown', onKey, true); overlay.remove(); resolve(r); };
+    const accept = () => { if (ta.value.length > 8000) { addSystemMsg('记忆过长（上限 8000 字）'); return; } close(ta.value); };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(null); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
+    }
+    ok.onclick = accept; cancel.onclick = () => close(null);
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+    document.addEventListener('keydown', onKey, true);
+    setTimeout(() => ta.focus(), 0);
+  });
+}
+
+memoryBtn?.addEventListener('click', async () => {
+  // Re-fetch latest memory (aux AI may have updated it since last load).
+  try {
+    const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`));
+    if (r.ok) { const info = await r.json(); _sessionMemory = info.memory || ''; updateMemoryBtn(); }
+  } catch (_) {}
+  const next = await showMemoryEditor(_sessionMemory);
+  if (next === null) return;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memory: next }),
+    });
+    const data = await res.json();
+    if (!res.ok) { addSystemMsg('记忆保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    _sessionMemory = next.trim();
+    updateMemoryBtn();
+    addSystemMsg(_sessionMemory ? '✓ 会话记忆已更新' : '✓ 已清空会话记忆');
+  } catch (e) {
+    addSystemMsg('记忆保存失败：' + e.message);
+  }
+});
+
+// Live update when the aux AI distills new memory for this session.
+function applyMemoryEvent(memory) { _sessionMemory = memory || ''; updateMemoryBtn(); }
 
 /* ── Per-session streaming + auto-continue (claude only) ── */
 const streamBtn = document.getElementById('stream-btn');

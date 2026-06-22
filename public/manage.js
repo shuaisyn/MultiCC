@@ -1555,6 +1555,7 @@ function eventLabel(evt) {
     case 'session_model_changed': return `🧠 切换模型 ${evt.detail || who}`;
     case 'session_deleted': return `🗑 删除会话 ${evt.detail || who}`;
     case 'merged':          return `🔀 ${who} 合并：${evt.detail || ''}`;
+    case 'memory_updated':  return `🧠 ${who} ${evt.detail || '更新会话记忆'}`;
     case 'synced':          return `🔄 ${who} 同步：${evt.detail || ''}`;
     case 'sync_conflict':   return `⚠️ ${who} ${evt.detail || '同步冲突'}`;
     case 'dispatch':        return `📤 ${who} 分发 ${evt.detail || ''}`;

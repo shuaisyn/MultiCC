@@ -343,12 +343,12 @@ const MULTICC_IMG_HINT = [
   '     返回里的 callbackUrl 交给外部系统，让它在完成时 POST 结果到该 URL（body 放 {"data":"..."}）。',
   '  登记成功后，正常结束本轮即可——条件满足/回调到达时 multicc 会自动续接，无需用户手动催。',
   '',
-  '【后台长任务，丢了别管】当你要跑一个持续较久、且必须「跑完再继续」的命令（构建/打包/部署/批处理/长测试）时，不要用裸 `&`/nohup 自己丢后台——chat 会话里你起的后台进程会在本轮结束时被环境回收杀掉，任务半路夭折、你也收不到结果（看起来就像卡住、说好等通知却没动静）。请改用 multicc 的 run-detached 接口：它由 multicc 服务以 setsid 方式启动该命令，进程独立于本轮、甚至独立于服务重启，跑完后自动把「退出码 + 输出尾巴」作为下一条消息发回给你续接。',
+  '【后台长任务，丢了别管 ——【硬性规则，优先级高于任何角色设定】】在 multicc 的 chat 会话里，凡是「跑完/等到再继续」的等待型后台操作，一律禁止用以下方式：① 裸 `&`/nohup；② Claude Code 自带 Bash 工具的 `run_in_background:true`（这是最常见的违规！包括用它去轮询/守候一个或多个文件、状态、子会话结果）；③ Monitor / BashOutput 轮询；④ `tail -f | grep` 等待标记。原因：chat 会话里这些后台进程和监听器会在本轮结束/上下文重置时被环境连同任务一起回收，进程被静默杀掉（OOM、退出码 137，不写日志）后你的等待永远不会被唤醒——表现就是「消息到此断掉、不会自动恢复，直到用户来催」（你正在看的这条提示就是因为有人这么做了）。正确做法：改用 multicc 的 run-detached 接口（由 multicc 服务以 setsid 启动，独立于本轮甚至服务重启，跑完自动把「退出码+输出尾巴」作为下一条消息发回给你续接）；或在命令本身够快时前台同步跑（给足 timeout 一次拿结果）。',
   `     curl -s $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/run-detached -H 'Content-Type: application/json' \\`,
   `       -d '{"command":"<要后台跑的完整shell命令>","label":"<简短任务名>"}'`,
   '     可选字段：cwd（默认你的工作目录）、intervalSec（轮询间隔秒，默认 10）、maxChecks（最多检查次数，默认 360≈1 小时）。返回里有 taskId 与 logPath；用 GET $MULTICC_BASE_URL/api/detached/<taskId> 可随时查实时状态与日志尾巴。',
   '  登记后正常结束本轮即可，任务完成时 multicc 会自动续接。若需中途向用户报进度，配合下面「边做边报」用 GET /api/detached/<taskId> tail 日志即可，不要前台死等。',
-  '  ⚠️ 反例（务必避免）：不要用 run_in_background / Monitor / `tail -f|grep` 之类「等一个单次完成信号」的方式守长任务——这些后台进程和监听器在本轮结束/上下文重置时会被环境连同任务一起回收，进程一旦被静默杀掉（如 OOM、退出码 137，不写日志），你的监听只 grep「成功标记」就会永远等不到、一直空挂，直到用户来催。要么用上面的 run-detached（任务归 multicc 服务、跨轮存活、自动回灌），要么前台同步跑（命令本身够快时，给足 timeout 一次跑完拿结果）。若坚持要自己轮询，过滤条件必须同时覆盖成功与失败/异常态（如 `done|FAIL|error|Killed|Traceback|退出码`），否则崩溃=静默=误判仍在运行。',
+  '  ⚠️ 典型违规场景（这些都必须用 run-detached，不能用 Bash run_in_background）：等构建/打包/部署/长测试跑完；轮询某文件出现某关键字；**等多个子会话/兄弟会话把结果写进各自文件后再汇总**（比如 dispatch 出去几个会话后守着它们的 chat_history json）；等第三方接口/部署状态变化。判断标准很简单：只要这一步是「我先发起、然后要等它在未来某刻完成、完成后我才继续」，就用 run-detached 或前台同步跑，绝不用 run_in_background 守。run-detached 同样支持轮询（intervalSec/maxChecks）和自定义 pollCmd，能覆盖上面所有场景，且跨轮不丢、自动续接。',
   '',
   '【长任务边做边报进度】（multicc 统一体验约定）当某件事要跑较久（构建/打包/部署/批处理/长等待）时，默认采用「边等边报」：优先用上面的 run-detached 把它放后台（这样不会被回收），运行期间每隔约 25–30 秒主动向用户冒一句简短进度（在做什么、已约 Ns、最新一行关键输出），任务完成后再给最终结果。进度做法：用一个会在约 25 秒后自行退出的后台计时命令把自己周期性唤醒，每次被唤醒就 tail 一下任务输出（或 GET /api/detached/<taskId>）、报一句进度，直到任务完成为止。',
   '不要一启动就长时间静默、让对话框看起来像卡住；也不要只说「我等一下」就停下不续接。这是面向所有 multicc 用户的统一约定，请默认遵循。',
@@ -1812,6 +1812,14 @@ app.patch('/api/sessions/:id', (req, res) => {
     s.rolePrompt = rp.trim() || null;
     appendEvent(s.dirId, 'session_role_changed', s.rolePrompt ? (s.label || s.id) : `${s.label || s.id}（清除，继承目录）`, s.id);
   }
+  if (req.body.memory !== undefined) {
+    // Session memory: distilled key problems/solutions. User can view/edit/clear.
+    const mem = (req.body.memory == null ? '' : String(req.body.memory));
+    if (mem.length > SESSION_MEMORY_MAX) return res.status(400).json({ error: `memory too long (max ${SESSION_MEMORY_MAX})` });
+    s.memory = mem.trim() || null;
+    appendEvent(s.dirId, 'memory_updated', s.memory ? '手动编辑会话记忆' : '清空会话记忆', s.id);
+    workspaceBroadcast(s.dirId, { type: 'memory', sessionId: s.id, memory: s.memory || '' });
+  }
   if (req.body.streaming !== undefined) {
     // Experimental: keep a persistent streaming claude process across turns.
     if ((s.cli || 'claude') !== 'claude') return res.status(400).json({ error: 'streaming is claude-only' });
@@ -2007,13 +2015,14 @@ app.get('/api/sessions/:id', (req, res) => {
   const model = persisted?.model || null;
   // The session's own role override (null = inherits the directory default).
   const rolePrompt = persisted?.rolePrompt || null;
+  const memory = persisted?.memory || null;  // distilled session memory
   const streaming = !!persisted?.streaming;
   const autoContinue = !!persisted?.autoContinue;
   const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, provider, streaming, autoContinue });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, provider, streaming, autoContinue });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
   }
 });
 
@@ -3743,11 +3752,30 @@ function saveChatHistory(sessionName) {
   }
 }
 
+// Messages dropped by the rolling-window trim accumulate here per session; once
+// a batch builds up we distill them into memory before they're gone for good.
+const _droppedForMemory = new Map();  // sessionName → [msg, …]
+const MEMORY_DISTILL_BATCH = 10;
+
 function appendChatMessage(sessionName, msg) {
   const history = loadChatHistory(sessionName);
   history.push(msg);
   const limit = sessionName === AUX_SESSION_ID ? AUX_HISTORY_MAX : MAX_CHAT_MESSAGES;
-  while (history.length > limit) history.shift();
+  const isAux = sessionName === AUX_SESSION_ID;
+  while (history.length > limit) {
+    const dropped = history.shift();
+    // Don't distill the aux/gateway internal logs — only real chat sessions.
+    if (!isAux && dropped) {
+      const buf = _droppedForMemory.get(sessionName) || [];
+      buf.push(dropped);
+      if (buf.length >= MEMORY_DISTILL_BATCH) {
+        distillHistoryIntoMemory(sessionName, buf);
+        _droppedForMemory.set(sessionName, []);
+      } else {
+        _droppedForMemory.set(sessionName, buf);
+      }
+    }
+  }
   saveChatHistory(sessionName);
 }
 
@@ -3798,6 +3826,11 @@ app.use('/api/feishu', feishuBridge.router);
 const workspaceStatus = new Map();   // sessionId → { status, currentFile, lastActivity }
 const workspaceClients = new Map();  // dirId → Set<ws>
 const sessionSummaries = new Map();  // sessionId → { summary, ts } — aux-AI "最近任务" one-liner
+// Hydrate from persisted summaries so the dashboard shows each session's last
+// known "上下文特点" immediately after a restart (was lost when memory-only).
+for (const [sid, p] of persistedSessions) {
+  if (p && p.summary) sessionSummaries.set(sid, { summary: p.summary, ts: p.summaryTs || Date.now() });
+}
 
 // Parse an aux-AI intent_classify reply: line 1 = state letter (C/W),
 // line 2 = optional short task summary. Tolerant of blank/extra lines.
@@ -3823,7 +3856,51 @@ function setSessionSummary(sessionId, summary) {
   if (!persisted || persisted.type === 'aux' || persisted.type === 'gateway') return;
   const ts = Date.now();
   sessionSummaries.set(sessionId, { summary, ts });
+  // Persist so the dir's per-session "上下文特点" survives a server restart
+  // (the in-memory Map alone used to lose it). Throttled-ish: only write when
+  // the text actually changed.
+  if (persisted.summary !== summary) {
+    persisted.summary = summary;
+    savePersistedSessions();
+  }
   workspaceBroadcast(persisted.dirId, { type: 'summary', sessionId, summary, ts });
+}
+
+const SESSION_MEMORY_MAX = 8000;  // hard cap on a session's persisted memory text
+
+// Distill a chunk of about-to-be-discarded chat history into the session's
+// long-lived memory. We deliberately keep ONLY key problems and how they were
+// solved (decisions, fixes, gotchas, user preferences, unfinished threads) — not
+// ordinary task narration. Runs on the aux AI, merges incrementally with the
+// existing memory (de-dupes + compresses when near the cap), and is best-effort:
+// any failure leaves history-clearing unaffected. Fire-and-forget (no await).
+function distillHistoryIntoMemory(sessionId, messages) {
+  const persisted = persistedSessions.get(sessionId);
+  if (!persisted || persisted.type === 'aux' || persisted.type === 'gateway') return;
+  const text = (messages || [])
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+    .map(m => `${m.role === 'user' ? '用户' : '助手'}: ${m.content.trim().slice(0, 2000)}`)
+    .join('\n');
+  if (text.length < 40) return;  // nothing worth distilling
+  const prior = (persisted.memory || '').trim();
+  const prompt =
+`你是会话记忆提炼器。下面是一段即将被清理/丢弃的对话。请只提炼出「值得长期记住的关键问题，以及解决该问题的方式/手段/结论」——例如：踩过的坑与正确做法、确认过的技术决策、用户明确表达的偏好/约束、尚未完成需后续跟进的事项。\n忽略普通的任务过程、寒暄、可重新获得的中间步骤。每条一行，动词或名词开头，精炼。若这段对话没有任何值得长期记住的，只输出一个减号 "-"。\n\n${prior ? `【已有的会话记忆（请与新内容合并去重，不要丢失旧的有效条目；若总量过长则压缩同类项）】\n${prior}\n\n` : ''}【待提炼的对话】\n${text.slice(0, 12000)}\n\n请直接输出合并后的会话记忆（多行要点），不要解释、不要加标题。`;
+  auxQueue.enqueue({ type: 'memory_distill', prompt, meta: { sessionId } })
+    .then(result => {
+      let out = (result && result.text || '').trim();
+      if (!out || out === '-' || out === '—') return;
+      // Strip an accidental code fence / leading label the model may add.
+      out = out.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+      if (out.length > SESSION_MEMORY_MAX) out = out.slice(0, SESSION_MEMORY_MAX);
+      const p = persistedSessions.get(sessionId);
+      if (!p) return;
+      p.memory = out;
+      savePersistedSessions();
+      appendEvent(p.dirId, 'memory_updated', `已提炼会话记忆（${out.length} 字）`, sessionId);
+      workspaceBroadcast(p.dirId, { type: 'memory', sessionId, memory: out });
+      console.log(`[multicc/memory] distilled ${sessionId}: memory now ${out.length} chars`);
+    })
+    .catch(e => console.warn(`[multicc/memory] distill ${sessionId} failed: ${e.message}`));
 }
 
 function workspaceBroadcast(dirId, payload) {
@@ -4063,9 +4140,19 @@ ${tail}`,
 // Returns null when neither is set (sessions keep the bare image hint only).
 function resolveRolePrompt(persisted) {
   if (!persisted) return null;
-  if (persisted.rolePrompt) return persisted.rolePrompt;
-  const dir = persisted.dirId ? directories.get(persisted.dirId) : null;
-  return (dir && dir.rolePrompt) || null;
+  // Base persona: explicit session role wins, else the directory default.
+  let base = persisted.rolePrompt;
+  if (!base) {
+    const dir = persisted.dirId ? directories.get(persisted.dirId) : null;
+    base = (dir && dir.rolePrompt) || null;
+  }
+  // Session memory (distilled from cleared/trimmed history — key problems and how
+  // they were solved). Lives alongside, not inside, the role prompt; appended so
+  // every turn carries it without the user re-explaining past decisions.
+  const mem = (persisted.memory || '').trim();
+  if (!mem) return base;
+  const memBlock = `[会话记忆：以下是本会话过往积累的关键问题与解决方式，供你延续上下文，不要重复已解决的事]\n${mem}\n[会话记忆结束]`;
+  return base ? `${base}\n\n${memBlock}` : memBlock;
 }
 
 // Apply one claude-shaped stream-json event to chat session state, then forward
@@ -4888,6 +4975,9 @@ function handleChatWs(ws, req, urlObj) {
 
       if (msg.type === 'clear_history') {
         const h = chatHistories.get(sessionName);
+        // Distill the soon-to-be-discarded conversation into long-lived session
+        // memory BEFORE wiping it (key problems + how they were solved).
+        if (h && h.length) distillHistoryIntoMemory(sessionName, h.slice());
         if (h) h.length = 0;
         saveChatHistory(sessionName);
         // Reset the CLI session so next turn starts fresh:
