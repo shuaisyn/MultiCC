@@ -133,6 +133,8 @@
     .kpi.alt .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)} .kpi.alt .k-bar{background:linear-gradient(90deg,var(--amber),transparent)}
     .kpi.blue .dot{background:var(--blue);box-shadow:0 0 8px var(--blue)} .kpi.blue .k-bar{background:linear-gradient(90deg,var(--blue),transparent)}
     .kpi.grey .dot{background:var(--faint);box-shadow:none} .kpi.grey .k-bar{background:linear-gradient(90deg,var(--faint),transparent)}
+    .kpi.clickable{cursor:pointer;transition:border-color .12s,transform .12s}
+    .kpi.clickable:hover{border-color:var(--amber);transform:translateY(-1px)}
 
     .sec-head{display:flex;align-items:center;gap:10px;margin:2px 0 16px}
     .sec-head h2{font-size:14px;font-weight:650;letter-spacing:.2px}
@@ -1022,7 +1024,7 @@
       const kpiRow = document.getElementById('kpi-row');
       if (kpiRow) kpiRow.innerHTML = `
         <div class="kpi"><div class="k-top"><span class="dot"></span>活跃会话</div><div class="k-num" id="kpi-active">0</div><div class="k-sub" id="kpi-active-sub">claude 0 · codex 0</div><div class="k-bar"></div></div>
-        <div class="kpi alt"><div class="k-top"><span class="dot"></span>等待输入</div><div class="k-num" id="kpi-wait">0</div><div class="k-sub">需要你回复</div><div class="k-bar"></div></div>
+        <div class="kpi alt clickable" title="点击查看并跳转到等待中的会话" onclick="showWaitingSessions(event)"><div class="k-top"><span class="dot"></span>等待输入</div><div class="k-num" id="kpi-wait">0</div><div class="k-sub">需要你回复 ›</div><div class="k-bar"></div></div>
         <div class="kpi blue"><div class="k-top"><span class="dot"></span>目录</div><div class="k-num" id="kpi-dirs">0</div><div class="k-sub" id="kpi-sess-sub">0 个会话</div><div class="k-bar"></div></div>
         <div class="kpi grey"><div class="k-top"><span class="dot"></span>定时任务</div><div class="k-num" id="kpi-cron">0</div><div class="k-sub">已登记</div><div class="k-bar"></div></div>`;
 
@@ -1034,9 +1036,13 @@
           const active = sess.filter(s => s.active).length;
           const claude = sess.filter(s => (s.cli || 'claude') === 'claude').length;
           const codex = sess.filter(s => s.cli === 'codex').length;
+          // Dedup via the shared helper so the tile number matches the popup list.
           let wait = 0;
-          if (typeof _sessionStatus !== 'undefined' && _sessionStatus) for (const v of _sessionStatus.values()) if (v === 'waiting') wait++;
-          if (typeof _workspaceStatus !== 'undefined' && _workspaceStatus) for (const v of _workspaceStatus.values()) if (v && v.status === 'waiting') wait++;
+          if (typeof waitingSessionIds === 'function') wait = waitingSessionIds().size;
+          else {
+            if (typeof _sessionStatus !== 'undefined' && _sessionStatus) for (const v of _sessionStatus.values()) if (v === 'waiting') wait++;
+            if (typeof _workspaceStatus !== 'undefined' && _workspaceStatus) for (const v of _workspaceStatus.values()) if (v && v.status === 'waiting') wait++;
+          }
           const set = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = val; };
           set('kpi-active', active); set('kpi-active-sub', `claude ${claude} · codex ${codex}`);
           set('kpi-wait', wait);

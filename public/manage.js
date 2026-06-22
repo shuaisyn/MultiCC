@@ -432,6 +432,43 @@ function showSessionMenu(ev, sessionId) {
   showPopoverMenu(ev.currentTarget, items);
 }
 
+// Deduplicated set of session ids currently waiting on user input (a session may
+// appear in both the monitor map and the live workspace map).
+function waitingSessionIds() {
+  const ids = new Set();
+  if (typeof _sessionStatus !== 'undefined' && _sessionStatus)
+    for (const [id, v] of _sessionStatus) if (v === 'waiting') ids.add(id);
+  if (typeof _workspaceStatus !== 'undefined' && _workspaceStatus)
+    for (const [id, v] of _workspaceStatus) if (v && v.status === 'waiting') ids.add(id);
+  return ids;
+}
+
+function _dirNameById(dirId) {
+  const d = (_cachedDirectories || []).find(x => x.id === dirId);
+  return d ? d.name : '';
+}
+
+function jumpToSession(s) {
+  if ((s.kind || 'terminal') === 'chat') openSessionChat(s.id);
+  else openSessionNewTab(s.id);
+}
+
+// Popup from the "等待输入" KPI tile: list every waiting session as "dir / alias"
+// and jump straight to it on click.
+function showWaitingSessions(ev) {
+  ev.stopPropagation();
+  const items = [];
+  for (const id of waitingSessionIds()) {
+    const s = (_cachedSessions || []).find(x => x.id === id);
+    if (!s) continue;
+    const alias = s.label || s.id;
+    const dir = _dirNameById(s.dirId);
+    items.push({ label: '⏳ ' + (dir ? `${dir} / ${alias}` : alias), onclick: () => jumpToSession(s) });
+  }
+  if (!items.length) items.push({ label: '没有等待输入的会话', onclick: () => {} });
+  showPopoverMenu(ev.currentTarget, items);
+}
+
 function renderDirectoryBlock(dir, dirSessions) {
   const openClass = _expandedDirs.has(dir.id) ? ' open' : '';
   const id = dir.id;
