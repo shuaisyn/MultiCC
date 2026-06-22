@@ -65,6 +65,25 @@ const ok = (cond, msg) => { if (cond) { pass++; console.log('  ✅', msg); } els
   wait.register({ session: 's5', mode: 'callback' });
   ok(wait.autoContinue('s5') === false, 'auto-continue skipped when explicit wait pending');
 
+  // ── E: run_in_background nudge ──
+  console.log('E. bgCheck (run_in_background guard)');
+  injected.length = 0;
+  let bgStarted = 0;
+  for (let i = 0; i < 9; i++) if (wait.bgCheck('sbg', { delayMs: 0 })) bgStarted++;
+  await sleep(20);
+  ok(bgStarted === 6, `capped at 6 consecutive (got ${bgStarted})`);
+  ok(injected.length === 6, 'exactly 6 bg nudges injected');
+  ok(injected[0].text.includes('run_in_background') && injected[0].text.includes('run-detached'),
+     'nudge names the anti-pattern and the fix');
+  wait.resetBg('sbg');
+  ok(wait.bgCheck('sbg', { delayMs: 0 }), 'resetBg re-enables bgCheck');
+  await sleep(20); // flush so it can't pollute later sections
+
+  // ── E: skipped if explicit wait pending ──
+  injected.length = 0;
+  wait.register({ session: 'sbg2', mode: 'callback' });
+  ok(wait.bgCheck('sbg2') === false, 'bgCheck skipped when explicit wait pending');
+
   // ── inject defers while busy ──
   console.log('busy deferral');
   injected.length = 0; busy = true;
