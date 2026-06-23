@@ -11,6 +11,7 @@ import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import '../services/manage_service.dart';
 import '../services/workspace_service.dart';
+import '../i18n.dart';
 import '../widgets/conflict_diff_dialog.dart';
 import '../widgets/session_diff_dialog.dart';
 import '../widgets/model_picker.dart';
@@ -43,24 +44,29 @@ Color _wbStatusColor(String? status) {
 String _wbStatusLabel(String? status) {
   switch (status) {
     case 'thinking':
-      return '思考中';
+      return t('thinking');
     case 'editing':
-      return '编辑中';
+      return t('editing');
     case 'running':
-      return '运行中';
+      return t('running');
     case 'waiting':
-      return '等待';
+      return t('waiting');
     default:
-      return 'idle';
+      return t('idle');
   }
 }
 
 String _mergeReadyLabel(SessionStatus status) {
-  final bits = <String>[];
-  if (status.dirty) bits.add('有未提交改动');
-  if (status.ahead > 0) bits.add('${status.ahead} 个提交领先');
-  final detail = bits.isEmpty ? '有可合并内容' : bits.join('，');
-  return '$detail，可合并回 ${status.baseBranch ?? '基分支'}';
+  final ahead = status.ahead;
+  final dirty = status.dirty;
+  final base = status.baseBranch ?? t('baseBranch');
+  if (dirty && ahead > 0) {
+    return t('mergeReadyLabelDirtyAhead', {'n': '$ahead', 'base': base});
+  }
+  if (ahead > 0) {
+    return t('mergeReadyLabelAhead', {'n': '$ahead', 'base': base});
+  }
+  return t('mergeReadyLabel', {'base': base});
 }
 
 class MainShell extends StatefulWidget {
@@ -347,7 +353,10 @@ class _DirectoryListBody extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Text(
-              '${mgr.directories.length} dirs · ${mgr.sessions.where((s) => !s.isAux).length} sessions',
+              t('dirs_sessions', {
+                'dirs': '${mgr.directories.length}',
+                'sessions': '${mgr.sessions.where((s) => !s.isAux).length}',
+              }),
               style: const TextStyle(
                 color: Color(0xFF8a909b),
                 fontSize: 12,
@@ -359,15 +368,17 @@ class _DirectoryListBody extends StatelessWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.add_rounded, size: 22),
-            tooltip: 'New directory',
+            tooltip: t('newDirectory'),
             onPressed: () => _showNewDirectoryDialog(context, mgr),
           ),
           IconButton(
             icon: const Icon(Icons.refresh_rounded, size: 20),
+            tooltip: t('refresh'),
             onPressed: mgr.loadDashboard,
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined, size: 20),
+            tooltip: t('settings'),
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(
                 builder: (_) => SettingsScreen(settings: settings),
@@ -489,17 +500,17 @@ class _KpiRow extends StatelessWidget {
       child: Row(
         children: [
           _KpiTile(
-            label: '活跃会话', value: '$active', color: const Color(0xFF3ad6c5),
-            onTap: () => _showSessionSheet(context, mgr, '活跃会话', mgr.activeSessions, '🟢'),
+            label: t('activeSessions'), value: '$active', color: const Color(0xFF3ad6c5),
+            onTap: () => _showSessionSheet(context, mgr, t('activeSessions'), mgr.activeSessions, '🟢'),
           ),
           const SizedBox(width: 8),
           _KpiTile(
-            label: '等待输入', value: '$waiting', color: const Color(0xFFe3b341),
-            onTap: () => _showSessionSheet(context, mgr, '等待输入', mgr.waitingSessions, '⏳'),
+            label: t('waitingSessions'), value: '$waiting', color: const Color(0xFFe3b341),
+            onTap: () => _showSessionSheet(context, mgr, t('waitingSessions'), mgr.waitingSessions, '⏳'),
           ),
           const SizedBox(width: 8),
           _KpiTile(
-            label: '定时任务', value: null, color: const Color(0xFF6aa3ff),
+            label: t('cronTasks'), value: null, color: const Color(0xFF6aa3ff),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(
               builder: (_) => CronScreen(settings: settings))),
           ),
