@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../i18n.dart';
 import '../models/agent_preset.dart';
 import '../models/message.dart';
 import '../providers/chat_provider.dart';
@@ -236,125 +237,128 @@ class _Header extends StatelessWidget {
         color: Color(0xFF0f1115),
         border: Border(bottom: BorderSide(color: Color(0xFF20242b))),
       ),
-      child: Row(
-        children: [
-          // Collapse the chat sheet back down to the home dashboard.
-          GestureDetector(
-            onTap: onCollapse,
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              child: const Icon(
-                Icons.keyboard_arrow_down_rounded,
-                color: Color(0xFFe7eaee),
-                size: 24,
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
-          RichText(
-            text: const TextSpan(
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              children: [
-                TextSpan(
-                  text: 'Multi',
-                  style: TextStyle(color: Color(0xFF3ad6c5)),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final narrow = constraints.maxWidth < 500;
+          return Row(
+            children: [
+              // Collapse the chat sheet back down to the home dashboard.
+              GestureDetector(
+                onTap: onCollapse,
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  child: const Icon(
+                    Icons.keyboard_arrow_down_rounded,
+                    color: Color(0xFFe7eaee),
+                    size: 24,
+                  ),
                 ),
-                TextSpan(
-                  text: 'CC',
-                  style: TextStyle(color: Color(0xFF6aa3ff)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 6),
-          _ChatCliBadge(cli: provider.cli),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              provider.titleLabel,
-              style: const TextStyle(
-                color: Color(0xFF6aa3ff),
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                fontFamily: 'monospace',
               ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Connection dot — tap to manually reconnect whenever not connected.
-          // A refresh glyph appears so the affordance is discoverable and gives
-          // a larger touch target than the bare 8px dot.
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap:
-                state == ChatConnectionState.connected ? null : provider.reconnect,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.circle, size: 8, color: statusColor),
-                  if (state != ChatConnectionState.connected) ...[
-                    const SizedBox(width: 4),
-                    const Icon(
-                      Icons.refresh_rounded,
-                      size: 15,
-                      color: Color(0xFF8a909b),
+              const SizedBox(width: 4),
+              RichText(
+                text: const TextSpan(
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  children: [
+                    TextSpan(
+                      text: 'Multi',
+                      style: TextStyle(color: Color(0xFF3ad6c5)),
+                    ),
+                    TextSpan(
+                      text: 'CC',
+                      style: TextStyle(color: Color(0xFF6aa3ff)),
                     ),
                   ],
-                ],
-              ),
-            ),
-          ),
-          const Spacer(),
-          // Manual reconnect — always available, even when the status dot reads
-          // green. Rebuilds the WebSocket from scratch to recover a socket that
-          // looks connected but is actually dead (half-open, no onDone/onError),
-          // which otherwise only a full app restart could fix.
-          _HeaderBtn(
-            icon: Icons.sync_rounded,
-            tooltip: '重连（重建连接）',
-            onTap: () => _forceReconnect(context, provider),
-          ),
-          const SizedBox(width: 4),
-          // Model switch — claude sessions only (codex has no model concept here).
-          if (provider.cli == SessionCli.claude) ...[
-            _ModelChip(sessionId: provider.sessionName, settings: settings),
-            const SizedBox(width: 4),
-          ],
-          // Provider switch — both claude & codex have providers.
-          _ProviderChip(
-            sessionId: provider.sessionName,
-            cli: provider.cli,
-            settings: settings,
-          ),
-          const SizedBox(width: 4),
-          // Overflow menu — collapses the occasional actions (memo / merge /
-          // clear history / settings) behind a single "⋮" trigger so the
-          // action cluster keeps a fixed, compact width and never pushes icons
-          // past the right edge on narrow screens. mergeReady tints the
-          // trigger amber as a discoverable hint (the banner still surfaces it).
-          _HeaderOverflowMenu(
-            mergeReady: mergeReady,
-            onRole: () => _editRoleFromSession(context, provider.sessionName),
-            onMemory: () => _editMemoryFromSession(context, provider.sessionName),
-            onMemo: () => _openMemoFromSession(context, provider.sessionName),
-            onMerge: onMerge,
-            onClear: () => _confirmClear(context, provider),
-            onSettings: () => _openSettings(context, settings),
-            onShare: () => _shareFromSession(context, provider.sessionName, settings),
-            onShareMessages: () => Navigator.push(
-              context,
-              MaterialPageRoute<void>(
-                builder: (_) => ShareMessagesScreen(
-                  sessionId: provider.sessionName,
-                  settings: settings,
                 ),
               ),
-            ),
-          ),
-        ],
+              const SizedBox(width: 6),
+              _ChatCliBadge(cli: provider.cli),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  provider.titleLabel,
+                  style: const TextStyle(
+                    color: Color(0xFF6aa3ff),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    fontFamily: 'monospace',
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              // Connection dot — tap to manually reconnect when disconnected.
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: state == ChatConnectionState.connected
+                    ? null
+                    : provider.reconnect,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.circle, size: 8, color: statusColor),
+                      if (state != ChatConnectionState.connected) ...[
+                        const SizedBox(width: 4),
+                        const Icon(
+                          Icons.refresh_rounded,
+                          size: 15,
+                          color: Color(0xFF8a909b),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              const Spacer(),
+              // Manual reconnect
+              _HeaderBtn(
+                icon: Icons.sync_rounded,
+                tooltip: t('reconnect'),
+                onTap: () => _forceReconnect(context, provider),
+              ),
+              // Model & Provider chips — compact variants on narrow screens.
+              const SizedBox(width: 4),
+              if (provider.cli == SessionCli.claude) ...[
+                _ModelChip(
+                    sessionId: provider.sessionName,
+                    settings: settings,
+                    compact: narrow),
+                const SizedBox(width: 4),
+              ],
+              _ProviderChip(
+                sessionId: provider.sessionName,
+                cli: provider.cli,
+                settings: settings,
+                compact: narrow,
+              ),
+              const SizedBox(width: 4),
+              _HeaderOverflowMenu(
+                mergeReady: mergeReady,
+                onRole: () =>
+                    _editRoleFromSession(context, provider.sessionName),
+                onMemory: () =>
+                    _editMemoryFromSession(context, provider.sessionName),
+                onMemo: () =>
+                    _openMemoFromSession(context, provider.sessionName),
+                onMerge: onMerge,
+                onClear: () => _confirmClear(context, provider),
+                onSettings: () => _openSettings(context, settings),
+                onShare: () => _shareFromSession(
+                    context, provider.sessionName, settings),
+                onShareMessages: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => ShareMessagesScreen(
+                      sessionId: provider.sessionName,
+                      settings: settings,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -364,10 +368,10 @@ class _Header extends StatelessWidget {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
-        const SnackBar(
-          content: Text('正在重建连接…'),
-          duration: Duration(seconds: 2),
-          backgroundColor: Color(0xFF14171c),
+        SnackBar(
+          content: Text(t('reconnecting')),
+          duration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFF14171c),
         ),
       );
   }
@@ -376,27 +380,21 @@ class _Header extends StatelessWidget {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Clear History'),
-        content: const Text(
-          'This will clear the chat history and reset the Claude session.',
-        ),
+        title: Text(t('clearHistoryTitle')),
+        content: Text(t('clearHistoryBody')),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: Color(0xFF8a909b)),
-            ),
+            child: Text(t('cancel'),
+                style: const TextStyle(color: Color(0xFF8a909b))),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(context);
               provider.clearHistory();
             },
-            child: const Text(
-              'Clear',
-              style: TextStyle(color: Color(0xFFff6b63)),
-            ),
+            child: Text(t('clearBtn'),
+                style: const TextStyle(color: Color(0xFFff6b63))),
           ),
         ],
       ),
@@ -417,7 +415,8 @@ class _Header extends StatelessWidget {
 class _ModelChip extends StatefulWidget {
   final String sessionId;
   final SettingsService settings;
-  const _ModelChip({required this.sessionId, required this.settings});
+  final bool compact;
+  const _ModelChip({required this.sessionId, required this.settings, this.compact = false});
 
   @override
   State<_ModelChip> createState() => _ModelChipState();
@@ -497,11 +496,12 @@ class _ModelChipState extends State<_ModelChip> {
     }
     final label = _modelLabel(s);
     return Tooltip(
-      message: '切换该会话使用的模型（下一轮对话生效）',
+      message: t('switchModel'),
       child: GestureDetector(
         onTap: () => _switchModel(context, mgr, s),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          padding: EdgeInsets.symmetric(
+              horizontal: widget.compact ? 6 : 8, vertical: 5),
           decoration: BoxDecoration(
             color: const Color(0xFF14171c),
             border: Border.all(color: const Color(0xFF20242b)),
@@ -515,19 +515,21 @@ class _ModelChipState extends State<_ModelChip> {
                 size: 15,
                 color: Color(0xFFe7eaee),
               ),
-              const SizedBox(width: 4),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 86),
-                child: Text(
-                  label,
-                  style: const TextStyle(
-                    color: Color(0xFFe7eaee),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
+              if (!widget.compact) ...[
+                const SizedBox(width: 4),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 64),
+                  child: Text(
+                    label,
+                    style: const TextStyle(
+                      color: Color(0xFFe7eaee),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -542,7 +544,7 @@ class _ModelChipState extends State<_ModelChip> {
   ) async {
     if (s == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Session 信息未加载')),
+        SnackBar(content: Text(t('sessionNotLoaded'))),
       );
       return;
     }
@@ -550,20 +552,20 @@ class _ModelChipState extends State<_ModelChip> {
     final picked = await showClaudeModelPicker(
       context,
       current: s.model ?? '',
-      title: '切换该会话使用的模型（下一轮对话生效）',
+      title: t('switchModel'),
     );
     if (picked == null) return;
     try {
       await mgr.updateSessionModel(s.id, picked);
+      final name = picked.isEmpty
+          ? t('modelNameDefault')
+          : claudeModelShortName(picked);
       messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            '✓ 模型已切换为 ${picked.isEmpty ? '默认（跟随 Claude 设置）' : claudeModelShortName(picked)}，下一轮对话生效',
-          ),
-        ),
+        SnackBar(content: Text(t('modelSwitched', {'name': name}))),
       );
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('模型切换失败：$e')));
+      messenger.showSnackBar(
+          SnackBar(content: Text(t('modelSwitchFailed', {'error': '$e'}))));
     }
   }
 }
@@ -574,7 +576,8 @@ class _ProviderChip extends StatefulWidget {
   final String sessionId;
   final SessionCli cli;
   final SettingsService settings;
-  const _ProviderChip({required this.sessionId, required this.cli, required this.settings});
+  final bool compact;
+  const _ProviderChip({required this.sessionId, required this.cli, required this.settings, this.compact = false});
 
   @override
   State<_ProviderChip> createState() => _ProviderChipState();
@@ -608,9 +611,9 @@ class _ProviderChipState extends State<_ProviderChip> {
   }
 
   String _nameOf(String? id) {
-    if (id == null || id.isEmpty) return '默认';
+    if (id == null || id.isEmpty) return t('defaultModel');
     final p = _providers.where((x) => x['id'] == id);
-    return p.isNotEmpty ? (p.first['name'] as String? ?? id) : '自定义';
+    return p.isNotEmpty ? (p.first['name'] as String? ?? id) : t('customModel');
   }
 
   @override
@@ -622,11 +625,12 @@ class _ProviderChipState extends State<_ProviderChip> {
     }
     final label = _nameOf(s?.provider);
     return Tooltip(
-      message: '切换该会话使用的 Provider（下一轮对话生效）',
+      message: t('switchProvider'),
       child: GestureDetector(
         onTap: () => _switchProvider(context, mgr, s),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          padding: EdgeInsets.symmetric(
+              horizontal: widget.compact ? 6 : 8, vertical: 5),
           decoration: BoxDecoration(
             color: const Color(0xFF14171c),
             border: Border.all(color: const Color(0xFF20242b)),
@@ -636,13 +640,15 @@ class _ProviderChipState extends State<_ProviderChip> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Icon(Icons.swap_horiz_rounded, size: 15, color: Color(0xFFe7eaee)),
-              const SizedBox(width: 4),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 86),
-                child: Text(label,
-                    style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 11, fontWeight: FontWeight.w600),
-                    overflow: TextOverflow.ellipsis),
-              ),
+              if (!widget.compact) ...[
+                const SizedBox(width: 4),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 64),
+                  child: Text(label,
+                      style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 11, fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis),
+                ),
+              ],
             ],
           ),
         ),
@@ -652,7 +658,8 @@ class _ProviderChipState extends State<_ProviderChip> {
 
   Future<void> _switchProvider(BuildContext context, SessionManager mgr, Session? s) async {
     if (s == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Session 信息未加载')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t('sessionNotLoaded'))));
       return;
     }
     if (!_loaded) await _load();
@@ -671,11 +678,13 @@ class _ProviderChipState extends State<_ProviderChip> {
     if (picked == null) return;
     try {
       await mgr.updateSessionProvider(s.id, picked.id);
+      final name = picked.id.isEmpty ? t('defaultLogin') : picked.name;
       messenger.showSnackBar(
-        SnackBar(content: Text('✓ Provider 已切换为 ${picked.id.isEmpty ? '默认登录' : picked.name}，下一轮对话生效')),
+        SnackBar(content: Text(t('providerSwitched', {'name': name}))),
       );
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Provider 切换失败：$e')));
+      messenger.showSnackBar(
+          SnackBar(content: Text(t('providerSwitchFailed', {'error': '$e'}))));
     }
   }
 }
@@ -1457,7 +1466,7 @@ class _HeaderOverflowMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return PopupMenuButton<String>(
-      tooltip: '更多',
+      tooltip: t('moreActions'),
       color: const Color(0xFF14171c),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
@@ -1493,26 +1502,26 @@ class _HeaderOverflowMenu extends StatelessWidget {
         }
       },
       itemBuilder: (_) => [
-        _item('role', Icons.theater_comedy_outlined, '角色提示词',
+        _item('role', Icons.theater_comedy_outlined, t('rolePrompt'),
             const Color(0xFFe7eaee)),
-        _item('memory', Icons.psychology_outlined, '会话记忆',
+        _item('memory', Icons.psychology_outlined, t('sessionMemory'),
             const Color(0xFFe7eaee)),
-        _item('memo', Icons.sticky_note_2_outlined, '项目备忘',
+        _item('memo', Icons.sticky_note_2_outlined, t('projectMemo'),
             const Color(0xFFe7eaee)),
-        _item('share', Icons.share_outlined, '分享会话',
+        _item('share', Icons.share_outlined, t('shareSession'),
             const Color(0xFFe7eaee)),
-        _item('share-msgs', Icons.checklist_rtl_outlined, '分享选定消息',
+        _item('share-msgs', Icons.checklist_rtl_outlined, t('shareMessages'),
             const Color(0xFFe7eaee)),
         _item(
           'merge',
           Icons.merge_type,
-          mergeReady ? '合并 worktree（可合并）' : '合并 worktree',
+          mergeReady ? t('mergeWorktree') : t('mergeWorktree'),
           mergeReady ? const Color(0xFFe3b341) : const Color(0xFFe7eaee),
         ),
-        _item('clear', Icons.delete_sweep_outlined, 'Clear history',
+        _item('clear', Icons.delete_sweep_outlined, t('clearHistory'),
             const Color(0xFFff6b63)),
         const PopupMenuDivider(),
-        _item('settings', Icons.settings_outlined, 'Settings',
+        _item('settings', Icons.settings_outlined, t('settings'),
             const Color(0xFFe7eaee)),
       ],
       child: Container(
