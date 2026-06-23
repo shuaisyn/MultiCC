@@ -5,12 +5,14 @@
 <h1 align="center">MultiCC</h1>
 
 <p align="center">
-  <strong>One Claude Code instance. Many clients. Any device.</strong>
+  <strong>Many AI coding CLI sessions. Many clients. Any device.</strong>
 </p>
 
 <p align="center">
   <a href="#what-is-multicc">What it is</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#multi-provider-support">Providers</a> &bull;
+  <a href="#session-orchestration">Orchestration</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
   <a href="#configuration">Configuration</a> &bull;
@@ -29,30 +31,31 @@
 
 ## What is MultiCC?
 
-**MultiCC** (Multi-Client Claude Code) is a self-hosted server that lets you drive one local [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI from a browser, a PWA, a native Flutter app (Android/iOS), or even a WeChat chat — all at the same time, all against the same persistent sessions.
+**MultiCC** started as "Multi-Client Claude Code" and is now a self-hosted control plane for AI coding CLIs. It lets you drive [Claude Code](https://docs.anthropic.com/en/docs/claude-code), OpenAI Codex CLI, and provider-routed sessions from a browser, a PWA, a native Flutter app (Android/iOS), or even a WeChat / Feishu / Lark chat — all at the same time, all against persistent local sessions.
 
 It is designed around three observations:
 
-1. **Claude Code sessions should outlive the client.** You open a task on your laptop, walk away, and want to keep an eye on it from your phone. MultiCC runs sessions in `tmux` so disconnecting never kills progress.
-2. **One UI can't serve every moment.** Sometimes you want a full terminal; sometimes a chat bubble is enough; sometimes you just want push notifications when Claude is waiting. MultiCC ships multiple front-ends against one backend.
-3. **Voice is the fastest input on a phone.** Dictate in Chinese or English, let Whisper transcribe, let an LLM rewrite it into a precise technical prompt. Corrections feed back into the vocabulary so the system gets sharper the more you use it.
+1. **Coding-agent sessions should outlive the client.** You open a task on your laptop, walk away, and want to keep an eye on it from your phone. MultiCC runs terminal sessions in `tmux` and chat sessions as managed CLI turns, so disconnecting never kills progress.
+2. **One UI can't serve every moment.** Sometimes you want a full terminal; sometimes a chat bubble is enough; sometimes you just want push notifications when an agent is waiting. MultiCC ships multiple front-ends against one backend.
+3. **Multiple agents can work better than one.** A directory can have Claude, Codex, and custom-provider sessions side by side, each isolated in its own git worktree, with dispatch and merge/sync APIs for parallel work.
+4. **Voice is the fastest input on a phone.** Dictate in Chinese or English, let Whisper transcribe, let an LLM rewrite it into a precise technical prompt. Corrections feed back into the vocabulary so the system gets sharper the more you use it.
 
 ```
         ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
         │ Desktop Web  │   │  Mobile PWA  │   │ Flutter App  │   │   WeChat     │
-        │ (Terminal)   │   │    (Chat)    │   │  (Android)   │   │   Bridge     │
+        │ (Terminal)   │   │    (Chat)    │   │ Android/iOS  │   │   Bridge     │
         └──────┬───────┘   └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
                │                  │                  │                  │
                ▼                  ▼                  ▼                  ▼
         ┌──────────────────────────────────────────────────────────────────────┐
         │                  MultiCC Server (Express + ws + HTTPS)               │
         │   ┌────────────────────────┐         ┌────────────────────────┐     │
-        │   │  tmux session backend  │         │ Claude stream-json     │     │
+        │   │  tmux session backend  │         │ CLI stream-json/json   │     │
         │   │  (terminal mode)       │         │ spawner (chat mode)    │     │
         │   └──────────┬─────────────┘         └──────────┬─────────────┘     │
         │              ▼                                   ▼                   │
-        │         claude CLI                          claude --output-format  │
-        │                                             stream-json              │
+        │     claude / codex CLI                  claude stream-json / codex  │
+        │                                             exec --json              │
         └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -60,14 +63,44 @@ It is designed around three observations:
 
 ## Features
 
+### Multi-provider support
+
+MultiCC can run multiple CLI backends in the same workspace, with each session choosing its own CLI and provider.
+
+| CLI | Terminal mode | Chat mode | Provider routing |
+|-----|---------------|-----------|------------------|
+| **Claude Code** | `claude` inside `tmux`, optionally resumed by session id | `claude -p --output-format stream-json` with replayable event streaming | Default Claude login, or a per-session provider imported from `cc-switch` / stored in `providers.json` |
+| **Codex** | `codex` / `codex resume <id>` inside `tmux` | `codex exec --json`, resumed after MultiCC captures the Codex session id | Default Codex login, or isolated per-provider `CODEX_HOME` under `~/.multicc/codex-homes` |
+
+- Provider overrides are session-scoped: one session can use the official Claude subscription, another can use DeepSeek through `cc-switch`, and a third can run Codex without environment bleed-through.
+- `/manage` exposes provider import, create/edit/delete, global defaults per CLI, and per-session provider selection.
+- New sessions inherit the current default provider for their CLI, but any session can be reset to the local default login.
+
 ### Two modes against the same backend
 
 | Mode | UI | Backend |
 |------|----|---------|
 | **Terminal** (`/`) | Full `xterm.js` — scrollback, colors, input, resize | `tmux` session, `pipe-pane` + named FIFO for reliable output capture |
-| **Chat** (`/chat`) | Message bubbles with streaming tool cards | `claude --output-format stream-json` — events forwarded live over WebSocket; `AskUserQuestion` is disabled by default so headless chat asks follow-up questions as normal text |
+| **Chat** (`/chat`) | Message bubbles with streaming tool cards | Claude Code `stream-json` or Codex `exec --json` — events are normalized and forwarded live over WebSocket; `AskUserQuestion` is disabled by default for Claude chat so headless sessions ask follow-up questions as normal text |
 
 Both modes share the same session registry, auth layer, and notification pipeline.
+
+### Session orchestration
+
+- **Directory workspaces.** A registered directory owns a fleet of terminal/chat sessions across Claude and Codex.
+- **Git worktree isolation.** Each normal session runs under `<repo>/.multicc-worktrees/<sessionId>` on branch `multicc/<sessionId>`, so parallel agents can edit safely.
+- **Sync and merge workflow.** `POST /api/sessions/:id/sync` pulls the directory base branch into a session worktree; `POST /api/sessions/:id/merge` commits/merges the session branch back and best-effort syncs siblings.
+- **Agent Commander.** New directories are seeded with an Agent Commander chat session that can coordinate specialized sibling sessions.
+- **Cross-session dispatch.** Any chat session can emit `<<dispatch target="SESSION_ID">...</dispatch>>`; MultiCC sends the self-contained task to the target session and injects the result back into the dispatcher. The WeChat Gateway uses the same mechanism with an explicit confirmation step.
+- **Passive inter-agent notes.** Sessions in the same directory can leave notes that are prepended to a target agent's next chat turn.
+
+### Long-running and scheduled work
+
+- **Wait/poll mechanism.** Agents can register poll waits (`pollCmd` or `pollUrl` plus `untilContains` / `untilRegex`) or callback waits. When the condition resolves, MultiCC injects the result into the session so work continues without a human nudge.
+- **`run-detached` background tasks.** Long builds, deploys, tests, and file-watch waits can be launched from the server with `setsid`; completion registers a wait automatically and sends the exit code plus output tail back to the session.
+- **Cron jobs.** Recurring tasks are stored in `scheduled_tasks.json`, use standard five-field cron expressions, and reuse their dedicated chat session across runs so context carries forward.
+- **Per-session auto-triggers.** A chat session can be woken by post-turn, file-change, or schedule triggers, with cooldowns and manual test firing.
+- **Progress-friendly defaults.** The system prompt steers agents away from fragile background shell jobs and toward `run-detached` or explicit waits for reliable continuation.
 
 ### Multi-client per session
 
@@ -92,7 +125,7 @@ Both modes share the same session registry, auth layer, and notification pipelin
 
 ### Notifications
 
-Three delivery channels, all triggered from the same "waiting / completed" detector:
+Five delivery channels, all triggered from the same "waiting / completed" detector:
 
 | Channel | Reach | Typical use |
 |---------|-------|-------------|
@@ -106,9 +139,15 @@ Alerts fire only when the originating client is **not** looking at the session �
 
 ### Multi-session dashboard (`/manage`)
 
-- Visual cards for every tmux session (status, cwd, client count, last activity).
+- Directory-level workspace view with counts for Claude/Codex terminal and chat sessions.
+- Visual cards for every session (status, cwd/worktree, provider, merge state, client count, last activity).
 - Click a card to open its terminal in an inline iframe — no new tabs.
-- Per-session WebSocket monitors tag sessions as `waiting` / `completed` in real time.
+- Per-session WebSocket monitors tag sessions as `idle` / `thinking` / `editing` / `running` / `waiting` in real time.
+- Create Claude or Codex sessions, choose terminal/chat mode, set labels, role prompts, memory, models, auto-continue, and provider overrides.
+- Manage git worktree flow: view ahead/behind/conflict state, sync from base, merge back to base, and push the directory base branch.
+- Import providers from `cc-switch`, maintain local provider entries, set CLI defaults, and switch a session without restarting the server.
+- Create, edit, disable, manually run, and delete recurring cron jobs.
+- Inspect active waits and detached tasks from the same operational surface.
 - One-click **QR code** with LAN IP + access token for phone onboarding.
 - **Voice settings panel** (OpenRouter/Whisper keys, models, vocabulary) hot-reloaded without restart.
 - **Notification settings** for Web Push subscribe/unsubscribe, Bark URL, Webhook URL.
@@ -127,7 +166,15 @@ Features (both):
 - Bidirectional relay between a WeChat contact/group and a MultiCC session.
 - Hash-based deduplication to break echo loops.
 - In-WeChat commands: `/help`, `/status`, `/sessions`, `/bind <id>`.
+- Gateway mode can route work with confirmed `<<dispatch>>` handoff and return the target session's result to WeChat.
 - Live SSE log stream in the browser UI.
+
+### Feishu / Lark bridge
+
+- Official Open Platform long-connection bridge via `@larksuiteoapi/node-sdk`, so local deployments can receive messages without a public callback URL.
+- Dedicated `__feishu_gateway__` chat session, separate from the WeChat Gateway to avoid cross-talk.
+- Supports Feishu China, Lark international, or a custom domain.
+- `/manage` includes credential setup, gateway creation/reset/destroy, start/stop controls, manual send, and live logs.
 
 ### Security
 
@@ -247,6 +294,18 @@ All configuration is environment-variable driven. Voice settings additionally ho
 | `CLAUDE_CMD` | *(auto-detected)* | Override path to the `claude` binary |
 | `CLAUDE_ARGS` | *(none)* | Extra CLI args passed to every spawned `claude` |
 | `CLAUDE_CHAT_DISALLOWED_TOOLS` | `AskUserQuestion` | Comma-separated Claude tools disabled only in chat mode. Keep `AskUserQuestion` disabled unless you implement a custom ask bridge for headless chat. |
+| `CODEX_CMD` | *(auto-detected)* | Override path to the `codex` binary |
+| `CODEX_ARGS` | *(none)* | Extra CLI args passed to every spawned `codex` |
+
+### Providers
+
+Provider configuration is stored locally and can be managed from `/manage` or the provider APIs.
+
+| File | Description |
+|------|-------------|
+| `providers.json` | MultiCC-owned provider store. Can import from `~/.cc-switch/cc-switch.db`, but edits here do not write back to `cc-switch`. |
+| `provider-defaults.json` | Default provider id per CLI (`claude`, `codex`) for newly-created sessions. |
+| `~/.multicc/codex-homes/<providerId>/` | Materialized `CODEX_HOME` per Codex provider, keeping auth/config isolated between sessions. |
 
 ### Voice — LLM refinement
 
@@ -280,9 +339,11 @@ All configuration is environment-variable driven. Voice settings additionally ho
 
 ```
 multicc/
-├── server.js                   # Main server — Express, ws, tmux, chat spawner, voice, push
+├── server.js                   # Main server — Express, ws, tmux, CLI spawner, voice, push
+├── cron-tasks.js               # Recurring scheduled chat tasks
 ├── wechat-ilink.js             # WeChat bridge (iLink API — current default)
 ├── wechat-bridge.js            # WeChat bridge (legacy MCP variant)
+├── feishu-bridge.js            # Feishu/Lark long-connection gateway bridge
 ├── multicc                     # Launchd service manager script
 ├── phtunnel-monitor.sh         # Optional DDNS watchdog
 ├── package.json
@@ -309,11 +370,17 @@ multicc/
 │   └── ios/                    # bundle com.multicc.multiccApp
 │
 ├── sessions.json               # Persisted session registry (gitignored)
+├── directories.json            # Registered workspace directories (gitignored)
+├── providers.json              # MultiCC-owned Claude/Codex provider store (gitignored)
+├── provider-defaults.json      # Default provider per CLI (gitignored)
+├── scheduled_tasks.json        # Cron job definitions (gitignored)
 ├── chat_history/               # Per-session chat transcripts (gitignored)
+├── events/                     # Per-directory event logs (gitignored)
 ├── voice_examples.json         # STT correction history (50-entry FIFO)
 ├── whisper_vocab.json          # Auto-learned vocabulary (100-term LRU)
 ├── push_subscriptions.json     # Web Push subscription store
 ├── wechat-config.json          # WeChat bridge configuration
+├── feishu-config.json          # Feishu/Lark bridge configuration
 └── cert.pem / key.pem          # Auto-generated self-signed TLS cert
 ```
 
@@ -329,9 +396,9 @@ browser keystroke → ws → tmux send-keys → claude → tmux pipe-pane → FI
 
 ```
 user message
-  → ws → server.js (chatProviderSpawn)
-  → claude --output-format stream-json [--resume <id>]
-  → stdout stream-json events
+  → ws → server.js (CLI provider abstraction)
+  → claude stream-json or codex exec --json [resume/session id]
+  → stdout JSON events
   → server buffers last 500 events for reconnect replay
   → fan-out to all attached clients (web + Flutter)
   → chat bubble render with live tool cards
@@ -339,11 +406,14 @@ user message
 
 **Key design decisions:**
 
-- **tmux for terminal, raw spawn for chat.** Terminal needs persistent TTY-backed state and survives disconnects via tmux. Chat is turn-based, so the server spawns `claude` per user turn, relying on `--resume` to keep conversational continuity.
+- **tmux for terminal, raw spawn for chat.** Terminal needs persistent TTY-backed state and survives disconnects via tmux. Chat is turn-based, so the server spawns the selected CLI per user turn, relying on Claude `--resume` or Codex `exec resume` to keep conversational continuity.
+- **Provider isolation per child process.** Claude provider overrides inject `ANTHROPIC_*` env vars only into that session's child process; Codex provider overrides materialize a separate `CODEX_HOME`.
+- **Worktree-first concurrency.** Each session owns a branch and worktree; merge/sync APIs move changes between the session branch and the directory base branch instead of sharing one mutable checkout.
 - **No database.** All state is in-memory `Map` objects persisted to flat JSON files.
 - **Single auth layer.** `ACCESS_TOKEN` → HTTP-only `multicc_auth` cookie → applied uniformly to REST, WebSocket, and static file routes (with JS/CSS exemption for login-page rendering).
 - **Vocabulary learning loop.** Corrections flow from `/api/voice/feedback` → `voice_examples.json` → frequency ranking → `whisper_vocab.json` → Whisper `prompt` param.
 - **Reconnect-safe chat.** Every chat WS connect replays the buffered events before resuming live, so the client can rebuild its bubble state deterministically.
+- **Reliable continuation primitives.** `wait`, `run-detached`, cron, and dispatch all re-enter a chat session through the same managed turn path, so long-running work and cross-session results don't disappear between turns.
 
 ---
 
@@ -354,7 +424,16 @@ user message
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/directories` | List directories with session counts and Git push status |
+| `POST` | `/api/directories` | Register a workspace directory and seed its default Agent Commander session |
+| `PATCH` | `/api/directories/:id` | Rename / relocate a directory, or update its default role prompt |
+| `DELETE` | `/api/directories/:id?force=1` | Delete a directory record, optionally removing owned sessions |
 | `POST` | `/api/directories/:id/push` | Push the directory base branch to its configured remote |
+| `GET` | `/api/directories/:id/sessions` | List sessions owned by one directory, including worktree and merge state |
+| `POST` | `/api/directories/:id/sessions` | Create a Claude/Codex terminal or chat session (`{ cli, kind, label?, model?, provider? }`) |
+| `GET` | `/api/directories/:id/workspace` | Live workspace board snapshot |
+| `GET` / `PUT` | `/api/directories/:id/memo` | Read / write `<directory>/multicc.memo.md` |
+| `POST` | `/api/directories/:id/memo/send` | Send memo text to a chat session in that directory |
+| `GET` | `/api/directories/:id/events` | Directory event log for merges, dispatches, notes, provider changes, etc. |
 
 ### Sessions
 
@@ -362,13 +441,80 @@ user message
 |--------|----------|-------------|
 | `GET` | `/api/sessions` | List all sessions |
 | `GET` | `/api/sessions/:id` | Get session details |
+| `PATCH` | `/api/sessions/:id` | Update label, model, role prompt, memory, streaming, auto-continue, or provider |
 | `DELETE` | `/api/sessions/:id` | Kill and delete a session |
 | `POST` | `/api/sessions/:id/relocate` | Change session's working directory |
 | `POST` | `/api/sessions/:id/restart` | Restart a dead terminal session in place |
+| `GET` | `/api/sessions/:id/merge-status` | Inspect worktree ahead/behind/conflict state |
+| `POST` | `/api/sessions/:id/sync` | Merge the directory base branch into this session worktree |
+| `POST` | `/api/sessions/:id/merge` | Merge this session branch back into the directory base branch |
+| `POST` | `/api/sessions/:id/notes` | Leave a passive note for another agent in the same directory |
 | `GET` | `/api/agent-resources/skills` | List installed Claude and Codex skills |
 | `GET` | `/api/agent-resources/claude-sessions` | List Claude Code history sessions |
 | `DELETE` | `/api/agent-resources/claude-sessions/:project/:id` | Delete one unlinked Claude history session |
 | `DELETE` | `/api/agent-resources/claude-sessions?olderThanDays=N` | Delete unlinked Claude history older than N days |
+
+### Providers
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/providers?appType=claude|codex` | List providers with secrets masked, plus default provider ids |
+| `POST` | `/api/providers/import` | Import / refresh providers from `cc-switch` |
+| `POST` | `/api/providers` | Create a local provider (`{ appType, name, baseUrl?, authToken?, model?, settingsConfig? }`) |
+| `PATCH` | `/api/providers/:appType/:id` | Update provider metadata or settings |
+| `DELETE` | `/api/providers/:appType/:id` | Delete a local provider and clear matching defaults |
+| `GET` / `PUT` | `/api/provider-defaults` | Read / set default provider per CLI |
+
+### Orchestration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/sessions/:id/wait` | Register a poll or callback wait that will inject results back into the chat session |
+| `POST` | `/api/wait/:wid/resolve?token=<token>` | Resolve a callback wait from an external system |
+| `GET` | `/api/sessions/:id/waits` | List waits for one session |
+| `DELETE` | `/api/wait/:wid` | Cancel a wait |
+| `POST` | `/api/sessions/:id/run-detached` | Launch a server-owned background command and auto-register completion polling |
+| `GET` | `/api/sessions/:id/detached` | List detached tasks known to the server |
+| `GET` | `/api/detached/:taskId` | Inspect one detached task status and log tail |
+| `GET` | `/api/sessions/:id/triggers` | List post-turn, file-change, and schedule triggers for one session |
+| `POST` | `/api/sessions/:id/triggers` | Add a trigger (`{ type, prompt?, cooldownMs?, paths?, cron? }`) |
+| `PUT` | `/api/sessions/:id/triggers/:tid` | Update one trigger |
+| `DELETE` | `/api/sessions/:id/triggers/:tid` | Delete one trigger |
+| `POST` | `/api/sessions/:id/triggers/:tid/test` | Fire a trigger immediately for manual testing |
+
+Example wait:
+
+```bash
+curl -s "$MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/wait" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"poll","pollCmd":"test -f build.done && cat build.done","untilContains":"ok","intervalSec":15,"maxChecks":40}'
+```
+
+Example detached task:
+
+```bash
+curl -s "$MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/run-detached" \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"npm test","label":"test suite","intervalSec":10,"maxChecks":120}'
+```
+
+### Cron Jobs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/cron` | List scheduled tasks with next-run and last-run status |
+| `POST` | `/api/cron` | Create a five-field cron task targeting a directory |
+| `PATCH` | `/api/cron/:id` | Update schedule, prompt, target directory, CLI, or enabled state |
+| `DELETE` | `/api/cron/:id` | Delete a scheduled task |
+| `POST` | `/api/cron/:id/run` | Trigger one scheduled task immediately |
+
+Example cron task:
+
+```bash
+curl -s "$MULTICC_BASE_URL/api/cron" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Daily review","dirPath":"'"$PWD"'","cli":"claude","cron":"0 9 * * *","prompt":"Review the repo status and summarize risks."}'
+```
 
 ### Files
 
@@ -410,6 +556,20 @@ user message
 | `POST` | `/api/wechat/send` | Send message to PTY or WeChat (`{ text, target }`) |
 | `GET` | `/api/wechat/log` | Message log (`?since=<ms>`) |
 | `GET` | `/api/wechat/events` | SSE stream of live log entries |
+
+### Feishu / Lark Bridge
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/feishu/status` | Bridge running state |
+| `GET` / `POST` | `/api/feishu/config` | Get / update App ID, App Secret, and domain |
+| `GET` / `PUT` / `DELETE` | `/api/feishu/gateway` | Read / create or switch / destroy the dedicated gateway session |
+| `POST` | `/api/feishu/gateway/reset` | Clear gateway history and reset CLI session id |
+| `POST` | `/api/feishu/start` | Start the long-connection bridge |
+| `POST` | `/api/feishu/stop` | Stop the bridge |
+| `POST` | `/api/feishu/send` | Send a message to the active Feishu/Lark chat |
+| `GET` | `/api/feishu/log` | Message log |
+| `GET` | `/api/feishu/events` | SSE stream of live log entries |
 
 ### Server Info & Update
 
@@ -467,6 +627,18 @@ MultiCC searches common install paths on startup. If it still can't find `claude
 echo 'CLAUDE_CMD=/path/to/claude' >> .env
 ```
 
+### Codex command not found
+
+Codex sessions use the `codex` binary. MultiCC searches common Homebrew, local-bin, Cargo, and shell PATH locations. If needed:
+
+```bash
+echo 'CODEX_CMD=/path/to/codex' >> .env
+```
+
+### Which provider does a session use?
+
+Each session records `cli` (`claude` or `codex`) and an optional `provider` id. If `provider` is empty, the session uses the local default login for that CLI. If set, only that session's spawned process receives the provider override, so sibling sessions can use different providers safely.
+
 ### "此浏览器不支持录音"
 
 `MediaRecorder` requires a secure context. Make sure you're on `https://` (or `http://localhost`) and that you've accepted the certificate.
@@ -502,12 +674,15 @@ The rename changed persistence keys (`webcc_*` → `multicc_*`) and the Android/
 |-----------|------------|
 | **Server** | Node.js + Express + ws |
 | **Terminal backend** | tmux + pipe-pane + named FIFO |
-| **Chat backend** | `claude --output-format stream-json` with `--resume` |
+| **Chat backend** | Claude Code `stream-json` / Codex `exec --json`, normalized over WebSocket |
+| **Provider routing** | MultiCC `providers.json`, optional `cc-switch` import, per-session env / `CODEX_HOME` isolation |
+| **Worktree orchestration** | Git worktrees + branches per session, merge/sync APIs |
 | **Web frontend** | vanilla JS, xterm.js 5.3, zero build step |
 | **Mobile app** | Flutter 3.8, `xterm`, `web_socket_channel`, `shared_preferences`, `flutter_local_notifications` |
 | **Voice STT** | Whisper (Groq / OpenRouter / OpenAI-compatible) |
 | **Voice refinement** | OpenRouter LLM over SSE |
 | **Notifications** | Web Push (VAPID) + Bark + generic webhook |
+| **Scheduler / waits** | Central cron tasks, per-session auto-triggers, and server-owned wait / detached-task injector |
 | **WeChat** | iLink API (default) or MCP (legacy) |
 | **TLS** | Auto-generated self-signed certs with SAN IPs |
 | **Service manager** | macOS `launchd` via `./multicc install` |
@@ -515,12 +690,15 @@ The rename changed persistence keys (`webcc_*` → `multicc_*`) and the Android/
 ### Runtime dependencies
 
 ```
-express          ^4.18.2    HTTP server and routing
-ws               ^8.16.0    WebSocket server
-multer           ^1.4.5     Multipart file upload handling
-web-push         ^3.6.7     VAPID push notifications
-node-pty         ^1.0.0     PTY fallback (terminal recovery path)
-better-sqlite3   ^12.6.2    Reserved for future features
+express                 ^4.18.2        HTTP server and routing
+ws                      ^8.16.0        WebSocket server
+multer                  ^1.4.5-lts.1   Multipart file upload handling
+web-push                ^3.6.7         VAPID push notifications
+node-pty                ^1.0.0         PTY fallback (terminal recovery path)
+better-sqlite3          ^12.6.2        Read-only `cc-switch` provider import
+node-cron               ^4.2.1         Per-session schedule triggers
+chokidar                ^5.0.0         File-change triggers
+@larksuiteoapi/node-sdk ^1.67.0        Feishu/Lark long-connection bridge
 ```
 
 > **Zero frontend build step.** All web client code is plain JavaScript served as static files.
@@ -534,5 +712,5 @@ MIT. See [LICENSE](LICENSE).
 ---
 
 <p align="center">
-  <sub>Built with Claude Code · https://github.com/lsjwzh/MultiCC</sub>
+  <sub>Built for Claude Code, Codex, and provider-routed coding agents · https://github.com/lsjwzh/MultiCC</sub>
 </p>
