@@ -218,6 +218,9 @@ cd MultiCC && ./multicc start     # start server
 cd MultiCC && ./multicc install   # install as background service (macOS)
 ```
 
+To update later, just run `./multicc update` (pulls latest code, reinstalls
+deps if needed, and restarts) — no need to re-run the install script.
+
 ### Prerequisites
 
 - **Node.js** >= 18
