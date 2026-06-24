@@ -101,31 +101,23 @@ function buildSettingsConfig(appType, { baseUrl, authToken, model }) {
     return { env };
   }
   const provName = 'custom';
-  let wireApi = 'responses';
-  let effectiveBaseUrl = baseUrl;
-  // DeepSeek/GLM/Qwen/MiniMax only support chat/completions, not responses.
-  // remap to wire_api="chat" and the appropriate chat endpoint.
-  if (baseUrl && baseUrl.includes('api.deepseek.com')) {
-    wireApi = 'chat';
-    effectiveBaseUrl = 'https://api.deepseek.com/chat/completions';
-  } else if (baseUrl && baseUrl.includes('open.bigmodel.cn')) {
-    wireApi = 'chat';
-    effectiveBaseUrl = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-  } else if (baseUrl && baseUrl.includes('dashscope.aliyuncs.com')) {
-    wireApi = 'chat';
-    effectiveBaseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
-  } else if (baseUrl && baseUrl.includes('api.minimax')) {
-    wireApi = 'chat';
-    effectiveBaseUrl = effectiveBaseUrl.replace(/\/v1$/, '/v1/chat/completions');
-  }
+  // codex CLI (>= 0.130) only supports wire_api = "responses"; the "chat"
+  // protocol was removed (see openai/codex#7782). That means codex can only
+  // talk to providers that expose an OpenAI /responses endpoint. Most domestic
+  // providers (DeepSeek, GLM, Qwen, MiniMax) only serve /chat/completions, so
+  // codex CANNOT connect to them directly — verified empirically: chat → "no
+  // longer supported", responses → 404 on /responses. The only known way to
+  // bridge codex to those is a local responses↔chat proxy (what cc-switch
+  // does). We therefore always emit wire_api="responses" and surface the
+  // limitation in the UI rather than generating a config that fails to start.
   const lines = [
     `model_provider = "${provName}"`,
     model ? `model = "${model}"` : '',
     '',
     `[model_providers.${provName}]`,
     `name = "${provName}"`,
-    effectiveBaseUrl ? `base_url = "${effectiveBaseUrl}"` : '',
-    `wire_api = "${wireApi}"`,
+    baseUrl ? `base_url = "${baseUrl}"` : '',
+    'wire_api = "responses"',
   ].filter(Boolean);
   return { auth: { OPENAI_API_KEY: authToken || null }, config: lines.join('\n') + '\n' };
 }
