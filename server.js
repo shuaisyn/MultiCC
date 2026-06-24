@@ -3924,10 +3924,35 @@ function chatHistoryPath(sessionName) {
   return path.join(CHAT_HISTORY_DIR, `${safe}.json`);
 }
 
+// Sanitize empty thinking blocks from assistant messages. Models like GLM may
+// return thinking blocks with only whitespace; Claude API rejects these with
+// "each thinking block must contain non-whitespace thinking" (HTTP 400).
+function sanitizeThinking(messages) {
+  if (!Array.isArray(messages)) return;
+  let cleaned = 0;
+  for (const msg of messages) {
+    if (!msg || !Array.isArray(msg.content)) continue;
+    const before = msg.content.length;
+    msg.content = msg.content.filter((block) => {
+      if (block && block.type === 'thinking') {
+        if (!block.thinking || !/\S/.test(block.thinking)) {
+          cleaned++;
+          return false;
+        }
+      }
+      return true;
+    });
+    // If we removed all content blocks, ensure content is still an array
+    if (msg.content.length === 0) msg.content = [];
+  }
+  if (cleaned > 0) console.log(`[multicc] sanitized ${cleaned} empty thinking block(s) from ${messages.length} messages`);
+}
+
 function loadChatHistory(sessionName) {
   if (chatHistories.has(sessionName)) return chatHistories.get(sessionName);
   try {
     const data = JSON.parse(fs.readFileSync(chatHistoryPath(sessionName), 'utf8'));
+    sanitizeThinking(data);
     chatHistories.set(sessionName, data);
     return data;
   } catch (_) {
