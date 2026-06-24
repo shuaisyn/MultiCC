@@ -3550,6 +3550,53 @@ focusSession = function(id) {
 
 /* ── Provider config (cc-switch) ── */
 let _providerData = { available: false, providers: [], defaults: { claude: null, codex: null } };
+const PROVIDER_PRESETS = [
+  { key: 'claude-subscription', label: 'Claude 官方订阅', appType: 'claude', baseUrl: '', model: '', note: '无需 key，留空 Key 直接创建=走本地登录/订阅' },
+  { key: 'claude-api', label: 'Claude 官方 API', appType: 'claude', baseUrl: 'https://api.anthropic.com', model: '' },
+  { key: 'claude-glm', label: '智谱 GLM', appType: 'claude', baseUrl: 'https://open.bigmodel.cn/api/anthropic', model: 'glm-4.6' },
+  { key: 'claude-deepseek', label: 'DeepSeek', appType: 'claude', baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat' },
+  { key: 'claude-minimax', label: 'MiniMax', appType: 'claude', baseUrl: 'https://api.minimaxi.com/anthropic', model: 'MiniMax-M2' },
+  { key: 'claude-qwen', label: 'Qwen 通义千问', appType: 'claude', baseUrl: 'https://dashscope.aliyuncs.com/apps/anthropic', model: 'qwen3-coder-plus' },
+  { key: 'claude-openrouter', label: 'OpenRouter', appType: 'claude', baseUrl: 'https://openrouter.ai/api', model: 'anthropic/claude-sonnet-4.5', note: '必须用 /api 不是 /api/v1' },
+  { key: 'codex-official', label: 'Codex 官方', appType: 'codex', baseUrl: '', model: '', note: '走 ChatGPT 登录' },
+  { key: 'codex-deepseek', label: 'DeepSeek', appType: 'codex', baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat' },
+  { key: 'codex-glm', label: '智谱 GLM', appType: 'codex', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4.6' },
+  { key: 'codex-qwen', label: 'Qwen 通义千问', appType: 'codex', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3-coder-plus' },
+  { key: 'codex-minimax', label: 'MiniMax', appType: 'codex', baseUrl: 'https://api.minimaxi.com/v1', model: 'MiniMax-M2' },
+  { key: 'codex-openrouter', label: 'OpenRouter', appType: 'codex', baseUrl: 'https://openrouter.ai/api/v1', model: 'deepseek/deepseek-chat' },
+];
+
+function applyProviderPreset() {
+  const presetSel = document.getElementById('prov-new-preset');
+  const appType = document.getElementById('prov-new-apptype');
+  const name = document.getElementById('prov-new-name');
+  const baseUrl = document.getElementById('prov-new-baseurl');
+  const token = document.getElementById('prov-new-token');
+  const model = document.getElementById('prov-new-model');
+  const status = document.getElementById('prov-new-status');
+  if (!presetSel || !appType || !name || !baseUrl || !token || !model) return;
+
+  const preset = PROVIDER_PRESETS.find(p => p.key === presetSel.value);
+  if (!preset) {
+    name.value = '';
+    baseUrl.value = '';
+    model.value = '';
+    if (status) { status.textContent = ''; status.className = 'status-text'; }
+    return;
+  }
+
+  appType.value = preset.appType;
+  appType.dispatchEvent(new Event('change', { bubbles: true }));
+  name.value = preset.label;
+  baseUrl.value = preset.baseUrl;
+  model.value = preset.model;
+  token.value = '';
+  if (status) {
+    status.textContent = preset.note || '已套用模板，请填写 API Key';
+    status.className = 'status-text';
+  }
+  token.focus();
+}
 
 async function loadProviders() {
   try {
@@ -3664,6 +3711,8 @@ async function createProvider() {
     document.getElementById('prov-new-baseurl').value = '';
     document.getElementById('prov-new-token').value = '';
     document.getElementById('prov-new-model').value = '';
+    const presetSel = document.getElementById('prov-new-preset');
+    if (presetSel) presetSel.value = '';
     loadProviders();
   } catch (err) {
     if (status) { status.textContent = `Failed: ${err.message}`; status.className = 'status-text err'; }
