@@ -546,6 +546,27 @@
           <div class="settings-card">
             <div class="sc-header">新增 Provider</div>
             <div class="sc-body">
+              <div class="setting-row"><label>模板</label>
+                <select id="prov-new-preset" onchange="applyProviderPreset()" style="min-width:260px;max-width:100%">
+                  <option value="">自定义（手动填写）</option>
+                  <optgroup label="Claude（Anthropic 兼容）">
+                    <option value="claude-subscription">Claude 官方订阅</option>
+                    <option value="claude-api">Claude 官方 API</option>
+                    <option value="claude-glm">智谱 GLM</option>
+                    <option value="claude-deepseek">DeepSeek</option>
+                    <option value="claude-minimax">MiniMax</option>
+                    <option value="claude-qwen">Qwen 通义千问</option>
+                    <option value="claude-openrouter">OpenRouter</option>
+                  </optgroup>
+                  <optgroup label="Codex（OpenAI 兼容）">
+                    <option value="codex-official">Codex 官方</option>
+                    <option value="codex-deepseek">DeepSeek</option>
+                    <option value="codex-glm">智谱 GLM</option>
+                    <option value="codex-qwen">Qwen 通义千问</option>
+                    <option value="codex-minimax">MiniMax</option>
+                    <option value="codex-openrouter">OpenRouter</option>
+                  </optgroup>
+                </select></div>
               <div class="setting-row"><label>类型</label>
                 <select id="prov-new-apptype" style="max-width:140px"><option value="claude">claude</option><option value="codex">codex</option></select></div>
               <div class="setting-row"><label>名称</label><input id="prov-new-name" type="text" placeholder="如 DeepSeek / OpenRouter" /></div>
