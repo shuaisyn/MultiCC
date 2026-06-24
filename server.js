@@ -333,6 +333,41 @@ async function findAvailablePort(startPort) {
   throw new Error(`No available port between ${startPort} and ${startPort + maxTries}`);
 }
 
+// Auto-select next available port if the requested one is in use.
+async function findAvailablePort(startPort) {
+  const net = require('net');
+  const maxTries = 100;
+  for (let i = 0; i < maxTries; i++) {
+    const port = startPort + i;
+    const result = await new Promise((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.once('listening', () => {
+        server.once('close', () => resolve(true));
+        server.close();
+      });
+      server.listen(port, '127.0.0.1');
+    });
+    if (result) {
+      if (port !== startPort) {
+        console.log(`[multicc] Port ${startPort} in use, auto-switching to ${port}`);
+        // Write back the new port to .env so future starts use it.
+        const envPath = require('path').join(__dirname, '.env');
+        try {
+          const fs = require('fs');
+          if (fs.existsSync(envPath)) {
+            let content = fs.readFileSync(envPath, 'utf8');
+            content = content.replace(/^PORT=.*/m, `PORT=${port}`);
+            fs.writeFileSync(envPath, content);
+          }
+        } catch (_) {}
+      }
+      return port;
+    }
+  }
+  throw new Error(`No available port between ${startPort} and ${startPort + maxTries}`);
+}
+
 const wss = new WebSocket.Server({ server });
 const isWindows = process.platform === 'win32';
 
@@ -5708,11 +5743,30 @@ function gracefulShutdown(sig) {
     else if (Date.now() - t0 > SHUTDOWN_GRACE_MS) { clearInterval(timer); finish('grace timeout'); }
   }, 300);
 }
-// Ignore SIGTERM (kill) to prevent accidental shutdowns. Use SIGINT (Ctrl+C) to exit.
-process.on('SIGTERM', () => console.log('[multicc] SIGTERM ignored. Use ./multicc stop to stop.'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-server.listen(PORT, () => {
+(async () => {
+  try {
+    PORT = await findAvailablePort(PORT);
+  } catch (err) {
+    console.error(`[multicc] ${err.message}`);
+    process.exit(1);
+  }
+(async () => {
+  try {
+    PORT = await findAvailablePort(PORT);
+  } catch (err) {
+    console.error(`[multicc] ${err.message}`);
+    process.exit(1);
+  }
+(async () => {
+  try {
+    PORT = await findAvailablePort(PORT);
+  } catch (err) {
+    console.error(`[multicc] ${err.message}`);
+    process.exit(1);
+  }
+  server.listen(PORT, () => {
   console.log(`\n  MultiCC is running at http://localhost:${PORT}\n`);
   console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
   console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
@@ -5721,4 +5775,5 @@ server.listen(PORT, () => {
   // Prune expired temp artifacts now and every 6h.
   artifacts.cleanup();
   setInterval(() => artifacts.cleanup(), 6 * 3600 * 1000).unref();
+})();
 });
