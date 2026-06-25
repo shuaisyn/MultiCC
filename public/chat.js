@@ -411,7 +411,10 @@ function handleEvent(msg) {
         // Capture provider info + time-window token stats from server.
         if (msg.providerId !== undefined) _providerId = msg.providerId;
         if (msg.providerName !== undefined) _providerName = msg.providerName;
-        if (msg.providerTokenWindows) _providerTokenWindows = msg.providerTokenWindows;
+        if (msg.providerTokenWindows) {
+          _providerTokenWindows = msg.providerTokenWindows;
+          updateContextBar();
+        }
       } else if (msg.subtype === 'agent_notes' && Array.isArray(msg.notes)) {
         addAgentNotes(msg.notes);
       } else if (msg.message) {
@@ -779,7 +782,6 @@ function replayHistory(messages, serverTokenUsage) {
     // from token_usage.json (e.g. all chat_history entries were trimmed).
     if (serverTokenUsage) {
       _sessionTokens = { input: serverTokenUsage.inputTokens || 0, output: serverTokenUsage.outputTokens || 0 };
-      _usedTokens = _sessionTokens.input + _sessionTokens.output;
       updateContextBar();
     }
     return;
@@ -859,8 +861,9 @@ function replayHistory(messages, serverTokenUsage) {
     }
   }
   // Rebuild context bar with latest session totals.
-  _usedTokens = _sessionTokens.input + _sessionTokens.output;
-  if (_usedTokens > 0) updateContextBar();
+  // NOTE: _usedTokens tracks only the current turn (set by stream_event usage).
+  // We must NOT overwrite it with session totals here.
+  if (_sessionTokens.input + _sessionTokens.output > 0) updateContextBar();
   scrollToBottom();
   setTimeout(scrollToBottom, 300);
 }
@@ -1052,6 +1055,11 @@ function updateContextBar(usage, modelUsage) {
     if (pw.today) { const s = windowFmt(pw.today); if (s) entries.push(`日${s}`); }
     if (pw.week) { const s = windowFmt(pw.week); if (s) entries.push(`周${s}`); }
     if (pw.month) { const s = windowFmt(pw.month); if (s) entries.push(`月${s}`); }
+    // Fallback: if daily data hasn't accumulated yet, show all-time total
+    if (!entries.length && pw.all) {
+      const s = windowFmt(pw.all);
+      if (s) entries.push(s);
+    }
     if (entries.length) {
       parts.push(`<span style="margin-right:10px;color:var(--amber);font-size:11px">[${escHtml(label)}] ${entries.join(' ')}</span>`);
     }
