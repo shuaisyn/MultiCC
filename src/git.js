@@ -130,6 +130,35 @@ function gitWorktreeMergeState(dir, session) {
   };
 }
 
+// Syntax gate for merges. Every JS file changed by a merge must parse with
+// `node --check`; otherwise a session that commits a broken server.js (missing
+// paren, duplicate declaration, …) would silently crash multicc on its next
+// restart — and the base branch is exactly what multicc runs from. Returns a
+// (possibly empty) list of { file, error }. JS-only by design; non-JS changes
+// and non-Node projects pass through untouched. A tooling failure (can't list
+// diff / file vanished) never blocks a merge — only a real parse error does.
+function checkMergedJsSyntax(dirPath, fromRef, toRef) {
+  let changed = [];
+  try {
+    changed = gitRun(dirPath, ['diff', '--name-only', '--diff-filter=ACMR', fromRef, toRef])
+      .split('\n').map(s => s.trim()).filter(Boolean)
+      .filter(f => /\.(c|m)?js$/.test(f) && !f.includes('node_modules/') && !f.includes(WORKTREE_SUBDIR + '/'));
+  } catch (_) { return []; }
+  const errors = [];
+  for (const rel of changed) {
+    const abs = path.join(dirPath, rel);
+    if (!fs.existsSync(abs)) continue;          // deleted/renamed-away — nothing to parse
+    try {
+      execFileSync(process.execPath, ['--check', abs], { stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch (e) {
+      const out = (e.stderr ? String(e.stderr) : e.message || '');
+      const line = out.split('\n').map(l => l.trim()).find(l => /SyntaxError|Error:/.test(l)) || 'parse failed';
+      errors.push({ file: rel, error: line });
+    }
+  }
+  return errors;
+}
+
 // Commit pending work in the worktree, then merge its branch into the base branch.
 function gitMergeBack(dir, session) {
   const dirPath = dir.path;
@@ -159,8 +188,25 @@ function gitMergeBack(dir, session) {
   catch (_) {}
   if (ahead === 0) return { ok: true, merged: false, committed, message: '没有新提交需要合并' };
 
+  let preMergeHead = '';
+  try { preMergeHead = gitRun(dirPath, ['rev-parse', 'HEAD']); } catch (_) {}
+
   try {
     gitRun(dirPath, ['merge', '--no-ff', '-m', `multicc: merge ${branch}`, branch]);
+
+    // Syntax gate: a session that committed code that won't parse must not land
+    // on base (which multicc itself runs from). If anything is broken, undo the
+    // merge so base stays exactly as it was, and report back to the author.
+    const syntaxErrors = preMergeHead ? checkMergedJsSyntax(dirPath, preMergeHead, 'HEAD') : [];
+    if (syntaxErrors.length > 0) {
+      try { gitRun(dirPath, ['reset', '--hard', preMergeHead]); } catch (_) {}
+      return {
+        ok: false,
+        syntaxErrors,
+        error: `合并被拒绝：${syntaxErrors.length} 个文件语法错误，base 分支未改动。请在 worktree 修好再合并：\n` +
+          syntaxErrors.map(e => `  · ${e.file}: ${e.error}`).join('\n'),
+      };
+    }
     // Merge succeeded. The base now has a merge commit the worktree branch lacks,
     // so the session would immediately show as "behind base" and require a manual
     // sync click. Auto-pull it back so the worktree stays in lock-step with base.
