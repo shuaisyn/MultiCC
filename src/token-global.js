@@ -19,6 +19,7 @@ const os = require('os');
 const path = require('path');
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+const CODEX_DIR = path.join(os.homedir(), '.codex', 'sessions');
 const CACHE_TTL_MS = 120 * 1000;
 
 let cache = null;          // { generatedAt, data }
@@ -61,6 +62,71 @@ async function listJsonl(dir) {
   return out;
 }
 
+// Bucket one record into every window it belongs to, plus the per-day trend.
+function record(windows, byDay, W, dk, model, i, o, cw, cr) {
+  addInto(windows.all, model, i, o, cw, cr);
+  if (dk >= W.month) {
+    addInto(windows.month, model, i, o, cw, cr);
+    if (dk >= W.week) addInto(windows.week, model, i, o, cw, cr);
+  }
+  if (dk === W.today) addInto(windows.today, model, i, o, cw, cr);
+  const day = byDay[dk] || (byDay[dk] = {});
+  day[model] = (day[model] || 0) + i + o + cw + cr;
+}
+
+// Codex (the codex CLI) keeps its own transcripts under ~/.codex/sessions as a
+// rollout event stream. Token usage arrives as `event_msg`/`token_count` events
+// whose `info.total_token_usage` is CUMULATIVE per session. We diff consecutive
+// cumulative snapshots (monotonic → no double-counting however often the event
+// fires) and bucket each delta by its own timestamp's day. Codex's
+// cached_input_tokens is a subset of input_tokens, so fresh = input - cached and
+// cached maps to our cacheRead bucket; codex has no separate cache-write notion.
+async function addCodexInto(windows, byDay, W) {
+  const files = await listJsonl(CODEX_DIR);
+  let responses = 0;
+  for (const fp of files) {
+    let text;
+    try { text = await fsp.readFile(fp, 'utf8'); } catch { continue; }
+    let model = 'codex';
+    let prev = null;                 // last cumulative { input, cached, output }
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      if (line.indexOf('"token_count"') === -1 && line.indexOf('"model"') === -1) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      const p = d.payload || {};
+      if (p.model) model = p.model;  // turn_context carries the active model
+      if (!(d.type === 'event_msg' && p.type === 'token_count')) continue;
+      const t = (p.info && p.info.total_token_usage) || null;
+      if (!t) continue;
+      const cur = {
+        input: t.input_tokens || 0,
+        cached: t.cached_input_tokens || 0,
+        output: t.output_tokens || 0,
+      };
+      if (prev) {
+        const din = Math.max(0, cur.input - prev.input);
+        const dca = Math.max(0, cur.cached - prev.cached);
+        const dou = Math.max(0, cur.output - prev.output);
+        const fresh = Math.max(0, din - dca);
+        if (fresh + dou + dca > 0) {
+          record(windows, byDay, W, localDateKey(new Date(d.timestamp)), model, fresh, dou, 0, dca);
+          if (dou > 0) responses++;
+        }
+      } else {
+        // First snapshot is itself a delta from zero.
+        const fresh = Math.max(0, cur.input - cur.cached);
+        if (fresh + cur.output + cur.cached > 0) {
+          record(windows, byDay, W, localDateKey(new Date(d.timestamp)), model, fresh, cur.output, 0, cur.cached);
+          if (cur.output > 0) responses++;
+        }
+      }
+      prev = cur;
+    }
+  }
+  return { files: files.length, responses };
+}
+
 async function compute() {
   const files = await listJsonl(PROJECTS_DIR);
   const W = windowStarts();
@@ -93,25 +159,17 @@ async function compute() {
       const cr = u.cache_read_input_tokens || 0;
       if (i + o + cw + cr === 0) continue;   // skip <synthetic>/no-op records
       const model = m.model || 'unknown';
-      const dk = localDateKey(new Date(ts));
-
-      addInto(windows.all, model, i, o, cw, cr);
-      if (dk >= W.month) {
-        addInto(windows.month, model, i, o, cw, cr);
-        if (dk >= W.week) addInto(windows.week, model, i, o, cw, cr);
-      }
-      if (dk === W.today) addInto(windows.today, model, i, o, cw, cr);
-
-      const day = byDay[dk] || (byDay[dk] = {});
-      day[model] = (day[model] || 0) + i + o + cw + cr;
+      record(windows, byDay, W, localDateKey(new Date(ts)), model, i, o, cw, cr);
     }
   }
 
+  const codex = await addCodexInto(windows, byDay, W);
+
   return {
     generatedAt: new Date().toISOString(),
-    source: PROJECTS_DIR,
-    scannedFiles: files.length,
-    responses,
+    sources: { claude: PROJECTS_DIR, codex: CODEX_DIR },
+    scannedFiles: files.length + codex.files,
+    responses: responses + codex.responses,
     windows,
     byDay,   // { 'YYYY-MM-DD': { model: totalTokens } }
   };
