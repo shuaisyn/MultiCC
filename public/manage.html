@@ -192,6 +192,16 @@
     .dir-block.open .dir-body{display:block}
     .dir-empty{border:1px dashed var(--line);border-radius:10px;color:var(--faint);font-size:12px;padding:14px;text-align:center;background:var(--bg-soft)}
 
+    /* Compact overview card: click to open the detail modal. */
+    .dir-card{cursor:pointer}
+    .dir-preview{padding:2px 17px 15px}
+    .dp-list{display:flex;flex-direction:column;gap:4px}
+    .dp-event{font-size:11px;line-height:1.55;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .dp-event .t{color:var(--faint);margin-right:5px}
+    .dp-event.dim{color:var(--faint);font-style:italic}
+    .dp-task{font-size:11px;line-height:1.45;color:var(--accent);background:var(--accent-dim);border:1px solid var(--accent-line);border-radius:7px;padding:5px 9px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .dp-task .dp-task-who{color:var(--text);font-weight:600;margin-right:5px}
+
     .sess-group{margin-top:14px} .sess-group:first-child{margin-top:0}
     .sess-group-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;font-weight:600}
     .sess-group.claude .sess-group-label{color:var(--claude)}
@@ -1175,6 +1185,21 @@
   </div>
 
   <!-- Diff modal -->
+  <!-- Directory detail modal (full session list + activity timeline) -->
+  <div id="dir-detail-modal" class="modal-backdrop" onclick="if(event.target===this)closeDirectoryDetail()">
+    <div class="modal-card" style="width:min(96vw,720px);max-height:92vh;display:flex;flex-direction:column;background:var(--bg);">
+      <div style="display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);gap:12px;">
+        <div style="flex:1;min-width:0;">
+          <div id="dir-detail-title" style="color:var(--text);font-size:15px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+          <div id="dir-detail-subtitle" style="color:var(--blue);font-size:11px;font-family:var(--mono);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+        </div>
+        <button class="btn add-new btn-sm" id="dir-detail-add" title="新建会话">+ 新建</button>
+        <button class="btn" onclick="closeDirectoryDetail()">关闭</button>
+      </div>
+      <div id="dir-detail-body" style="flex:1;overflow:auto;padding:16px 18px;"></div>
+    </div>
+  </div>
+
   <div id="diff-modal" class="modal-backdrop">
     <div class="modal-card" style="width:min(96vw,1100px);height:min(90vh,800px);display:flex;flex-direction:column;background:var(--bg);">
       <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);gap:12px;">

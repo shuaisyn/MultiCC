@@ -327,10 +327,12 @@ function renderDashboard(directories, sessions) {
   const orphanHtml = orphans.length ? renderOrphans(orphans) : '';
   listEl.innerHTML = dirHtml + orphanHtml;
 
-  // Keep a live workspace socket open for every expanded directory.
-  for (const d of directories) {
-    if (_expandedDirs.has(d.id)) connectWorkspace(d.id);
-  }
+  // Keep a live workspace socket open for every directory so the compact card
+  // previews (recent activity + latest task) stay live without expanding.
+  for (const d of directories) connectWorkspace(d.id);
+
+  // If the detail modal is open, keep its content in sync with reloads.
+  if (_detailModalOpen()) renderDirectoryDetailBody(_detailDirId);
 }
 
 // ── Popover menu (kebab ⋯ buttons) ──
@@ -530,12 +532,9 @@ function showCronTasks(ev) {
   showPopoverMenu(ev.currentTarget, items);
 }
 
-function renderDirectoryBlock(dir, dirSessions) {
-  const openClass = _expandedDirs.has(dir.id) ? ' open' : '';
-  const id = dir.id;
-  const maxPath = _focusedSessionId ? 30 : 60;
-
-  // Split sessions by (cli, kind)
+// Session list grouped by (cli, kind). Reused by the focus-mode inline list and
+// the directory-detail modal.
+function renderDirSessionGroups(dirSessions) {
   const groups = {
     claude_terminal: [], claude_chat: [],
     codex_terminal: [], codex_chat: [],
@@ -544,14 +543,6 @@ function renderDirectoryBlock(dir, dirSessions) {
     const key = `${s.cli || 'claude'}_${s.kind || 'terminal'}`;
     if (groups[key]) groups[key].push(s);
   }
-
-  const total = dirSessions.length;
-  const active = dirSessions.filter(s => s.active).length;
-  // Git push state (ahead) surfaces as a tiny dot on the ⋯ menu; the full
-  // action lives inside showDirMenu now (P2: declutter the header).
-  const ps = dir.pushState || {};
-  const pushPending = ps.available !== false && ps.hasRemote && ps.ahead > 0;
-
   const renderGroup = (cli, kind, label) => {
     const ss = groups[`${cli}_${kind}`];
     if (!ss.length) return '';
@@ -562,35 +553,133 @@ function renderDirectoryBlock(dir, dirSessions) {
         <div class="sess-card-grid">${rows}</div>
       </div>`;
   };
-
-  const bodyHtml = [
+  return [
     renderGroup('claude', 'terminal', 'Claude Terminals'),
     renderGroup('claude', 'chat', 'Claude Chats'),
     renderGroup('codex',  'terminal', 'Codex Terminals'),
     renderGroup('codex',  'chat', 'Codex Chats'),
   ].filter(Boolean).join('') || `<div class="dir-empty">${escapeHtml(tt('noSessions'))}</div>`;
+}
 
-  return `
-    <div class="dir-block${openClass}" data-dir-id="${escapeHtml(id)}">
-      <div class="dir-header">
-        <button class="dir-toggle" title="Expand project" onclick="toggleDirectory('${escapeHtml(id)}')"></button>
+// Sessions belonging to a directory (excludes the aux assistant).
+function dirSessionsOf(dirId) {
+  return (_cachedSessions || []).filter(s => s.dirId === dirId && s.type !== 'aux');
+}
+
+// Compact preview shown on the overview card: the 2 most recent activity lines
+// plus a one-line blurb of the most recent task. Full detail lives in the modal.
+function renderDirPreview(dirId, dirSessions) {
+  const events = (_workspaceEvents.get(dirId) || []).slice(-2).reverse();
+  const evHtml = events.length
+    ? events.map(e => `<div class="dp-event"><span class="t">${new Date(e.ts).toLocaleTimeString()}</span> ${escapeHtml(eventLabel(e))}</div>`).join('')
+    : '<div class="dp-event dim">暂无活动</div>';
+  // Most-recent task one-liner across this dir's sessions.
+  let best = null;
+  for (const s of (dirSessions || [])) {
+    const sm = _workspaceSummaries.get(s.id);
+    if (sm && sm.summary && (!best || (sm.ts || 0) > (best.ts || 0))) {
+      best = { summary: sm.summary, ts: sm.ts || 0, who: s.label || s.id };
+    }
+  }
+  const taskHtml = best
+    ? `<div class="dp-task" title="最近任务：${escapeHtml(best.summary)}">🗒 <span class="dp-task-who">${escapeHtml(best.who)}</span>${escapeHtml(best.summary)}</div>`
+    : '';
+  return `<div class="dp-list" id="dir-preview-${escapeHtml(dirId)}">${evHtml}${taskHtml}</div>`;
+}
+
+function updateDirPreview(dirId) {
+  const el = document.getElementById(`dir-preview-${dirId}`);
+  if (el) el.outerHTML = renderDirPreview(dirId, dirSessionsOf(dirId));
+}
+function updateDirPreviewForSession(sessionId) {
+  const s = (_cachedSessions || []).find(x => x.id === sessionId);
+  if (s && s.dirId) updateDirPreview(s.dirId);
+}
+
+function renderDirectoryBlock(dir, dirSessions) {
+  const id = dir.id;
+  const maxPath = _focusedSessionId ? 30 : 60;
+
+  const total = dirSessions.length;
+  const active = dirSessions.filter(s => s.active).length;
+  // Git push state (ahead) surfaces as a tiny dot on the ⋯ menu; the full
+  // action lives inside showDirMenu now (P2: declutter the header).
+  const ps = dir.pushState || {};
+  const pushPending = ps.available !== false && ps.hasRemote && ps.ahead > 0;
+
+  const headerActions = `
+        <button class="btn add-new btn-sm" title="${escapeHtml(tt('createSession'))}" onclick="event.stopPropagation(); showNewSessionMenu(event, '${escapeHtml(id)}')">${escapeHtml(tt('createSession'))}</button>
+        <button class="btn-icon" title="项目备忘 (multicc.memo.md)" onclick="event.stopPropagation(); openMemo('${escapeHtml(id)}')">📝</button>
+        <button class="btn-icon${pushPending ? ' has-pending' : ''}" title="更多操作${pushPending ? `（有 ${ps.ahead} 个提交待 push）` : ''}" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>`;
+
+  const headerMain = `
         <div class="dir-main">
-          <span class="dir-name" onclick="toggleDirectory('${escapeHtml(id)}')">${escapeHtml(dir.name)}</span>
+          <span class="dir-name">${escapeHtml(dir.name)}</span>
           <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
           <div class="dir-meta">
             <span><strong>${total}</strong> ${escapeHtml(tt('sessions'))}</span>
             ${active > 0 ? `<span class="sep">·</span><span class="active-count"><strong>${active}</strong> ${escapeHtml(tt('active'))}</span>` : ''}
           </div>
-        </div>
-        <button class="btn add-new btn-sm" title="${escapeHtml(tt('createSession'))}" onclick="event.stopPropagation(); showNewSessionMenu(event, '${escapeHtml(id)}')">${escapeHtml(tt('createSession'))}</button>
-        <button class="btn-icon" title="项目备忘 (multicc.memo.md)" onclick="event.stopPropagation(); openMemo('${escapeHtml(id)}')">📝</button>
-        <button class="btn-icon${pushPending ? ' has-pending' : ''}" title="更多操作${pushPending ? `（有 ${ps.ahead} 个提交待 push）` : ''}" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>
+        </div>`;
+
+  // Sidebar (focus) mode keeps the inline, always-open session list so you can
+  // switch sessions without a popup. Overview mode shows a compact card whose
+  // body is a 2-line preview; clicking opens the full detail in a modal.
+  if (_focusedSessionId) {
+    return `
+    <div class="dir-block open" data-dir-id="${escapeHtml(id)}">
+      <div class="dir-header">
+        ${headerMain}
+        ${headerActions}
       </div>
       <div class="dir-body">
         ${renderEventTimeline(id)}
-        ${bodyHtml}
+        ${renderDirSessionGroups(dirSessions)}
       </div>
     </div>`;
+  }
+
+  return `
+    <div class="dir-block dir-card" data-dir-id="${escapeHtml(id)}" onclick="openDirectoryDetail('${escapeHtml(id)}')">
+      <div class="dir-header">
+        ${headerMain}
+        ${headerActions}
+      </div>
+      <div class="dir-preview">${renderDirPreview(id, dirSessions)}</div>
+    </div>`;
+}
+
+// ── Directory detail modal (replaces the old inline accordion) ──
+let _detailDirId = null;
+function openDirectoryDetail(dirId) {
+  const dir = (_cachedDirectories || []).find(d => d.id === dirId);
+  if (!dir) return;
+  _detailDirId = dirId;
+  connectWorkspace(dirId);
+  _expandedEvents.add(dirId);   // show the activity timeline open inside the modal
+  const title = document.getElementById('dir-detail-title');
+  const sub = document.getElementById('dir-detail-subtitle');
+  if (title) title.textContent = dir.name;
+  if (sub) { sub.textContent = dir.path; sub.title = dir.path; }
+  const addBtn = document.getElementById('dir-detail-add');
+  if (addBtn) addBtn.onclick = (e) => { e.stopPropagation(); showNewSessionMenu(e, dirId); };
+  renderDirectoryDetailBody(dirId);
+  const m = document.getElementById('dir-detail-modal');
+  if (m) m.classList.add('visible');
+}
+function renderDirectoryDetailBody(dirId) {
+  const body = document.getElementById('dir-detail-body');
+  if (!body) return;
+  body.innerHTML = renderEventTimeline(dirId) + renderDirSessionGroups(dirSessionsOf(dirId));
+}
+function closeDirectoryDetail() {
+  _detailDirId = null;
+  const m = document.getElementById('dir-detail-modal');
+  if (m) m.classList.remove('visible');
+}
+function _detailModalOpen() {
+  const m = document.getElementById('dir-detail-modal');
+  return _detailDirId && m && m.classList.contains('visible');
 }
 
 async function pushDirectory(id) {
@@ -691,12 +780,6 @@ function renderOrphans(sessions) {
         ${sessions.map(s => renderSessionRow(s)).join('')}
       </div>
     </div>`;
-}
-
-function toggleDirectory(id) {
-  if (_expandedDirs.has(id)) { _expandedDirs.delete(id); disconnectWorkspace(id); }
-  else { _expandedDirs.add(id); connectWorkspace(id); }
-  renderDashboard(_cachedDirectories, _cachedSessions);
 }
 
 /* ── Directory management ── */
@@ -1505,6 +1588,7 @@ function connectWorkspace(dirId) {
       }
       _workspaceEvents.set(dirId, msg.events || []);
       updateEventTimelineDom(dirId);
+      updateDirPreview(dirId);
     } else if (msg.type === 'status') {
       _workspaceStatus.set(msg.sessionId, { status: msg.status, currentFile: msg.currentFile, lastActivity: msg.lastActivity, mergeState: msg.mergeState || _workspaceStatus.get(msg.sessionId)?.mergeState || null });
       updateSessionStatusDom(msg.sessionId);
@@ -1519,12 +1603,14 @@ function connectWorkspace(dirId) {
       if (arr.length > 200) arr.shift();
       _workspaceEvents.set(dirId, arr);
       updateEventTimelineDom(dirId);
+      updateDirPreview(dirId);
     } else if (msg.type === 'note_pending') {
       _workspaceNotes.set(msg.sessionId, msg.count || 0);
       updateSessionNotesDom(msg.sessionId);
     } else if (msg.type === 'summary') {
       _workspaceSummaries.set(msg.sessionId, { summary: msg.summary, ts: msg.ts || 0 });
       updateSessionSummaryDom(msg.sessionId);
+      updateDirPreviewForSession(msg.sessionId);
     }
   };
   ws.onclose = () => { if (_workspaceWs.get(dirId) === ws) _workspaceWs.delete(dirId); };
