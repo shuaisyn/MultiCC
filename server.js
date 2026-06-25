@@ -5355,6 +5355,26 @@ function handleChatWs(ws, req, urlObj) {
     all: (dailyWindows.all && dailyWindows.all[provId]) || null,
   } : null;
 
+  // Fallback: when no daily data exists yet for this provider, compute
+  // all-time totals from token_usage.json so the context bar always shows
+  // something immediately (instead of waiting for a new turn to populate
+  // token_daily.json).
+  if (provId && provWindows && !provWindows.all) {
+    const accum = getTokenUsage();
+    let allIn = 0, allOut = 0, allTurns = 0;
+    for (const [sid, entry] of Object.entries(accum)) {
+      const sp = persistedSessions.get(sid);
+      if ((sp && sp.provider === provId) || sid === sessionName) {
+        allIn += entry.inputTokens || 0;
+        allOut += entry.outputTokens || 0;
+        allTurns += entry.turnCount || 0;
+      }
+    }
+    if (allIn + allOut > 0) {
+      provWindows.all = { inputTokens: allIn, outputTokens: allOut, turnCount: allTurns };
+    }
+  }
+
   ws.send(JSON.stringify({
     type: 'system', subtype: 'init',
     cwd: cs.cwd, session: sessionName, session_id: sessionName,
