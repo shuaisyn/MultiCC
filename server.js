@@ -3808,7 +3808,18 @@ app.get('/api/providers', (req, res) => {
     ccSwitchAvailable: providers.ccSwitchAvailable(),
     providers: providers.listProviders(appType === 'claude' || appType === 'codex' ? appType : undefined),
     defaults: providerDefaults,
+    stats: providers.getProviderUsageStats().stats,
   });
+});
+
+// Per-provider token usage stats aggregated from chat_history.
+app.get('/api/providers/stats', (req, res) => {
+  try {
+    const stats = providers.getProviderUsageStats();
+    res.json(stats);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Import / sync providers from cc-switch into multicc's own store (idempotent).

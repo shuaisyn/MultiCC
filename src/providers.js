@@ -397,6 +397,99 @@ function resolveSpawnEnv(session) {
   }
 }
 
+// ── Provider token usage stats ────────────────────────────────────────────
+// Scans chat_history/*.json to aggregate usage (input_tokens / output_tokens)
+// per provider.  Returns { stats: [...], total: {...} } sorted by totalTokens
+// descending.  Sessions without a provider are grouped into "_default_".
+const CHAT_HISTORY_DIR = path.join(__dirname, '..', 'chat_history');
+const SESSIONS_FILE = path.join(__dirname, '..', 'sessions.json');
+
+function getProviderUsageStats() {
+  const providerMap = new Map();  // providerId → { inputTokens, outputTokens, turnCount, sessionSet }
+  const total = { inputTokens: 0, outputTokens: 0, totalTokens: 0, turnCount: 0 };
+
+  // Load persisted sessions to map session id → provider.
+  let sessionProviderMap = new Map();
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      for (const s of (Array.isArray(sessions) ? sessions : [])) {
+        const pid = s.provider || '';
+        sessionProviderMap.set(s.id, pid || null);
+      }
+    }
+  } catch (_) { /* ignore unreadable sessions.json */ }
+
+  // Load provider metadata for names & appType.
+  const providers = loadStore();
+  const providerMeta = new Map();  // id → { name, appType }
+  for (const p of providers) {
+    providerMeta.set(p.id, { name: p.name, appType: p.appType });
+  }
+
+  let files;
+  try {
+    files = fs.readdirSync(CHAT_HISTORY_DIR);
+  } catch (_) { return { stats: [], total }; }
+
+  for (const fname of files) {
+    if (!fname.endsWith('.json')) continue;
+    // Skip system sessions.
+    if (fname === '__aux__.json' || fname === '__gateway__.json') continue;
+
+    const sessionId = fname.replace(/\.json$/, '');
+    const providerId = sessionProviderMap.get(sessionId) || null;
+    const key = (providerId === null || providerId === '') ? '_default_' : providerId;
+
+    try {
+      const raw = fs.readFileSync(path.join(CHAT_HISTORY_DIR, fname), 'utf8');
+      const messages = JSON.parse(raw);
+      if (!Array.isArray(messages)) continue;
+
+      for (const msg of messages) {
+        const usage = msg.usage;
+        if (!usage || (typeof usage.input_tokens !== 'number' && typeof usage.output_tokens !== 'number')) continue;
+
+        const input = usage.input_tokens || 0;
+        const output = usage.output_tokens || 0;
+
+        if (!providerMap.has(key)) {
+          providerMap.set(key, { inputTokens: 0, outputTokens: 0, turnCount: 0, sessions: new Set() });
+        }
+        const agg = providerMap.get(key);
+        agg.inputTokens += input;
+        agg.outputTokens += output;
+        agg.turnCount += 1;
+        agg.sessions.add(sessionId);
+
+        total.inputTokens += input;
+        total.outputTokens += output;
+        total.turnCount += 1;
+      }
+    } catch (_) { /* skip corrupted / unreadable files */ }
+  }
+
+  total.totalTokens = total.inputTokens + total.outputTokens;
+
+  const stats = [];
+  for (const [id, agg] of providerMap) {
+    const meta = id === '_default_' ? { name: '默认登录', appType: null } : (providerMeta.get(id) || { name: id, appType: null });
+    stats.push({
+      providerId: id,
+      providerName: meta.name,
+      appType: meta.appType,
+      inputTokens: agg.inputTokens,
+      outputTokens: agg.outputTokens,
+      totalTokens: agg.inputTokens + agg.outputTokens,
+      turnCount: agg.turnCount,
+      sessionCount: agg.sessions.size,
+    });
+  }
+
+  stats.sort((a, b) => b.totalTokens - a.totalTokens);
+  return { stats, total };
+}
+
 module.exports = {
   available,
   ccSwitchAvailable,
@@ -410,6 +503,7 @@ module.exports = {
   importFromCcSwitch,
   resolveSpawnEnv,
   buildChildEnv,
+  getProviderUsageStats,
   CLAUDE_ROUTING_KEYS,
   CODEX_HOMES_DIR,
 };
