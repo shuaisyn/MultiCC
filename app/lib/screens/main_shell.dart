@@ -729,6 +729,16 @@ class _DirectoryCard extends StatefulWidget {
   State<_DirectoryCard> createState() => _DirectoryCardState();
 }
 
+class _DirectoryDetailAction {
+  final Session? session;
+  final SessionCli? cli;
+  final SessionKind? kind;
+
+  const _DirectoryDetailAction.open(this.session) : cli = null, kind = null;
+
+  const _DirectoryDetailAction.create(this.cli, this.kind) : session = null;
+}
+
 class _DirectoryCardState extends State<_DirectoryCard> {
   late final WorkspaceService _workspace;
 
@@ -1005,8 +1015,8 @@ class _DirectoryCardState extends State<_DirectoryCard> {
     return best;
   }
 
-  void _showDirectoryDetail(BuildContext context) {
-    showModalBottomSheet<void>(
+  Future<void> _showDirectoryDetail(BuildContext context) async {
+    final action = await showModalBottomSheet<_DirectoryDetailAction>(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppColors.panel,
@@ -1094,33 +1104,41 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                             _AddSessionChip(
                               label: '+ Claude Term',
                               color: _kClaudeColor,
-                              onTap: () => _createSession(
-                                SessionCli.claude,
-                                SessionKind.terminal,
+                              onTap: () => Navigator.of(sheetCtx).pop(
+                                const _DirectoryDetailAction.create(
+                                  SessionCli.claude,
+                                  SessionKind.terminal,
+                                ),
                               ),
                             ),
                             _AddSessionChip(
                               label: '+ Claude Chat',
                               color: _kClaudeColor,
-                              onTap: () => _createSession(
-                                SessionCli.claude,
-                                SessionKind.chat,
+                              onTap: () => Navigator.of(sheetCtx).pop(
+                                const _DirectoryDetailAction.create(
+                                  SessionCli.claude,
+                                  SessionKind.chat,
+                                ),
                               ),
                             ),
                             _AddSessionChip(
                               label: '+ Codex Term',
                               color: _kCodexColor,
-                              onTap: () => _createSession(
-                                SessionCli.codex,
-                                SessionKind.terminal,
+                              onTap: () => Navigator.of(sheetCtx).pop(
+                                const _DirectoryDetailAction.create(
+                                  SessionCli.codex,
+                                  SessionKind.terminal,
+                                ),
                               ),
                             ),
                             _AddSessionChip(
                               label: '+ Codex Chat',
                               color: _kCodexColor,
-                              onTap: () => _createSession(
-                                SessionCli.codex,
-                                SessionKind.chat,
+                              onTap: () => Navigator.of(sheetCtx).pop(
+                                const _DirectoryDetailAction.create(
+                                  SessionCli.codex,
+                                  SessionKind.chat,
+                                ),
                               ),
                             ),
                           ],
@@ -1162,6 +1180,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                             settings: widget.settings,
                             statuses: _workspace.statuses,
                             pendingNotes: _workspace.pendingNotes,
+                            onOpen: (s) => Navigator.of(
+                              sheetCtx,
+                            ).pop(_DirectoryDetailAction.open(s)),
                           ),
                           _SessionGroup(
                             title: t('claudeChats'),
@@ -1171,6 +1192,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                             settings: widget.settings,
                             statuses: _workspace.statuses,
                             pendingNotes: _workspace.pendingNotes,
+                            onOpen: (s) => Navigator.of(
+                              sheetCtx,
+                            ).pop(_DirectoryDetailAction.open(s)),
                           ),
                           _SessionGroup(
                             title: t('codexTerminals'),
@@ -1180,6 +1204,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                             settings: widget.settings,
                             statuses: _workspace.statuses,
                             pendingNotes: _workspace.pendingNotes,
+                            onOpen: (s) => Navigator.of(
+                              sheetCtx,
+                            ).pop(_DirectoryDetailAction.open(s)),
                           ),
                           _SessionGroup(
                             title: t('codexChats'),
@@ -1189,6 +1216,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                             settings: widget.settings,
                             statuses: _workspace.statuses,
                             pendingNotes: _workspace.pendingNotes,
+                            onOpen: (s) => Navigator.of(
+                              sheetCtx,
+                            ).pop(_DirectoryDetailAction.open(s)),
                           ),
                         ],
                       ],
@@ -1201,6 +1231,27 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         ),
       ),
     );
+    if (!mounted || action == null) return;
+    final session = action.session;
+    if (session != null) {
+      _openSession(session);
+    } else {
+      await _createSession(action.cli!, action.kind!);
+    }
+  }
+
+  void _openSession(Session session) {
+    if (session.isChat) {
+      widget.mgr.openSession(session);
+      widget.mgr.switchToSession(session.id);
+    } else {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) =>
+              TerminalScreen(settings: widget.settings, session: session),
+        ),
+      );
+    }
   }
 
   Future<void> _createSession(SessionCli cli, SessionKind kind) async {
@@ -1839,6 +1890,7 @@ class _SessionGroup extends StatelessWidget {
   final SettingsService settings;
   final Map<String, SessionStatus> statuses;
   final Map<String, int> pendingNotes;
+  final ValueChanged<Session>? onOpen;
 
   const _SessionGroup({
     required this.title,
@@ -1848,6 +1900,7 @@ class _SessionGroup extends StatelessWidget {
     required this.settings,
     required this.statuses,
     required this.pendingNotes,
+    this.onOpen,
   });
 
   @override
@@ -1889,6 +1942,7 @@ class _SessionGroup extends StatelessWidget {
                         settings: settings,
                         liveStatus: statuses[s.id],
                         pendingNotes: pendingNotes[s.id] ?? 0,
+                        onOpen: onOpen,
                       ),
                     ),
                 ],
@@ -1907,6 +1961,7 @@ class SessionCard extends StatelessWidget {
   final SettingsService settings;
   final SessionStatus? liveStatus;
   final int pendingNotes;
+  final ValueChanged<Session>? onOpen;
   const SessionCard({
     super.key,
     required this.session,
@@ -1914,6 +1969,7 @@ class SessionCard extends StatelessWidget {
     required this.settings,
     this.liveStatus,
     this.pendingNotes = 0,
+    this.onOpen,
   });
 
   @override
@@ -1944,7 +2000,14 @@ class SessionCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: InkWell(
-        onTap: () => _open(context),
+        onTap: () {
+          final open = onOpen;
+          if (open != null) {
+            open(session);
+          } else {
+            _open(context);
+          }
+        },
         borderRadius: BorderRadius.circular(8),
         child: Padding(
           padding: const EdgeInsets.all(10),
