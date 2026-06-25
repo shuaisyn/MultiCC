@@ -860,9 +860,20 @@ function replayHistory(messages, serverTokenUsage) {
       }
     }
   }
-  // Rebuild context bar with latest session totals.
-  // NOTE: _usedTokens tracks only the current turn (set by stream_event usage).
-  // We must NOT overwrite it with session totals here.
+  // "本轮" = the LAST turn's context window size, NOT the session total.
+  // Reconstruct it from the most recent assistant message's full usage
+  // (input + output + cache), mirroring how live stream_event usage is computed.
+  // Without this, _usedTokens stays 0 on reload and "本轮" disappears.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'assistant' && m.usage) {
+      const u = m.usage;
+      _usedTokens = (u.input_tokens || 0) + (u.output_tokens || 0) +
+        (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      break;
+    }
+  }
+  // Rebuild context bar with latest session totals + last-turn context.
   if (_sessionTokens.input + _sessionTokens.output > 0) updateContextBar();
   scrollToBottom();
   setTimeout(scrollToBottom, 300);
@@ -1055,10 +1066,11 @@ function updateContextBar(usage, modelUsage) {
     if (pw.today) { const s = windowFmt(pw.today); if (s) entries.push(`日${s}`); }
     if (pw.week) { const s = windowFmt(pw.week); if (s) entries.push(`周${s}`); }
     if (pw.month) { const s = windowFmt(pw.month); if (s) entries.push(`月${s}`); }
-    // Fallback: if daily data hasn't accumulated yet, show all-time total
+    // Fallback: if daily data hasn't accumulated yet, show all-time total.
+    // Prefixed 总 so it's clear this is lifetime, not today's, usage.
     if (!entries.length && pw.all) {
       const s = windowFmt(pw.all);
-      if (s) entries.push(s);
+      if (s) entries.push(`总${s}`);
     }
     if (entries.length) {
       parts.push(`<span style="margin-right:10px;color:var(--amber);font-size:11px">[${escHtml(label)}] ${entries.join(' ')}</span>`);

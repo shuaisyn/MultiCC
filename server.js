@@ -4169,6 +4169,21 @@ function broadcastProviderTokenStats(sessionName) {
     month: (dailyWindows.month && dailyWindows.month[provId]) || null,
     all: (dailyWindows.all && dailyWindows.all[provId]) || null,
   } : null;
+  // Same all-time fallback as the init path, so the bar still shows lifetime
+  // totals when daily data is sparse.
+  if (provId && provWindows && !provWindows.all) {
+    const accum = getTokenUsage();
+    let allIn = 0, allOut = 0, allTurns = 0;
+    for (const [sid, entry] of Object.entries(accum)) {
+      const sp = persistedSessions.get(sid);
+      if ((sp && sp.provider === provId) || sid === sessionName) {
+        allIn += entry.inputTokens || 0;
+        allOut += entry.outputTokens || 0;
+        allTurns += entry.turnCount || 0;
+      }
+    }
+    if (allIn + allOut > 0) provWindows.all = { inputTokens: allIn, outputTokens: allOut, turnCount: allTurns };
+  }
   chatBroadcast(sessionName, { type: 'provider_token_stats', windows: provWindows });
 }
 
