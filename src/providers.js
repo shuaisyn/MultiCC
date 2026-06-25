@@ -194,7 +194,10 @@ function listProviders(appType) {
 }
 
 function getProvider(appType, id) {
-  return loadStore().find(p => p.appType === appType && p.id === id) || null;
+  // id is globally unique, so when appType is omitted match by id alone.
+  // (Passing appType === undefined previously matched nothing, since every
+  // stored provider has a concrete appType.)
+  return loadStore().find(p => p.id === id && (!appType || p.appType === appType)) || null;
 }
 
 function getProviderSummary(appType, id) {
