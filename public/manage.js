@@ -1357,13 +1357,64 @@ async function renameSession(id) {
   }
 }
 
-// Route an inline-open request by session kind (terminal → iframe, chat → chat iframe)
-function openSessionInline(id, kind) {
-  // Both terminal and chat sessions now open in the focus panel (popup iframe)
-  focusSession(id);
+/* ── Session view modal (large centered modal) ── */
+const sessionModal = document.getElementById('session-modal');
+const sessionModalIframe = document.getElementById('session-modal-iframe');
+const sessionModalTitle = document.getElementById('session-modal-title');
+const sessionModalSubtitle = document.getElementById('session-modal-subtitle');
+const sessionModalNewtab = document.getElementById('session-modal-newtab');
+let _currentSessionModalId = null;
+let _currentSessionModalKind = null;
+
+function openSessionModal(id) {
+  const s = _cachedSessions.find(sess => sess.id === id);
+  if (!s) return;
+
+  acknowledgeSession(id);
+  _currentSessionModalId = id;
+  _currentSessionModalKind = s.kind || 'terminal';
+
+  // Set title
+  sessionModalTitle.textContent = s.kind === 'chat' ? '💬 Chat Session' : '🖥 Terminal Session';
+  sessionModalSubtitle.textContent = `#${id} · ${s.cwd || ''}`;
+
+  // Set iframe URL based on session kind
+  const urlToken = new URLSearchParams(location.search).get('token');
+  const tokenParam = urlToken ? (s.kind === 'chat' ? `&token=${urlToken}` : `&token=${urlToken}`) : '';
+
+  if (s.kind === 'chat') {
+    sessionModalIframe.src = `/chat.html?session=${id}${tokenParam}`;
+  } else {
+    sessionModalIframe.src = `/?id=${id}${tokenParam}`;
+  }
+
+  // Show modal
+  sessionModal.classList.add('visible');
 }
 
-/* ── Focus panel: embed terminal iframe ── */
+function closeSessionModal() {
+  sessionModal.classList.remove('visible');
+  sessionModalIframe.src = '';
+  _currentSessionModalId = null;
+  _currentSessionModalKind = null;
+}
+
+sessionModalNewtab.addEventListener('click', () => {
+  if (_currentSessionModalId) {
+    if (_currentSessionModalKind === 'chat') {
+      openSessionChat(_currentSessionModalId);
+    } else {
+      openSessionNewTab(_currentSessionModalId);
+    }
+  }
+});
+
+// Route an inline-open request: open in large centered modal
+function openSessionInline(id, kind) {
+  openSessionModal(id);
+}
+
+/* ── Focus panel: embed terminal iframe (kept for aux history view) ── */
 const focusPanel   = document.getElementById('focus-panel');
 const focusIframe  = document.getElementById('focus-iframe');
 const focusId      = document.getElementById('focus-id');
