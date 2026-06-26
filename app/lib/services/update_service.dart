@@ -9,6 +9,7 @@ import 'settings_service.dart';
 
 class UpdateService {
   static const _keyLastMtime = 'multicc_apk_mtime';
+  static const _keyLastVersionCode = 'multicc_apk_version_code';
 
   /// Installed app version string for display, e.g. "2.5.2 (30)".
   static Future<String> currentVersion() async {
@@ -22,7 +23,10 @@ class UpdateService {
 
   /// Silent, automatic update check fired on launch. Prompts only when the
   /// server's APK is genuinely newer than what's installed.
-  static Future<void> checkUpdate(BuildContext context, SettingsService settings) async {
+  static Future<void> checkUpdate(
+    BuildContext context,
+    SettingsService settings,
+  ) async {
     if (!settings.isConfigured) return;
 
     try {
@@ -32,16 +36,31 @@ class UpdateService {
       final meta = await _fetchApkInfo(settings);
       if (meta == null || meta['exists'] != true) return;
 
-      final serverMtime = meta['mtime'] as String? ?? '';
-      if (serverMtime.isEmpty) return;
       final serverVersion = (meta['versionName'] as String?)?.trim() ?? '';
       final serverCode = (meta['versionCode'] as num?)?.toInt() ?? 0;
+      final serverMtime = meta['mtime'] as String? ?? '';
 
-      // If the server exposes a versionCode, trust it over the mtime heuristic:
-      // never nag when the installed build is already >= the published one.
-      if (serverCode > 0 && currentCode > 0 && serverCode <= currentCode) {
+      // Prefer deterministic APK metadata over file mtime. A freshly installed
+      // or freshly configured app may not have a stored mtime yet; it still must
+      // prompt when the server publishes a higher Android versionCode.
+      if (serverCode > 0 && currentCode > 0) {
+        if (serverCode <= currentCode) {
+          await _rememberPublishedApk(serverMtime, serverCode);
+          return;
+        }
+        if (!context.mounted) return;
+        final shouldUpdate = await _confirmUpdateDialog(
+          context,
+          _versionLabel(serverVersion, serverCode),
+        );
+        if (shouldUpdate == true) {
+          await _rememberPublishedApk(serverMtime, serverCode);
+          await _launchDownload(settings);
+        }
         return;
       }
+
+      if (serverMtime.isEmpty) return;
 
       final prefs = await SharedPreferences.getInstance();
       final lastMtime = prefs.getString(_keyLastMtime) ?? '';
@@ -53,9 +72,12 @@ class UpdateService {
 
       if (serverMtime != lastMtime) {
         if (!context.mounted) return;
-        final shouldUpdate = await _confirmUpdateDialog(context, serverVersion);
+        final shouldUpdate = await _confirmUpdateDialog(
+          context,
+          _versionLabel(serverVersion, serverCode),
+        );
         if (shouldUpdate == true) {
-          await prefs.setString(_keyLastMtime, serverMtime);
+          await _rememberPublishedApk(serverMtime, serverCode);
           await _launchDownload(settings);
         }
       }
@@ -66,7 +88,10 @@ class UpdateService {
 
   /// Manual "check for update" triggered from Settings. Always shows a result:
   /// either "you're up to date" or an update prompt.
-  static Future<void> checkUpdateManually(BuildContext context, SettingsService settings) async {
+  static Future<void> checkUpdateManually(
+    BuildContext context,
+    SettingsService settings,
+  ) async {
     if (!settings.isConfigured) {
       _info(context, '请先配置服务器连接', '在「服务器连接」里填好地址后再检查更新。');
       return;
@@ -101,24 +126,29 @@ class UpdateService {
         : (serverVersion.isNotEmpty && serverVersion != info.version);
 
     if (!hasNewer) {
-      _info(context, '已是最新版本',
-          '当前版本 ${info.version} (${info.buildNumber}) 已是服务器上的最新版本。');
+      _info(
+        context,
+        '已是最新版本',
+        '当前版本 ${info.version} (${info.buildNumber}) 已是服务器上的最新版本。',
+      );
       return;
     }
 
-    final shouldUpdate = await _confirmUpdateDialog(context, serverVersion);
+    final shouldUpdate = await _confirmUpdateDialog(
+      context,
+      _versionLabel(serverVersion, serverCode),
+    );
     if (shouldUpdate == true) {
-      if (serverMtime.isNotEmpty) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString(_keyLastMtime, serverMtime);
-      }
+      await _rememberPublishedApk(serverMtime, serverCode);
       await _launchDownload(settings);
     }
   }
 
   // ── helpers ──
 
-  static Future<Map<String, dynamic>?> _fetchApkInfo(SettingsService settings) async {
+  static Future<Map<String, dynamic>?> _fetchApkInfo(
+    SettingsService settings,
+  ) async {
     try {
       final url = settings.buildHttpUrl('/api/apk-info');
       final headers = <String, String>{};
@@ -139,10 +169,38 @@ class UpdateService {
       downloadUrl += '?token=${Uri.encodeQueryComponent(settings.token)}';
     }
     // Don't use canLaunchUrl — it's unreliable on Android 11+.
-    await launchUrl(Uri.parse(downloadUrl), mode: LaunchMode.externalApplication);
+    await launchUrl(
+      Uri.parse(downloadUrl),
+      mode: LaunchMode.externalApplication,
+    );
   }
 
-  static Future<bool?> _confirmUpdateDialog(BuildContext context, String serverVersion) {
+  static Future<void> _rememberPublishedApk(
+    String mtime,
+    int versionCode,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mtime.isNotEmpty) {
+      await prefs.setString(_keyLastMtime, mtime);
+    }
+    if (versionCode > 0) {
+      await prefs.setInt(_keyLastVersionCode, versionCode);
+    }
+  }
+
+  static String _versionLabel(String versionName, int versionCode) {
+    if (versionName.isNotEmpty && versionCode > 0) {
+      return '$versionName ($versionCode)';
+    }
+    if (versionName.isNotEmpty) return versionName;
+    if (versionCode > 0) return 'build $versionCode';
+    return '';
+  }
+
+  static Future<bool?> _confirmUpdateDialog(
+    BuildContext context,
+    String serverVersion,
+  ) {
     return showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -162,8 +220,13 @@ class UpdateService {
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('更新',
-                style: TextStyle(color: Color(0xFF6aa3ff), fontWeight: FontWeight.w600)),
+            child: const Text(
+              '更新',
+              style: TextStyle(
+                color: Color(0xFF6aa3ff),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
         ],
       ),
@@ -180,8 +243,13 @@ class UpdateService {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('好',
-                style: TextStyle(color: Color(0xFF6aa3ff), fontWeight: FontWeight.w600)),
+            child: const Text(
+              '好',
+              style: TextStyle(
+                color: Color(0xFF6aa3ff),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
         ],
       ),
