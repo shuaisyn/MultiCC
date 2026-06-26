@@ -67,3 +67,6 @@ goal-config.json
 # Provider store (contains API keys — keep local)
 providers.json
 provider-defaults.json
+
+# Local-only scripts (not for git)
+scripts/bigmodel-snatch/
