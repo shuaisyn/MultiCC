@@ -1,10 +1,8 @@
 {
-  "versionName": "2.6.2",
-  "versionCode": 40,
-  "buildTime": "2026-06-27T11:01:00Z",
+  "versionName": "2.6.3",
+  "versionCode": 41,
+  "buildTime": "2026-06-27T12:43:00Z",
   "changes": [
-    "feat(app): 添加消息气泡下方的 token 统计显示",
-    "feat(manage): 点击会话在居中大模态框打开",
-    "fix(manage): 移动端侧边栏背景遮罩和点击关闭"
+    "fix(app): 在 _finishStreaming 前处理 usage，确保消息气泡显示 token 统计"
   ]
 }
