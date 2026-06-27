@@ -1,6 +1,10 @@
 {
-  "versionName": "2.6.1",
-  "versionCode": 39,
-  "size": 55361137,
-  "sha256": "be69d12e25dee41ade689efcd66c2a61ac19c1e650903807c16ae50ef441a596"
+  "versionName": "2.6.2",
+  "versionCode": 40,
+  "buildTime": "2026-06-27T11:01:00Z",
+  "changes": [
+    "feat(app): 添加消息气泡下方的 token 统计显示",
+    "feat(manage): 点击会话在居中大模态框打开",
+    "fix(manage): 移动端侧边栏背景遮罩和点击关闭"
+  ]
 }
