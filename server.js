@@ -1501,7 +1501,7 @@ app.get('/api/sessions', (req, res) => {
         const isChatActive = !!activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming);
         return {
           ...base,
-          lastActivity: activeChat?.lastActivity || null,
+          lastActivity: p.kind === 'chat' ? chatLastActivity(p.id, activeChat) : null,
           clients: activeChat ? activeChat.clients.size : 0,
           active: isChatActive,
         };
@@ -1905,6 +1905,7 @@ app.get('/api/directories/:id/sessions', (req, res) => {
         worktreePath: s.worktreePath || null,
         invalid: invalidSessions.get(s.id) || null,
         mergeState: gitWorktreeMergeState(d, s),
+        lastActivity: s.kind === 'chat' ? chatLastActivity(s.id, activeChat) : active?.lastActivity || null,
         active: s.kind === 'terminal' ? !!active : !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)),
         clients: s.kind === 'terminal' ? (active?.clients.size || 0) : (activeChat?.clients.size || 0),
       };
@@ -2227,8 +2228,12 @@ app.get('/api/sessions/:id', (req, res) => {
   const streaming = !!persisted?.streaming;
   const autoContinue = !!persisted?.autoContinue;
   const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
+  const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
+  const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
     res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
+  } else if (persisted?.kind === 'chat') {
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
   } else {
     res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
   }
@@ -4291,6 +4296,26 @@ function loadChatHistory(sessionName) {
   }
 }
 
+function latestAssistantMessageAt(sessionName) {
+  const history = loadChatHistory(sessionName);
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    if (!msg || msg.role !== 'assistant') continue;
+    const ts = Number(msg.ts);
+    if (Number.isFinite(ts) && ts > 0) return new Date(ts);
+  }
+  return null;
+}
+
+function chatLastActivity(sessionName, activeChat) {
+  const saved = latestAssistantMessageAt(sessionName);
+  const live = activeChat?.lastActivity ? new Date(activeChat.lastActivity) : null;
+  if (saved && live && Number.isFinite(live.getTime())) {
+    return saved.getTime() >= live.getTime() ? saved : live;
+  }
+  return saved || (live && Number.isFinite(live.getTime()) ? live : null);
+}
+
 function saveChatHistory(sessionName) {
   const history = chatHistories.get(sessionName);
   if (!history) return;
@@ -4309,6 +4334,12 @@ const MEMORY_DISTILL_BATCH = 10;
 function appendChatMessage(sessionName, msg) {
   const history = loadChatHistory(sessionName);
   history.push(msg);
+  if (msg && msg.role === 'assistant') {
+    const ts = Number(msg.ts);
+    const at = Number.isFinite(ts) && ts > 0 ? new Date(ts) : new Date();
+    const cs = chatSessions.get(sessionName);
+    if (cs) cs.lastActivity = at;
+  }
   const limit = sessionName === AUX_SESSION_ID ? AUX_HISTORY_MAX : MAX_CHAT_MESSAGES;
   const isAux = sessionName === AUX_SESSION_ID;
   while (history.length > limit) {
