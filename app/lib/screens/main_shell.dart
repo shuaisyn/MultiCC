@@ -995,6 +995,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
       widget.directory.id,
       const {},
     ); // drop stale entries
+    widget.mgr.reportRunning(widget.directory.id, const {});
     super.dispose();
   }
 
@@ -1026,6 +1027,14 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         .map((e) => e.key)
         .toSet();
     widget.mgr.reportWaiting(widget.directory.id, waiting);
+    // Likewise report sessions that are busy right now (running / thinking /
+    // editing) so the 「活跃会话」KPI counts only sessions actually executing.
+    const busy = {'running', 'thinking', 'editing'};
+    final running = _workspace.statuses.entries
+        .where((e) => busy.contains(e.value.status))
+        .map((e) => e.key)
+        .toSet();
+    widget.mgr.reportRunning(widget.directory.id, running);
     if (mounted) setState(() {});
   }
 
