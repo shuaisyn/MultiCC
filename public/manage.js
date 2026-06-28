@@ -327,6 +327,17 @@ function renderDashboard(directories, sessions) {
   const orphanHtml = orphans.length ? renderOrphans(orphans) : '';
   listEl.innerHTML = dirHtml + orphanHtml;
 
+  // 应用网格布局（仅在概览模式）
+  if (!_focusedSessionId) {
+    listEl.style.display = 'grid';
+    listEl.style.gridTemplateColumns = 'repeat(auto-fill, minmax(400px, 1fr))';
+    listEl.style.gap = '12px';
+  } else {
+    listEl.style.display = '';
+    listEl.style.gridTemplateColumns = '';
+    listEl.style.gap = '';
+  }
+
   // Keep a live workspace socket open for every directory so the compact card
   // previews (recent activity + latest task) stay live without expanding.
   for (const d of directories) connectWorkspace(d.id);
@@ -566,25 +577,84 @@ function dirSessionsOf(dirId) {
   return (_cachedSessions || []).filter(s => s.dirId === dirId && s.type !== 'aux');
 }
 
-// Compact preview shown on the overview card: the 2 most recent activity lines
-// plus a one-line blurb of the most recent task. Full detail lives in the modal.
+// Compact preview shown on the overview card: unified card with activity block,
+// recent session, and quick-open button. Full detail lives in the modal.
 function renderDirPreview(dirId, dirSessions) {
-  const events = (_workspaceEvents.get(dirId) || []).slice(-2).reverse();
-  const evHtml = events.length
-    ? events.map(e => `<div class="dp-event"><span class="t">${new Date(e.ts).toLocaleTimeString()}</span> ${escapeHtml(eventLabel(e))}</div>`).join('')
-    : '<div class="dp-event dim">暂无活动</div>';
-  // Most-recent task one-liner across this dir's sessions.
-  let best = null;
-  for (const s of (dirSessions || [])) {
-    const sm = _workspaceSummaries.get(s.id);
-    if (sm && sm.summary && (!best || (sm.ts || 0) > (best.ts || 0))) {
-      best = { summary: sm.summary, ts: sm.ts || 0, who: s.label || s.id };
-    }
+  // 获取最近活动（最多3条）
+  const events = (_workspaceEvents.get(dirId) || []).slice(-3).reverse();
+
+  // 获取最近的 session
+  let latestSession = null;
+  if (dirSessions && dirSessions.length > 0) {
+    // 按 lastActivity 或 createdAt 排序，取最近的一个
+    latestSession = dirSessions.sort((a, b) => {
+      const ta = a.lastActivity || a.createdAt || 0;
+      const tb = b.lastActivity || b.createdAt || 0;
+      return tb - ta;
+    })[0];
   }
-  const taskHtml = best
-    ? `<div class="dp-task" title="最近任务：${escapeHtml(best.summary)}">🗒 <span class="dp-task-who">${escapeHtml(best.who)}</span>${escapeHtml(best.summary)}</div>`
-    : '';
-  return `<div class="dp-list" id="dir-preview-${escapeHtml(dirId)}">${evHtml}${taskHtml}</div>`;
+
+  const sessionInfo = latestSession;
+  const sessionSummary = latestSession ? _workspaceSummaries.get(latestSession.id) : null;
+  const sessionActive = sessionInfo && sessionInfo.active;
+  const sessionLabel = sessionInfo ? (sessionInfo.label || sessionInfo.id) : null;
+  const sessionModel = sessionInfo && sessionInfo.model ? modelShortName(sessionInfo.model) : '';
+
+  // 活动块内容
+  let activityContent = '';
+  if (sessionActive) {
+    activityContent = `
+      <span class="dot active" style="width:8px;height:8px;"></span>
+      <span style="color:var(--accent);">正在运行</span>
+    `;
+  } else if (events.length > 0) {
+    const lastEvent = events[0];
+    activityContent = `
+      <span style="color:var(--muted);">上次 ${new Date(lastEvent.ts).toLocaleTimeString()}</span>
+      <span style="color:var(--faint);">· ${escapeHtml(eventLabel(lastEvent))}</span>
+    `;
+  } else {
+    activityContent = `<span style="color:var(--faint);">暂无活动</span>`;
+  }
+
+  // Session 块内容
+  let sessionContent = '';
+  if (sessionInfo) {
+    sessionContent = `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(0,0,0,0.15);border-radius:8px;">
+        <span class="dot ${sessionActive ? 'active' : ''}" style="width:8px;height:8px;"></span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(sessionLabel)}</div>
+          <div style="font-size:11px;color:var(--faint);display:flex;gap:6px;align-items:center;">
+            <span>${escapeHtml(formatRelative(sessionInfo.lastActivity || sessionInfo.createdAt))}</span>
+            ${sessionModel ? `<span>· ${escapeHtml(sessionModel)}</span>` : ''}
+          </div>
+          ${sessionSummary && sessionSummary.summary ? `<div style="font-size:11px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🗒 ${escapeHtml(sessionSummary.summary)}</div>` : ''}
+        </div>
+        <button class="btn btn-sm" onclick="event.stopPropagation(); event.preventDefault(); openSessionChat('${escapeHtml(sessionInfo.id)}')" title="快捷打开会话">
+          打开
+        </button>
+      </div>
+    `;
+  } else {
+    sessionContent = `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(0,0,0,0.15);border-radius:8px;">
+        <span style="font-size:12px;color:var(--faint);">暂无关联会话</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="dir-preview" id="dir-preview-${escapeHtml(dirId)}" style="padding:12px 17px 17px;display:flex;flex-direction:column;gap:10px;">
+      <!-- 活动块 -->
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;min-height:36px;">
+        <span style="font-size:12px;color:var(--faint);">活动</span>
+        ${activityContent}
+      </div>
+      <!-- 最近 session 块 -->
+      ${sessionContent}
+    </div>
+  `;
 }
 
 function updateDirPreview(dirId) {
@@ -639,13 +709,14 @@ function renderDirectoryBlock(dir, dirSessions) {
     </div>`;
   }
 
+  // Overview mode: unified card with min-height and grid layout
   return `
-    <div class="dir-block dir-card" data-dir-id="${escapeHtml(id)}" onclick="openDirectoryDetail('${escapeHtml(id)}')">
+    <div class="dir-block dir-card" data-dir-id="${escapeHtml(id)}" onclick="openDirectoryDetail('${escapeHtml(id)}')" style="display:flex;flex-direction:column;min-height:160px;">
       <div class="dir-header">
         ${headerMain}
         ${headerActions}
       </div>
-      <div class="dir-preview">${renderDirPreview(id, dirSessions)}</div>
+      ${renderDirPreview(id, dirSessions)}
     </div>`;
 }
 
@@ -1749,15 +1820,27 @@ function eventLabel(evt) {
 const _expandedEvents = new Set();
 
 function renderEventTimeline(dirId) {
-  const events = (_workspaceEvents.get(dirId) || []).slice(-12).reverse();
-  const n = events.length;
+  // 默认只显示最近3条，展开后显示全部（最多12条）
+  const allEvents = (_workspaceEvents.get(dirId) || []).slice(-12).reverse();
   const open = _expandedEvents.has(dirId);
+  const displayEvents = open ? allEvents : allEvents.slice(0, 3);
+  const n = displayEvents.length;
+  const total = allEvents.length;
+
   const rowsHtml = n
-    ? events.map(e => `<div class="wb-event-row"><span class="t">${new Date(e.ts).toLocaleTimeString()}</span> ${escapeHtml(eventLabel(e))}</div>`).join('')
+    ? displayEvents.map(e => `<div class="wb-event-row"><span class="t">${new Date(e.ts).toLocaleTimeString()}</span> ${escapeHtml(eventLabel(e))}</div>`).join('')
     : '<div class="wb-event-row dim">暂无活动</div>';
+
+  const expandBtnHtml = !open && total > 3
+    ? `<button class="btn btn-sm" style="margin-top:8px;font-size:11px;" onclick="event.stopPropagation(); toggleEventsCollapsed('${escapeHtml(dirId)}')">展开全部 (${total - 3} 条) ▾</button>`
+    : '';
+
   return `<div class="wb-events" id="wb-events-${escapeHtml(dirId)}">
-    <button class="events-bar" onclick="event.stopPropagation(); toggleEventsCollapsed('${escapeHtml(dirId)}')">🕔 最近活动${n ? ` (${n})` : ''} <span class="caret">${open ? '▴' : '▾'}</span></button>
-    <div class="wb-events-list"${open ? '' : ' style="display:none"'}>${rowsHtml}</div>
+    <div style="padding:8px 10px;background:rgba(0,0,0,0.2);border-radius:8px;margin-bottom:12px;">
+      <div style="font-size:12px;color:var(--faint);margin-bottom:6px;">活动</div>
+      <div class="wb-events-list" style="display:block;">${rowsHtml}</div>
+      ${expandBtnHtml}
+    </div>
   </div>`;
 }
 
