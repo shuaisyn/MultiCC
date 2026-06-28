@@ -148,6 +148,12 @@ class _AssistantBubble extends StatelessWidget {
               // Token usage line
               if (message.usage != null && !message.usage!.isEmpty)
                 _TokenUsageLine(usage: message.usage!),
+              // Timing line: reply timestamp + task duration
+              if (message.durationMs != null)
+                _TimingLine(
+                  timestamp: message.timestamp,
+                  durationMs: message.durationMs,
+                ),
             ],
           ),
         ),
@@ -216,6 +222,52 @@ class _UsageBadge extends StatelessWidget {
           fontFamily: 'monospace',
         ),
       ),
+    );
+  }
+}
+
+/// Timing line shown under assistant messages: reply clock time + task duration.
+/// Mirrors the web client's buildTimingLine().
+class _TimingLine extends StatelessWidget {
+  final DateTime? timestamp;
+  final int? durationMs;
+  const _TimingLine({this.timestamp, this.durationMs});
+
+  static String _fmtDuration(int ms) {
+    if (ms < 1000) return '${ms}ms';
+    final s = ms / 1000;
+    if (s < 60) return '${s.toStringAsFixed(1)}s';
+    final m = (s / 60).floor();
+    return '${m}m${(s % 60).round()}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = <Widget>[];
+
+    if (timestamp != null) {
+      final hh = timestamp!.hour.toString().padLeft(2, '0');
+      final mm = timestamp!.minute.toString().padLeft(2, '0');
+      final ss = timestamp!.second.toString().padLeft(2, '0');
+      parts.add(Text(
+        '🕐 $hh:$mm:$ss',
+        style: const TextStyle(color: Color(0xFF6e7681), fontSize: 11),
+      ));
+    }
+
+    if (durationMs != null && durationMs! >= 0) {
+      if (parts.isNotEmpty) parts.add(const SizedBox(width: 10));
+      parts.add(Text(
+        '⏱ ${_fmtDuration(durationMs!)}',
+        style: const TextStyle(color: Color(0xFF6e7681), fontSize: 11),
+      ));
+    }
+
+    if (parts.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(children: parts),
     );
   }
 }
