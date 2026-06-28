@@ -78,6 +78,10 @@ class ChatMessage {
   bool isStreaming;
   double? cost;
   MessageUsage? usage;
+  /// Wall-clock time from user submit to AI reply completion (ms).
+  /// Stamped by the server (cs.turnStartedAt → result) and persisted in
+  /// chat_history; shown under each assistant bubble as "任务耗时".
+  int? durationMs;
 
   ChatMessage({
     required this.role,
@@ -87,6 +91,7 @@ class ChatMessage {
     this.isStreaming = false,
     this.cost,
     this.usage,
+    this.durationMs,
   }) : toolCalls = toolCalls ?? [],
        timestamp = timestamp ?? DateTime.now();
 
@@ -98,7 +103,11 @@ class ChatMessage {
           ? DateTime.fromMillisecondsSinceEpoch((json['ts'] as num).toInt())
           : DateTime.now(),
       isStreaming = false,
-      cost = (json['cost'] as num?)?.toDouble();
+      cost = (json['cost'] as num?)?.toDouble(),
+      usage = json['usage'] is Map
+          ? MessageUsage.fromJson(json['usage'] as Map<String, dynamic>)
+          : null,
+      durationMs = (json['durationMs'] as num?)?.toInt();
 
   static List<ToolCall> _parseHistoryTools(dynamic tools) {
     if (tools is! List) return [];
