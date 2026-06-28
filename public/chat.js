@@ -1,5 +1,70 @@
 'use strict';
 
+// ── Realtime Voice Output (TTS) Integration ──────────────────────────────────
+// Provides streaming text-to-speech for AI responses
+let _voiceOutputEnabled = false;
+let _voiceOutputProvider = 'edge';
+let _voiceOutputInstance = null;
+let _ttsTextBuffer = '';
+let _ttsEnabled = localStorage.getItem('voiceOutputEnabled') === 'true';
+
+// Initialize voice output from settings
+async function initVoiceOutput() {
+  try {
+    const res = await fetch(withToken('/api/settings/voice'));
+    const config = await res.json();
+    if (config.tts) {
+      _voiceOutputProvider = config.tts.provider || 'edge';
+      _ttsEnabled = localStorage.getItem('voiceOutputEnabled') === 'true';
+    }
+  } catch (_) {}
+}
+
+// Speak text via TTS (streaming)
+async function speakText(text) {
+  if (!_ttsEnabled || !text || _voiceOutputInstance) return;
+
+  const wsUrl = `ws${location.protocol.slice(4)}//${location.host}/ws/tts`;
+
+  _voiceOutputInstance = new VoiceOutput({
+    wsUrl,
+    provider: _voiceOutputProvider,
+    onReady: () => console.log('[TTS] Ready'),
+    onPlaying: () => console.log('[TTS] Playing'),
+    onDone: () => {
+      _voiceOutputInstance = null;
+      _ttsTextBuffer = '';
+    },
+    onError: (msg) => {
+      console.error('[TTS] Error:', msg);
+      _voiceOutputInstance = null;
+    },
+  });
+
+  try {
+    await _voiceOutputInstance.speak(text);
+  } catch (_) {
+    _voiceOutputInstance = null;
+  }
+}
+
+// Stop TTS playback
+function stopTts() {
+  if (_voiceOutputInstance) {
+    _voiceOutputInstance.stop();
+    _voiceOutputInstance = null;
+  }
+}
+
+// Toggle voice output
+function toggleVoiceOutput() {
+  _ttsEnabled = !_ttsEnabled;
+  localStorage.setItem('voiceOutputEnabled', _ttsEnabled);
+  if (!_ttsEnabled) stopTts();
+  return _ttsEnabled;
+}
+// ── End Voice Output Integration ──────────────────────────────────────────────
+
 // Disable browser scroll restoration — we always want to scroll to latest message
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
@@ -582,6 +647,11 @@ function handleToolResult(msg) {
     }
   }
   scrollToBottom();
+
+  // Speak the assistant's response if TTS is enabled
+  if (textForTts && _ttsEnabled && !_voiceOutputInstance) {
+    speakText(textForTts.trim());
+  }
 }
 
 function findCurrentToolCardById(id) {
@@ -597,6 +667,10 @@ function finalizeAssistantMsg(message) {
   // Codex never emits a `message_start` stream event (which is what hides the
   // bubble for Claude), so without this the bubble lingers until `result`.
   hideThinking();
+
+  // Collect text for TTS
+  let textForTts = '';
+
   for (const block of message.content) {
     if (block.type === 'text' && block.text) {
       if (!currentMsgEl) currentMsgEl = createAssistantBubble();
@@ -605,6 +679,7 @@ function finalizeAssistantMsg(message) {
       } else if (!currentTextContent) {
         currentTextContent = block.text;
       }
+      textForTts += block.text;
       renderCurrentText();
       scrollToBottom();
     } else if (currentCli === 'codex' && block.type === 'tool_use' && block.id) {

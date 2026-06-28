@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>实时语音交互测试</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f1115;
+      color: #e7eaee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 { margin-bottom: 20px; color: #22ab9c; }
+    .container {
+      max-width: 800px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .panel {
+      background: #14171c;
+      border: 1px solid #20242b;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .panel h2 {
+      color: #8a909b;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+      background: #070809;
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #454b54;
+    }
+    .status-indicator.active { background: #22ab9c; }
+    .status-indicator.speaking { background: #6aa3ff; animation: pulse 1s infinite; }
+    .status-indicator.thinking { background: #d29922; animation: pulse 0.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .status-text { font-size: 13px; }
+    .volume-meter {
+      height: 8px;
+      background: #0f1115;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .volume-level {
+      height: 100%;
+      background: linear-gradient(90deg, #22ab9c, #d29922);
+      width: 0%;
+      transition: width 0.05s;
+    }
+    .text-display {
+      background: #070809;
+      border-radius: 6px;
+      padding: 12px;
+      min-height: 60px;
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .text-display.partial { color: #8a909b; }
+    .text-display.final { color: #e7eaee; }
+    .ai-response {
+      background: #1a1d21;
+      border-radius: 6px;
+      padding: 12px;
+      min-height: 60px;
+      font-size: 14px;
+      line-height: 1.5;
+      margin-bottom: 12px;
+      border-left: 3px solid #6aa3ff;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 20px;
+      border-radius: 6px;
+      border: none;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #22ab9c; color: white; }
+    .btn-primary:hover:not(:disabled) { background: #2ea043; }
+    .btn-secondary { background: #20242b; color: #8a909b; }
+    .btn-secondary:hover:not(:disabled) { background: #30363d; color: #e7eaee; }
+    .btn-danger { background: #ff6b63; color: white; }
+    .btn-danger:hover:not(:disabled) { background: #f85149; }
+    .logs {
+      font-size: 12px;
+      color: #8a909b;
+      max-height: 200px;
+      overflow-y: auto;
+      padding: 8px;
+      background: #070809;
+      border-radius: 4px;
+    }
+    .logs div { margin: 2px 0; }
+    .logs .error { color: #ff6b63; }
+    .logs .success { color: #22ab9c; }
+    .logs .info { color: #6aa3ff; }
+    .config-panel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .config-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .config-item label { font-size: 12px; color: #8a909b; }
+    .config-item select, .config-item input {
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid #20242b;
+      background: #070809;
+      color: #e7eaee;
+      font-size: 13px;
+    }
+    .tts-test input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #20242b;
+      background: #070809;
+      color: #e7eaee;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎤 实时语音交互测试</h1>
+  
+  <div class="container">
+    <!-- Configuration Panel -->
+    <div class="panel">
+      <h2>配置</h2>
+      <div class="config-panel">
+        <div class="config-item">
+          <label>ASR Provider</label>
+          <select id="asr-provider">
+            <option value="openai">OpenAI Realtime</option>
+            <option value="volcano">火山引擎</option>
+            <option value="funasr">FunASR (本地)</option>
+          </select>
+        </div>
+        <div class="config-item">
+          <label>TTS Provider</label>
+          <select id="tts-provider">
+            <option value="edge">Edge TTS (免费)</option>
+            <option value="openai">OpenAI TTS</option>
+            <option value="volcano">火山引擎</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Voice Session Panel -->
+    <div class="panel">
+      <h2>实时语音会话</h2>
+      <div class="status-bar">
+        <div class="status-indicator" id="status-indicator"></div>
+        <span class="status-text" id="status-text">等待开始</span>
+      </div>
+      <div class="volume-meter">
+        <div class="volume-level" id="volume-level"></div>
+      </div>
+      <div class="text-display partial" id="user-text">
+        用户说话时显示识别文本...
+      </div>
+      <div class="ai-response" id="ai-text">
+        AI 回复文本（带语音输出）...
+      </div>
+      <div class="controls">
+        <button class="btn-primary" id="start-btn">开始语音会话</button>
+        <button class="btn-danger" id="stop-btn" disabled>停止</button>
+      </div>
+    </div>
+
+    <!-- TTS Test Panel -->
+    <div class="panel tts-test">
+      <h2>TTS 单独测试</h2>
+      <input type="text" id="tts-text" placeholder="输入要朗读的文本..." value="你好，这是一个语音合成测试。">
+      <div class="controls">
+        <button class="btn-secondary" id="tts-btn">朗读</button>
+        <button class="btn-secondary" id="tts-stop-btn" disabled>停止</button>
+      </div>
+    </div>
+
+    <!-- Logs Panel -->
+    <div class="panel">
+      <h2>日志</h2>
+      <div class="logs" id="logs"></div>
+    </div>
+  </div>
+
+  <!-- Load voice modules -->
+  <script src="/voice-stream.js"></script>
+  <script src="/voice-output.js"></script>
+  <script src="/vad-monitor.js"></script>
+  <script src="/voice-session.js"></script>
+
+  <script>
+    const wsBaseUrl = `ws://${location.host}`;
+    const logsEl = document.getElementById('logs');
+    
+    function log(msg, type = 'info') {
+      const div = document.createElement('div');
+      div.className = type;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logsEl.appendChild(div);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    // Voice session state
+    let voiceSession = null;
+    let voiceOutput = null;
+
+    // UI elements
+    const statusIndicator = document.getElementById('status-indicator');
+    const statusText = document.getElementById('status-text');
+    const volumeLevel = document.getElementById('volume-level');
+    const userTextEl = document.getElementById('user-text');
+    const aiTextEl = document.getElementById('ai-text');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const ttsBtn = document.getElementById('tts-btn');
+    const ttsStopBtn = document.getElementById('tts-stop-btn');
+
+    function updateState(state) {
+      statusIndicator.className = 'status-indicator';
+      switch (state) {
+        case 'IDLE':
+          statusIndicator.className = 'status-indicator';
+          statusText.textContent = '等待开始';
+          break;
+        case 'LISTENING':
+          statusIndicator.classList.add('active');
+          statusText.textContent = '正在聆听...';
+          break;
+        case 'THINKING':
+          statusIndicator.classList.add('thinking');
+          statusText.textContent = '思考中...';
+          break;
+        case 'SPEAKING':
+          statusIndicator.classList.add('speaking');
+          statusText.textContent = '正在说话...';
+          break;
+      }
+    }
+
+    // Start voice session
+    startBtn.onclick = async () => {
+      const asrProvider = document.getElementById('asr-provider').value;
+      const ttsProvider = document.getElementById('tts-provider').value;
+
+      log('启动语音会话...', 'info');
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+
+      voiceSession = new VoiceSession({
+        wsUrl: wsBaseUrl,
+        asrProvider,
+        ttsProvider,
+        onStateChange: (state) => {
+          updateState(state);
+          log(`状态: ${state}`, 'info');
+        },
+        onText: (text, isFinal) => {
+          userTextEl.textContent = text;
+          userTextEl.className = isFinal ? 'text-display final' : 'text-display partial';
+        },
+        onVolume: (level) => {
+          volumeLevel.style.width = `${level * 100}%`;
+        },
+        onAiRequest: (text) => {
+          log(`发送到AI: ${text}`, 'info');
+          // Simulate AI response for testing
+          setTimeout(() => {
+            const response = `好的，我收到你的请求: "${text}"。有什么具体需要帮助的吗？`;
+            aiTextEl.textContent = response;
+            voiceSession.startAiResponse(response);
+            log(`AI回复: ${response}`, 'success');
+          }, 500);
+        },
+        onError: (msg) => {
+          log(msg, 'error');
+        },
+      });
+
+      try {
+        await voiceSession.start();
+        log('语音会话已启动', 'success');
+      } catch (err) {
+        log(`启动失败: ${err.message}`, 'error');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    };
+
+    // Stop voice session
+    stopBtn.onclick = () => {
+      if (voiceSession) {
+        voiceSession.stop();
+        voiceSession = null;
+        log('语音会话已停止', 'info');
+      }
+      updateState('IDLE');
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    };
+
+    // TTS test
+    ttsBtn.onclick = async () => {
+      const text = document.getElementById('tts-text').value;
+      const ttsProvider = document.getElementById('tts-provider').value;
+
+      if (!text.trim()) {
+        log('请输入文本', 'error');
+        return;
+      }
+
+      log(`TTS: ${text}`, 'info');
+      ttsBtn.disabled = true;
+      ttsStopBtn.disabled = false;
+
+      voiceOutput = new VoiceOutput({
+        wsUrl: `${wsBaseUrl}/ws/tts`,
+        provider: ttsProvider,
+        onReady: () => log('TTS ready', 'success'),
+        onPlaying: () => log('TTS playing', 'info'),
+        onDone: () => {
+          log('TTS done', 'success');
+          ttsBtn.disabled = false;
+          ttsStopBtn.disabled = true;
+        },
+        onError: (msg) => {
+          log(msg, 'error');
+          ttsBtn.disabled = false;
+          ttsStopBtn.disabled = true;
+        },
+      });
+
+      try {
+        await voiceOutput.speak(text);
+      } catch (err) {
+        log(`TTS失败: ${err.message}`, 'error');
+        ttsBtn.disabled = false;
+        ttsStopBtn.disabled = true;
+      }
+    };
+
+    ttsStopBtn.onclick = () => {
+      if (voiceOutput) {
+        voiceOutput.stop();
+        voiceOutput = null;
+        log('TTS已停止', 'info');
+      }
+      ttsBtn.disabled = false;
+      ttsStopBtn.disabled = true;
+    };
+
+    // Initial log
+    log('页面加载完成，点击"开始语音会话"按钮开始测试', 'info');
+  </script>
+</body>
+</html>
