@@ -382,6 +382,7 @@ function renderDashboard(directories, sessions) {
             ${renderTaskProgressScroller(sessions)}
           </div>
         </div>`;
+      layoutTaskScroller();
     }
   }
 
@@ -870,7 +871,10 @@ function updateDirPreviewForSession(sessionId) {
 // 刷新首页 AI Assistant 卡片右侧的全局任务进度滚动展示器
 function updateGlobalTaskScroller() {
   const el = document.getElementById('aux-task-scroller');
-  if (el) el.innerHTML = renderTaskProgressScroller(_cachedSessions || []);
+  if (el) {
+    el.innerHTML = renderTaskProgressScroller(_cachedSessions || []);
+    layoutTaskScroller();
+  }
 }
 
 // 任务进度滚动展示器 - 展示所有目录下正在进行中的任务状态
@@ -932,24 +936,55 @@ function renderTaskProgressScroller(sessions) {
     `;
   }).join('');
 
-  // 每条停留 15s：按当前条数生成对应的轮播关键帧，并设置动画总时长 = 条数 × 15s
+  // 视口高度跟随容器（与左侧 AI 卡片等高），渲染后由 layoutTaskScroller 按可用高度
+  // 计算「同时可见几行」，行数装不下时再逐行无缝轮播。
   const count = activeTasks.length;
-  ensureTaskScrollerKeyframes(count);
-  const animStyle = count > 1
-    ? `animation:taskScroll ${count * 15}s ease-in-out infinite;`
-    : 'animation:none;';
-
-  // 滚动容器：56px 高的视口在面板中垂直居中，CSS 动画逐条轮播
   return `
-    <div style="height:100%;min-height:56px;display:flex;align-items:center;overflow:hidden;background:rgba(0,0,0,0.15);border-radius:var(--radius);border:1px solid var(--line);">
-      <div style="width:100%;height:56px;overflow:hidden;">
-        <div class="task-scroller-inner" data-count="${count}" style="height:${count * 56}px;${animStyle}">
+    <div style="height:100%;min-height:56px;overflow:hidden;background:rgba(0,0,0,0.15);border-radius:var(--radius);border:1px solid var(--line);">
+      <div id="task-scroller-viewport" style="width:100%;height:100%;overflow:hidden;">
+        <div class="task-scroller-inner" data-count="${count}">
           ${cards}
         </div>
       </div>
     </div>
   `;
 }
+
+// 按视口实际高度布局任务滚动器：算出能同时显示几行；装得下就全显示、不轮播，
+// 装不下就在尾部接上「头部 N 行」的副本，用 CSS 动画逐行无缝向上滚。
+const TASK_ROW_H = 56;
+const TASK_DWELL_SEC = 6; // 轮播时每行停留秒数
+function layoutTaskScroller() {
+  const vp = document.getElementById('task-scroller-viewport');
+  if (!vp) return;
+  const inner = vp.querySelector('.task-scroller-inner');
+  if (!inner) return;
+  const count = parseInt(inner.dataset.count || '0', 10);
+  if (count <= 0) return;
+  const h = vp.clientHeight || TASK_ROW_H;
+  const rows = Math.max(1, Math.floor(h / TASK_ROW_H));
+
+  inner.style.animation = 'none';
+  // 先清掉上一轮可能追加过的副本，只留原始 count 行
+  while (inner.children.length > count) inner.removeChild(inner.lastChild);
+
+  if (count <= rows) {
+    // 全部能同时显示，无需轮播
+    inner.dataset.looped = '';
+    return;
+  }
+
+  // 装不下：尾部追加头部 rows 行做无缝衔接
+  const clones = [];
+  for (let i = 0; i < rows; i++) clones.push(inner.children[i].outerHTML);
+  inner.insertAdjacentHTML('beforeend', clones.join(''));
+  inner.dataset.looped = String(rows);
+  ensureTaskScrollerKeyframes(count, TASK_ROW_H);
+  void inner.offsetHeight; // 强制 reflow，确保动画从头播放
+  inner.style.animation = `taskScroll ${count * TASK_DWELL_SEC}s linear infinite`;
+}
+// 窗口尺寸变化时按新高度重排可见行数
+window.addEventListener('resize', () => layoutTaskScroller());
 
 // 当天判断
 function isToday(ts) {
@@ -958,30 +993,31 @@ function isToday(ts) {
   return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
 }
 
-// 按当前任务条数生成轮播关键帧（每条停留约 15s，末尾快速滑到下一条）
+// 按当前任务条数生成轮播关键帧：逐行向上滚，每行停留一段后快速滑到下一行；
+// 末尾滚到 -count*rowH（此处显示的是尾部副本=头部几行），与起点画面一致，循环无缝。
 // 只有一个全局滚动器，因此直接覆盖同名 @keyframes 即可
-function ensureTaskScrollerKeyframes(count) {
+function ensureTaskScrollerKeyframes(count, rowH) {
   if (count < 2) return;
+  rowH = rowH || 56;
   let styleEl = document.getElementById('task-scroller-kf');
   if (!styleEl) {
     styleEl = document.createElement('style');
     styleEl.id = 'task-scroller-kf';
     document.head.appendChild(styleEl);
   }
-  if (styleEl.dataset.count === String(count)) return; // 条数没变就不重建
+  const sig = `${count}x${rowH}`;
+  if (styleEl.dataset.sig === sig) return; // 签名没变就不重建
   const step = 100 / count;
   let frames = '';
   for (let i = 0; i < count; i++) {
     const winStart = i * step;
-    const slideStart = winStart + step * 0.88; // 每条窗口末尾 12% 用来滑动
+    const slideStart = winStart + step * 0.82; // 每行窗口末尾 18% 用来滑动
     const winEnd = (i + 1) * step;
-    const y = -(i * 56);
-    const yNext = (i === count - 1) ? 0 : -((i + 1) * 56);
-    frames += `${winStart.toFixed(2)}%,${slideStart.toFixed(2)}%{transform:translateY(${y}px)}`;
-    frames += `${winEnd.toFixed(2)}%{transform:translateY(${yNext}px)}`;
+    frames += `${winStart.toFixed(2)}%,${slideStart.toFixed(2)}%{transform:translateY(${-(i * rowH)}px)}`;
+    frames += `${winEnd.toFixed(2)}%{transform:translateY(${-((i + 1) * rowH)}px)}`;
   }
   styleEl.textContent = `@keyframes taskScroll{${frames}}`;
-  styleEl.dataset.count = String(count);
+  styleEl.dataset.sig = sig;
 }
 
 function defaultActivityText(status) {
