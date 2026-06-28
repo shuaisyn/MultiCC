@@ -2034,51 +2034,56 @@ class _HomeTaskScroller extends StatefulWidget {
   State<_HomeTaskScroller> createState() => _HomeTaskScrollerState();
 }
 
-class _HomeTaskScrollerState extends State<_HomeTaskScroller>
-    with SingleTickerProviderStateMixin {
-  late final PageController _pageController;
-  late final AnimationController _animController;
-  int _currentPage = 0;
-  int _itemCount = 0;
+class _HomeTaskScrollerState extends State<_HomeTaskScroller> {
+  static const double _rowH = 46; // 每行高度
+  static const int _maxVisible = 3; // 同时最多显示几行
+  static const Duration _dwell = Duration(seconds: 5); // 轮播时每行停留时长
 
-  @override
-  void initState() {
-    super.initState();
-    _pageController = PageController();
-    _animController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 15), // 每条停留 15s
-    );
-    _startAutoScroll();
-  }
+  final ScrollController _scrollController = ScrollController();
+  Timer? _timer;
+  int _count = 0; // 当天任务总条数
+  int _visible = 1; // 当前同时可见的行数
+  int _pos = 0; // 轮播已滚动的行偏移
 
   @override
   void dispose() {
-    _animController.dispose();
-    _pageController.dispose();
+    _timer?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _startAutoScroll() {
-    _animController.addStatusListener(_onAnimStatus);
-    _animController.forward();
-  }
-
-  void _onAnimStatus(AnimationStatus status) {
-    if (status == AnimationStatus.completed) {
-      _nextPage();
-      _animController.forward(from: 0);
+  // 行数装得下就停掉轮播；装不下才按 _dwell 逐行滚动
+  void _syncTimer() {
+    if (!mounted) return;
+    if (_count > _visible) {
+      _timer ??= Timer.periodic(_dwell, (_) => _tick());
+    } else {
+      _timer?.cancel();
+      _timer = null;
+      _pos = 0;
+      if (_scrollController.hasClients && _scrollController.offset != 0) {
+        _scrollController.jumpTo(0);
+      }
     }
   }
 
-  void _nextPage() {
-    if (_itemCount <= 1 || !mounted) return;
-    _currentPage = (_currentPage + 1) % _itemCount;
-    _pageController.animateToPage(
-      _currentPage,
-      duration: const Duration(milliseconds: 600),
+  void _tick() {
+    if (!mounted || !_scrollController.hasClients || _count <= _visible) return;
+    _pos += 1;
+    _scrollController
+        .animateTo(
+      _pos * _rowH,
+      duration: const Duration(milliseconds: 500),
       curve: Curves.easeInOut,
-    );
+    )
+        .then((_) {
+      // 滚到末尾（尾部副本=头部几行）后无缝跳回起点
+      if (!mounted || !_scrollController.hasClients) return;
+      if (_pos >= _count) {
+        _pos = 0;
+        _scrollController.jumpTo(0);
+      }
+    });
   }
 
   bool _isToday(DateTime? ts) {
@@ -2109,11 +2114,22 @@ class _HomeTaskScrollerState extends State<_HomeTaskScroller>
       return tb.compareTo(ta);
     });
 
-    _itemCount = tasks.isEmpty ? 1 : tasks.length;
+    _count = tasks.length;
+    _visible = _count == 0
+        ? 1
+        : (_count < _maxVisible ? _count : _maxVisible);
+    if (_pos >= _count) _pos = 0;
+
+    // 装不下时尾部接上「头部 _visible 行」的副本，配合 jumpTo 实现无缝轮播
+    final bool scrolling = _count > _visible;
+    final int itemCount =
+        tasks.isEmpty ? 0 : tasks.length + (scrolling ? _visible : 0);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncTimer());
 
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 10, 12, 2),
-      height: 46,
+      height: _visible * _rowH,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(9),
         child: Container(
@@ -2132,12 +2148,13 @@ class _HomeTaskScrollerState extends State<_HomeTaskScroller>
                     ),
                   ),
                 )
-              : PageView.builder(
-                  controller: _pageController,
-                  itemCount: tasks.length,
-                  onPageChanged: (i) => _currentPage = i,
+              : ListView.builder(
+                  controller: _scrollController,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemExtent: _rowH,
+                  itemCount: itemCount,
                   itemBuilder: (context, i) {
-                    final task = tasks[i];
+                    final task = tasks[i % tasks.length];
                     return _TaskProgressCard(
                       task: task,
                       onTap: () => widget.onSessionTap?.call(task.session),
