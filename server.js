@@ -6323,10 +6323,14 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     console.log(`  Manage sessions at http://localhost:${PORT}/manage\n`);
     console.log(`  Use Tailscale / ngrok for HTTPS access from external devices.\n`);
     seedTokenUsageFromHistory();
-    installBundledSkills();                         // bundled multicc skills → both Claude & Codex
-    syncSharedSkills();                             // ~/.agents/skills symlinks → both Claude & Codex
+    installBundledSkills();                         // bundled multicc skills → all providers
+    skillConv.importAllProviderSkills();            // reverse-import: Codex/Hermes → agents
+    syncSharedSkills();                             // forward sync: agents → all providers
     watchSharedSkills();                            // real-time chokidar watch on ~/.agents/skills
-    setInterval(syncSharedSkills, 5 * 60 * 1000).unref();  // periodic fallback every 5 min
+    setInterval(() => {
+      skillConv.importAllProviderSkills();          // periodic reverse import
+      syncSharedSkills();                           // periodic forward sync
+    }, 5 * 60 * 1000).unref();
     reconcileAllTriggers();
     artifacts.cleanup();
     setInterval(() => artifacts.cleanup(), 6 * 3600 * 1000).unref();
