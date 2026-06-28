@@ -52,6 +52,24 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  // ── Global "running / active" aggregation ─────────────────────────────────
+  // Same pattern as _waitingByDir, but for sessions that are actively
+  // executing (running / thinking / editing) — drives the 「活跃会话」KPI.
+  final Map<String, Set<String>> _runningByDir = {};
+  Set<String> get runningSessionIds =>
+      _runningByDir.values.expand((s) => s).toSet();
+
+  void reportRunning(String dirId, Set<String> ids) {
+    final prev = _runningByDir[dirId] ?? const <String>{};
+    if (prev.length == ids.length && prev.containsAll(ids)) return;
+    if (ids.isEmpty) {
+      _runningByDir.remove(dirId);
+    } else {
+      _runningByDir[dirId] = ids;
+    }
+    notifyListeners();
+  }
+
   /// Sessions currently active (running), excluding the aux helper session.
   List<Session> get activeSessions =>
       _sessions.where((s) => s.active && !s.isAux).toList();
