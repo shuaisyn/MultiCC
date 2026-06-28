@@ -39,6 +39,7 @@ const telegramBridge = require('./telegram-bridge');
 const discordBridge = require('./discord-bridge');
 const slackBridge = require('./slack-bridge');
 const voiceAsr = require('./voice-asr');
+const ttsService = require('./src/tts-service');
 const cronTasks = require('./cron-tasks');
 const webpush = require('web-push');
 const macosPower = require('./macos-power');
@@ -2870,6 +2871,17 @@ app.get('/api/settings/voice', (req, res) => {
       funasrUrl: env.FUNASR_WS_URL || process.env.FUNASR_WS_URL || '',
       funasrMode: env.FUNASR_MODE || process.env.FUNASR_MODE || '2pass',
     },
+    // ── Streaming TTS (real-time audio output) ──
+    tts: {
+      provider: env.TTS_PROVIDER || process.env.TTS_PROVIDER || 'edge',
+      status: ttsService.providerStatus(),
+      edgeVoice: env.EDGE_TTS_VOICE || process.env.EDGE_TTS_VOICE || 'zh-CN-XiaoxiaoNeural',
+      openaiVoice: env.OPENAI_TTS_VOICE || process.env.OPENAI_TTS_VOICE || 'alloy',
+      hasOpenaiKey: !!(env.OPENAI_TTS_API_KEY || process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
+      volcanoVoice: env.VOLC_TTS_VOICE || process.env.VOLC_TTS_VOICE || 'zh_female_shuangkuaisisi_moon_bigtts',
+      hasVolcanoAppId: !!(env.VOLC_TTS_APP_ID || process.env.VOLC_TTS_APP_ID),
+      hasVolcanoToken: !!(env.VOLC_TTS_ACCESS_TOKEN || process.env.VOLC_TTS_ACCESS_TOKEN),
+    },
   });
 });
 
@@ -2897,8 +2909,22 @@ app.post('/api/settings/voice', (req, res) => {
   setAsr('VOLC_ASR_URL', asr.volcUrl);
   setAsr('FUNASR_WS_URL', asr.funasrUrl);
   setAsr('FUNASR_MODE', asr.funasrMode);
+  // ── Streaming TTS config (skip masked **** values) ──
+  const tts = req.body.tts || {};
+  const setTts = (k, v) => { if (v !== undefined && !(typeof v === 'string' && v.includes('****'))) updates[k] = v; };
+  setTts('TTS_PROVIDER', tts.provider);
+  setTts('EDGE_TTS_VOICE', tts.edgeVoice);
+  setTts('OPENAI_TTS_API_KEY', tts.openaiApiKey);
+  setTts('OPENAI_TTS_URL', tts.openaiUrl);
+  setTts('OPENAI_TTS_MODEL', tts.openaiModel);
+  setTts('OPENAI_TTS_VOICE', tts.openaiVoice);
+  setTts('VOLC_TTS_APP_ID', tts.volcanoAppId);
+  setTts('VOLC_TTS_ACCESS_TOKEN', tts.volcanoToken);
+  setTts('VOLC_TTS_URL', tts.volcanoUrl);
+  setTts('VOLC_TTS_VOICE', tts.volcanoVoice);
   writeEnvFile(updates);
   voiceAsr.applyConfig(updates);
+  ttsService.applyConfig(updates);
   // Update in-memory env + module-level constants
   for (const [k, v] of Object.entries(updates)) process.env[k] = v;
   // Hot-reload the voice module's in-memory config (was: reassigning module-level lets).
@@ -5575,6 +5601,11 @@ wss.on('connection', (ws, req) => {
   // Route to streaming voice (ASR) proxy
   if (urlObj.pathname === '/ws/voice') {
     return voiceAsr.handleVoiceWs(ws, req, urlObj);
+  }
+
+  // Route to streaming TTS proxy
+  if (urlObj.pathname === '/ws/tts') {
+    return ttsService.handleTtsWs(ws, req);
   }
 
   // Route to the per-directory workspace status board
