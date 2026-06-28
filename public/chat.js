@@ -526,7 +526,10 @@ function handleEvent(msg) {
       // aux-AI debounces the pause and sends a `notify` verdict — that's the
       // single judge (see 'notify' case).
       if (msg.total_cost_usd) {
-        _costText = `$${msg.total_cost_usd.toFixed(4)} | ${msg.duration_ms}ms | ${msg.num_turns} turn(s)`;
+        const durStr = Number.isFinite(msg.durationMs) ? fmtDuration(msg.durationMs) : (msg.duration_ms ? msg.duration_ms + 'ms' : '');
+        _costText = `$${msg.total_cost_usd.toFixed(4)}`;
+        if (durStr) _costText += ` | ${durStr}`;
+        if (msg.num_turns) _costText += ` | ${msg.num_turns} turn(s)`;
       }
       // Accumulate per-session token totals.
       if (msg.usage) {

@@ -4869,6 +4869,12 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
       cs.chatTurnCount++;
       cs._resultSaved = true;
     }
+    // Include durationMs + num_turns in the result broadcast so clients
+    // (web + app) can display per-message task timing without client-side
+    // clock guesswork. durationMs is the wall-clock time from turnStartedAt
+    // (user submit) to this result — "模型接到消息到输出完成的耗时".
+    const _resultDurationMs = cs.turnStartedAt ? Date.now() - cs.turnStartedAt : undefined;
+    forward({ type: 'result', total_cost_usd: evt.total_cost_usd, usage, durationMs: _resultDurationMs, num_turns: cs.chatTurnCount });
     setSessionStatus(sessionName, { status: 'idle', currentFile: null });
     scheduleIntentClassify(cs, sessionName);
     // Anti-pattern guard (E): if this turn launched a run_in_background Bash and
@@ -5198,7 +5204,7 @@ function runChatTurn(sessionName, text, opts = {}) {
             cs.chatTurnCount++;
             cs._resultSaved = true;
           }
-          forward({ type: 'result', total_cost_usd: null, usage });
+          forward({ type: 'result', total_cost_usd: null, usage, durationMs: cs.turnStartedAt ? Date.now() - cs.turnStartedAt : undefined, num_turns: cs.chatTurnCount });
           setSessionStatus(sessionName, { status: 'idle', currentFile: null });
           scheduleIntentClassify(cs, sessionName);
           return;

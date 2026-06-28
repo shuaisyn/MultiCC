@@ -270,21 +270,29 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void _onResult(Map<String, dynamic> msg) {
-    // Attach token usage to the current assistant message BEFORE finishing streaming
-    // (because _finishStreaming() sets _currentMsg to null)
-    if (msg['usage'] != null && _currentMsg != null) {
-      _currentMsg!.usage = MessageUsage.fromJson(msg['usage'] as Map<String, dynamic>);
+    // Attach token usage + durationMs to the current assistant message BEFORE
+    // finishing streaming (because _finishStreaming() sets _currentMsg to null)
+    if (_currentMsg != null) {
+      if (msg['usage'] != null) {
+        _currentMsg!.usage = MessageUsage.fromJson(msg['usage'] as Map<String, dynamic>);
+      }
+      // Server-stamped wall-clock duration: user submit → AI reply complete.
+      final dur = (msg['durationMs'] as num?)?.toInt();
+      if (dur != null) _currentMsg!.durationMs = dur;
     }
 
     _finishStreaming();
 
     final cost = (msg['total_cost_usd'] as num?)?.toDouble();
-    final ms = (msg['duration_ms'] as num?)?.toInt();
+    final ms = (msg['durationMs'] as num?)?.toInt();
     final turns = (msg['num_turns'] as num?)?.toInt();
 
     if (cost != null) {
       _costText = '\$${cost.toStringAsFixed(4)}';
-      if (ms != null) _costText += ' · ${ms}ms';
+      if (ms != null) _costText += ' · ${_fmtDuration(ms)}';
+      if (turns != null) _costText += ' · $turns turn(s)';
+    } else if (ms != null) {
+      _costText = _fmtDuration(ms);
       if (turns != null) _costText += ' · $turns turn(s)';
     }
 
@@ -364,6 +372,15 @@ class ChatProvider extends ChangeNotifier {
   void _addSystemMsg(String text) {
     _messages.add(ChatMessage(role: MessageRole.system, content: text));
     notifyListeners();
+  }
+
+  /// Human-friendly duration: 820ms / 6.2s / 1m3s
+  static String _fmtDuration(int ms) {
+    if (ms < 1000) return '${ms}ms';
+    final s = ms / 1000;
+    if (s < 60) return '${s.toStringAsFixed(1)}s';
+    final m = (s / 60).floor();
+    return '${m}m${(s % 60).round()}s';
   }
 
   // ── Public actions ─────────────────────────────────────────────────────────
