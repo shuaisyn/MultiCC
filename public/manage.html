@@ -1213,6 +1213,32 @@
     </div>
   </div>
 
+  <!-- AI Assistant model settings modal -->
+  <div id="aux-modal" class="modal-backdrop" style="z-index:10003;" onclick="if(event.target===this)closeAuxModal()">
+    <div class="modal-card" style="padding:20px;width:min(94vw,460px);">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+        <div style="flex:1;min-width:0;">
+          <div style="color:var(--text);font-size:15px;font-weight:650;">AI Assistant 模型</div>
+          <div style="color:var(--muted);font-size:11px;margin-top:3px;">用于等待/完成判断、语音整理、任务摘要等辅助任务。</div>
+        </div>
+        <button class="btn btn-sm" onclick="closeAuxModal()">关闭</button>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;">
+        <label style="padding-top:8px;">Provider</label>
+        <select id="aux-provider" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;"></select>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;">
+        <label style="padding-top:8px;">Model</label>
+        <input id="aux-model" type="text" placeholder="留空默认 haiku" autocomplete="off" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;font-family:var(--mono);padding:8px 10px;outline:none;" />
+      </div>
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:16px;">
+        <span class="status-text" id="aux-modal-status" style="margin-right:auto;"></span>
+        <button class="btn" onclick="closeAuxModal()">取消</button>
+        <button class="btn btn-green" onclick="saveAuxConfig()">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Session view modal (large centered modal for viewing terminal/chat) -->
   <div id="session-modal" class="modal-backdrop" style="z-index:10002;" onclick="if(event.target===this)closeSessionModal()">
     <div class="modal-card" style="width:min(96vw,1200px);height:min(92vh,900px);display:flex;flex-direction:column;background:var(--bg);">

@@ -959,7 +959,7 @@ function renderTaskProgressScroller(sessions) {
     return `
       <div class="task-progress-card" data-session-id="${escapeHtml(task.sessionId)}"
            style="height:56px;display:flex;align-items:center;gap:12px;padding:0 16px;cursor:pointer;"
-           onclick="event.stopPropagation(); openSessionChat('${escapeHtml(task.sessionId)}')">
+           onclick="event.stopPropagation(); openSessionInline('${escapeHtml(task.sessionId)}')">
         <!-- 状态指示灯 -->
         <span style="width:8px;height:8px;border-radius:50%;background:${statusColor};box-shadow:0 0 6px ${statusColor};flex-shrink:0;"></span>
         <!-- 会话标签（+所属目录） -->
