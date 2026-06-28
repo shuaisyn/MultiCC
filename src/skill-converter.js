@@ -318,6 +318,244 @@ function conversionStatus(skillName) {
   return status;
 }
 
+// ── Reverse conversion: provider → canonical ──────────────────────────
+//
+// When a skill appears in a provider dir but NOT in ~/.agents/skills/,
+// reverse-convert it to canonical format and import it. After import,
+// the existing forward sync propagates it to all other providers.
+
+function codexToCanonical(sourceDir) {
+  const sourceFile = path.join(sourceDir, 'SKILL.md');
+  if (!fs.existsSync(sourceFile)) return null;
+  // Codex format is a subset of canonical — just pass through
+  const text = fs.readFileSync(sourceFile, 'utf8');
+  const { fm, body } = parseFrontmatter(text);
+  if (!fm.name) return null;
+
+  // If there's an agents/openai.yaml, extract extra info
+  const yamlFile = path.join(sourceDir, 'agents', 'openai.yaml');
+  let displayName = null;
+  if (fs.existsSync(yamlFile)) {
+    try {
+      const yaml = fs.readFileSync(yamlFile, 'utf8');
+      const dm = yaml.match(/^display_name:\s*"?(.+?)"?\s*$/m);
+      if (dm) displayName = dm[1];
+    } catch (_) {}
+  }
+
+  return { name: fm.name, description: fm.description || '', body, displayName };
+}
+
+function hermesSKillToCanonical(sourceDir) {
+  // Hermes standalone skill: has SKILL.md with hermey frontmatter
+  const sourceFile = path.join(sourceDir, 'SKILL.md');
+  if (!fs.existsSync(sourceFile)) return null;
+
+  const text = fs.readFileSync(sourceFile, 'utf8');
+  const { fm, body } = parseFrontmatter(text);
+
+  // Build canonical frontmatter — keep name + description, drop hermes-specific
+  const canonicalFm = {};
+  canonicalFm.name = fm.name || path.basename(sourceDir);
+  canonicalFm.description = fm.description || '';
+
+  const canonicalText = serializeFrontmatter(canonicalFm) + '\n\n' + body;
+  return {
+    name: canonicalFm.name,
+    description: canonicalFm.description,
+    body,
+    canonicalText,
+  };
+}
+
+function hermesCategorySubSkills(categoryDir) {
+  // Hermes category: DESCRIPTION.md at top level, sub-dirs with SKILL.md
+  const descFile = path.join(categoryDir, 'DESCRIPTION.md');
+  const categoryName = path.basename(categoryDir);
+  let categoryDesc = '';
+  if (fs.existsSync(descFile)) {
+    try {
+      const descText = fs.readFileSync(descFile, 'utf8');
+      const { fm } = parseFrontmatter(descText);
+      categoryDesc = fm.description || '';
+    } catch (_) {}
+  }
+
+  const subSkills = [];
+  let entries;
+  try { entries = fs.readdirSync(categoryDir, { withFileTypes: true }); } catch (_) { return subSkills; }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith('.')) continue;
+    const subDir = path.join(categoryDir, entry.name);
+    const subFile = path.join(subDir, 'SKILL.md');
+    if (!fs.existsSync(subFile)) continue;
+
+    try {
+      const text = fs.readFileSync(subFile, 'utf8');
+      const { fm, body } = parseFrontmatter(text);
+
+      const shortName = fm.name || entry.name;
+
+      // Dedup: if a skill with this short name already exists in agents, skip
+      if (fs.existsSync(path.join(AGENTS_ROOT, shortName, 'SKILL.md'))) continue;
+
+      // Build prefixed name to avoid conflicts: <category>-<subskill>
+      const canonicalName = categoryName + '-' + shortName;
+      const canonicalFm = {
+        name: canonicalName,
+        description: fm.description || `${categoryDesc} — ${shortName}`,
+      };
+
+      const canonicalText = serializeFrontmatter(canonicalFm) + '\n\n' + body;
+      subSkills.push({
+        name: canonicalName,
+        description: canonicalFm.description,
+        body,
+        canonicalText,
+        originCategory: categoryName,
+      });
+    } catch (_) {}
+  }
+
+  return subSkills;
+}
+
+// Import a skill from a provider into the canonical ~/.agents/skills/ store.
+// Returns { imported, name } or null if already exists / can't convert.
+function importFromProvider(providerName, skillName, sourceDir) {
+  const destDir = path.join(AGENTS_ROOT, skillName);
+
+  // Already in canonical store? Skip (unless forced)
+  if (fs.existsSync(path.join(destDir, 'SKILL.md'))) return null;
+
+  let result = null;
+
+  switch (providerName) {
+    case 'codex': {
+      const r = codexToCanonical(sourceDir);
+      if (r && r.name) {
+        const fm = { name: r.name, description: r.description };
+        result = { name: r.name, canonicalText: serializeFrontmatter(fm) + '\n\n' + r.body };
+      }
+      break;
+    }
+    case 'hermes': {
+      const r = hermesSKillToCanonical(sourceDir);
+      if (r && r.name) {
+        result = { name: r.name, canonicalText: r.canonicalText };
+      }
+      break;
+    }
+    case 'claude': {
+      const srcFile = path.join(sourceDir, 'SKILL.md');
+      if (fs.existsSync(srcFile)) {
+        const text = fs.readFileSync(srcFile, 'utf8');
+        const { fm, body } = parseFrontmatter(text);
+        result = { name: fm.name || skillName, canonicalText: text };
+      }
+      break;
+    }
+  }
+
+  if (!result || !result.name || !result.canonicalText) return null;
+
+  // Write canonical skill
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.writeFileSync(path.join(destDir, 'SKILL.md'), result.canonicalText, 'utf8');
+  // Tag origin so we know where it came from
+  fs.writeFileSync(path.join(destDir, '.imported-from'), providerName, 'utf8');
+  return { imported: true, name: result.name };
+}
+
+// Scan a provider for skills not in the canonical store.
+// For Hermes categories, expand sub-skills into individual import candidates.
+function discoverProviderSkills(providerName) {
+  const prov = PROVIDERS[providerName];
+  if (!prov) return [];
+
+  // Skills handled by installBundledSkills — don't reverse-import these
+  const BUNDLED_NAMES = new Set(['multicc-trigger', 'multicc-artifact']);
+
+  const candidates = [];
+  let entries;
+  try { entries = fs.readdirSync(prov.dir, { withFileTypes: true }); } catch (_) { return []; }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith('.')) continue;
+    if (BUNDLED_NAMES.has(entry.name)) continue;
+
+    // Already in canonical store?
+    const canonicalDir = path.join(AGENTS_ROOT, entry.name);
+    if (fs.existsSync(path.join(canonicalDir, 'SKILL.md'))) continue;
+
+    const sourceDir = path.join(prov.dir, entry.name);
+
+    // Hermes category detection: has DESCRIPTION.md but no SKILL.md at top
+    if (providerName === 'hermes') {
+      if (!fs.existsSync(path.join(sourceDir, 'SKILL.md')) &&
+          fs.existsSync(path.join(sourceDir, 'DESCRIPTION.md'))) {
+        // It's a category — expand sub-skills
+        const subs = hermesCategorySubSkills(sourceDir);
+        for (const sub of subs) {
+          // Skip if canonical already has it
+          if (fs.existsSync(path.join(AGENTS_ROOT, sub.name, 'SKILL.md'))) continue;
+          candidates.push({
+            providerName,
+            skillName: sub.name,
+            sourceDir,
+            isHermesSub: true,
+            categoryName: entry.name,
+            canonicalText: sub.canonicalText,
+            canonicalName: sub.name,
+          });
+        }
+        continue;
+      }
+    }
+
+    // Skip standalone skills without SKILL.md (empty shells)
+    if (providerName === 'hermes') {
+      if (!fs.existsSync(path.join(sourceDir, 'SKILL.md'))) continue;
+    }
+
+    candidates.push({ providerName, skillName: entry.name, sourceDir });
+  }
+
+  return candidates;
+}
+
+// Full reverse import: discover + convert all provider-only skills.
+// Called before forward sync to ensure canonical store is complete.
+function importAllProviderSkills() {
+  const results = [];
+  // Don't import from Claude — Claude IS canonical format, and Claude-only
+  // skills are user-installed and may not be intended for sharing.
+  for (const provName of ['codex', 'hermes']) {
+    const candidates = discoverProviderSkills(provName);
+    for (const cand of candidates) {
+      if (cand.canonicalText) {
+        // Pre-converted (Hermes sub-skill expansion)
+        const destDir = path.join(AGENTS_ROOT, cand.canonicalName);
+        fs.mkdirSync(destDir, { recursive: true });
+        fs.writeFileSync(path.join(destDir, 'SKILL.md'), cand.canonicalText, 'utf8');
+        fs.writeFileSync(path.join(destDir, '.imported-from'), provName, 'utf8');
+        results.push({ name: cand.canonicalName, provider: provName });
+      } else {
+        const result = importFromProvider(provName, cand.skillName, cand.sourceDir);
+        if (result) results.push({ name: result.name, provider: provName });
+      }
+    }
+  }
+  if (results.length > 0) {
+    console.log(`[multicc/skills] reverse-imported ${results.length} skill(s):`,
+      results.map(r => `${r.name}←${r.provider}`).join(', '));
+  }
+  return results;
+}
+
 module.exports = {
   PROVIDERS,
   AGENTS_ROOT,
@@ -337,4 +575,11 @@ module.exports = {
   onAiConvertNeeded,
   requestAiConvert,
   conversionStatus,
+  // Reverse conversion
+  codexToCanonical,
+  hermesSKillToCanonical,
+  hermesCategorySubSkills,
+  importFromProvider,
+  discoverProviderSkills,
+  importAllProviderSkills,
 };
