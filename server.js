@@ -4677,6 +4677,7 @@ function purgeNotesForSession(sessionId) {
 
 // ── Chat intent classification: 30s delayed trigger ──
 const CLASSIFY_DELAY_MS = 30000;
+const PROGRESS_SUMMARY_INTERVAL_MS = 45000; // during-stream progress summary cadence
 
 function cancelPendingClassify(cs) {
   if (cs.pendingClassifyTimer) {
@@ -4691,6 +4692,7 @@ function cancelPendingClassify(cs) {
 
 function scheduleIntentClassify(cs, sessionName) {
   cancelPendingClassify(cs); // clear any previous pending
+  cancelProgressSummary(cs); // task is done — stop the in-progress summary cycle
 
   const text = cs.currentAssistantText;
   if (!text || text.length < 20) return;
@@ -4757,6 +4759,87 @@ ${tail}`,
       cs.pendingClassifyTaskId = null;
     });
   }, CLASSIFY_DELAY_MS);
+}
+
+// ── Task start + in-progress summary ─────────────────────────────────────
+// The intent_classify path only fires AFTER a turn completes. Users also want
+// to know "what task is running" and "what's the current status" WHILE the
+// agent is still working. This does exactly that:
+//   • Task start: immediately stamp a brief description derived from the user
+//     message so the dashboard / chat shows "正在处理：xxx" the instant the
+//     turn begins — no AI call, zero latency.
+//   • In-progress: every PROGRESS_SUMMARY_INTERVAL_MS while still streaming,
+//     ask the aux AI to summarize the assistant's current output into ≤20
+//     chars, then fan it out via setSessionSummary + a `running` notify event
+//     so both the workspace board and chat clients can display it.
+
+function briefTaskDescription(text) {
+  let brief = (text || '').trim().replace(/\s+/g, ' ');
+  // Strip common goal-mode wrapper if present
+  brief = brief.replace(/^【[^】]*】\s*/, '');
+  if (brief.length > 40) brief = brief.slice(0, 40) + '…';
+  return brief || '新任务';
+}
+
+function emitRunningNotify(sessionName, message) {
+  const persisted = persistedSessions.get(sessionName);
+  if (!persisted) return;
+  const sessionId = persisted.id || sessionName;
+  setSessionSummary(sessionId, message);
+  chatBroadcast(sessionName, { type: 'notify', state: 'running', message });
+  const dirId = persisted.dirId;
+  if (dirId) {
+    workspaceBroadcast(dirId, { type: 'notify', sessionId, state: 'running', message });
+  }
+}
+
+function startProgressSummary(cs, sessionName) {
+  cancelProgressSummary(cs);
+  cs.progressSummaryTimer = setTimeout(() => {
+    cs.progressSummaryTimer = null;
+    if (!cs.isStreaming) return;
+
+    const text = cs.currentAssistantText;
+    // Not enough output yet — wait another cycle.
+    if (!text || text.length < 50) {
+      cs.progressSummaryTimer = setTimeout(() => startProgressSummary(cs, sessionName), PROGRESS_SUMMARY_INTERVAL_MS);
+      return;
+    }
+
+    const tail = text.slice(-1500);
+    auxQueue.enqueue({
+      type: 'progress_summary',
+      prompt: `用不超过20个汉字概括AI助手当前正在做的事情（动词开头，如"正在编辑server.js"、"正在运行测试"、"正在分析错误日志"）。只输出概括内容，不要解释、不要前缀。
+
+回复内容：
+${tail}`,
+      meta: { sessionName },
+    }).then(result => {
+      if (result.cancelled) return;
+      if (!cs.isStreaming) return; // turn finished while we were asking
+      const summary = (result.text || '').trim().replace(/^["'"']|["'"']$/g, '').slice(0, 30);
+      if (summary && summary !== '-' && summary !== '—') {
+        emitRunningNotify(sessionName, summary);
+        console.log(`[multicc/aux] Progress summary for ${sessionName}: ${summary}`);
+      }
+      // Reschedule for the next cycle
+      if (cs.isStreaming) {
+        cs.progressSummaryTimer = setTimeout(() => startProgressSummary(cs, sessionName), PROGRESS_SUMMARY_INTERVAL_MS);
+      }
+    }).catch(() => {
+      // Reschedule even on failure
+      if (cs.isStreaming) {
+        cs.progressSummaryTimer = setTimeout(() => startProgressSummary(cs, sessionName), PROGRESS_SUMMARY_INTERVAL_MS);
+      }
+    });
+  }, PROGRESS_SUMMARY_INTERVAL_MS);
+}
+
+function cancelProgressSummary(cs) {
+  if (cs.progressSummaryTimer) {
+    clearTimeout(cs.progressSummaryTimer);
+    cs.progressSummaryTimer = null;
+  }
 }
 
 // Run one chat turn end-to-end: build prompt → spawn the CLI → stream events to
@@ -4931,11 +5014,13 @@ function runChatTurn(sessionName, text, opts = {}) {
       streamReplay: [],
       pendingClassifyTimer: null,
       pendingClassifyTaskId: null,
+      progressSummaryTimer: null,
     };
     chatSessions.set(sessionName, cs);
   }
 
   cancelPendingClassify(cs);
+  cancelProgressSummary(cs);
   // Kill previous process if still running
   if (cs.claudeProc) {
     console.log(`[multicc/chat] [${sessionName}] New user_message while claude pid=${cs.claudeProc.pid} still running, killing previous turn`);
@@ -4987,6 +5072,13 @@ function runChatTurn(sessionName, text, opts = {}) {
   cs.turnStartedAt = Date.now();  // for per-reply interaction latency (durationMs)
   cs.streamReplay = [];
   cs._resultSaved = false;
+
+  // Task start: immediately stamp a brief description so the dashboard / chat
+  // shows "what's running" the instant the turn begins — no AI call, zero
+  // latency. The in-progress aux-AI summary will refine it ~45s later.
+  cancelProgressSummary(cs);
+  emitRunningNotify(sessionName, `正在处理：${briefTaskDescription(text)}`);
+  startProgressSummary(cs, sessionName);
   // Marks this turn as initiated by an auto-trigger, so post-turn triggers
   // don't recurse on their own output (see firePostTurnTriggers).
   cs._originTrigger = !!originTrigger;
@@ -5538,6 +5630,7 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
 function finalizeStreamingTurn(sessionName, cs, persisted, seq) {
   if (seq !== undefined && cs._streamTurnSeq !== seq) return; // superseded by a newer turn
   cs.isStreaming = false;
+  cancelProgressSummary(cs);
   cs.streamReplay = [];
   // applyClaudeChatEvent already saved on the `result` event (cs._resultSaved);
   // this only fires for an interrupted/aborted turn that has partial output.
@@ -5628,6 +5721,7 @@ function handleChatWs(ws, req, urlObj) {
       streamReplay: [],
       pendingClassifyTimer: null,
       pendingClassifyTaskId: null,
+      progressSummaryTimer: null,
     };
     chatSessions.set(sessionName, cs);
   }
@@ -5735,6 +5829,7 @@ function handleChatWs(ws, req, urlObj) {
 
       if (msg.type === 'cancel') {
         cancelPendingClassify(cs);
+        cancelProgressSummary(cs);
         if (persisted.streaming && cs.cli === 'claude' && chatStream.isAlive(sessionName)) {
           console.log(`[multicc/chat] [${sessionName}] (streaming) cancel requested by user`);
           cs._killReason = 'user_cancel';

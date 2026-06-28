@@ -199,15 +199,25 @@ class ChatProvider extends ChangeNotifier {
         break;
 
       case 'notify':
-        // The server's aux-AI decided this turn is done / waiting. This is the
-        // single source of truth for completion notifications — the client does
-        // not judge completion itself from `result`.
+        // The server's aux-AI reports turn status: running / waiting / completed.
         final p = evt.payload as Map<String, dynamic>;
-        final waiting = p['state'] == 'waiting';
-        _maybeNotify(
-          waiting ? '等待操作' : '任务完成',
-          (p['message'] ?? '').toString(),
-        );
+        final notifyState = (p['state'] ?? 'completed').toString();
+        final notifyMsg = (p['message'] ?? '').toString();
+        if (notifyState == 'running') {
+          // In-progress summary: update status text (visible in chat header)
+          // but don't fire a push notification — it's a status update, not an
+          // alert. Only show if this session is active.
+          if (isActive && !isInBackground) {
+            _statusText = notifyMsg.isNotEmpty ? notifyMsg : '任务进行中';
+            notifyListeners();
+          }
+        } else {
+          final waiting = notifyState == 'waiting';
+          _maybeNotify(
+            waiting ? '等待操作' : '任务完成',
+            notifyMsg,
+          );
+        }
         break;
 
       case 'error':

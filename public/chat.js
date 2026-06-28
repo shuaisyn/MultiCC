@@ -571,11 +571,17 @@ function handleEvent(msg) {
       break;
 
     case 'notify': {
-      // Server-side aux-AI verdict that the turn finished / is waiting. This is
-      // the single source of truth for completion notifications — we no longer
+      // Server-side aux-AI verdict that the turn finished / is waiting / running.
+      // This is the single source of truth for notifications — we no longer
       // guess from `result` (which also fires between turns of an agent run).
-      const waiting = msg.state === 'waiting';
-      speakNotify(waiting ? '等待操作' : '任务已完成', waiting ? 'waiting' : 'completed');
+      if (msg.state === 'running') {
+        // In-progress summary: show a toast (even when tab is visible) but
+        // don't play a sound — it's a status update, not an alert.
+        showNotifyToast(msg.message || '任务进行中', 'running');
+      } else {
+        const waiting = msg.state === 'waiting';
+        speakNotify(waiting ? '等待操作' : '任务已完成', waiting ? 'waiting' : 'completed');
+      }
       break;
     }
 
@@ -2387,7 +2393,9 @@ function showNotifyToast(text, type) {
   notifyToast.className = type;
   notifyToast.style.display = 'block';
   if (_notifyToastTimer) clearTimeout(_notifyToastTimer);
-  _notifyToastTimer = setTimeout(dismissNotifyToast, 15000);
+  // Running toasts are transient status updates — auto-dismiss faster.
+  const ttl = type === 'running' ? 8000 : 15000;
+  _notifyToastTimer = setTimeout(dismissNotifyToast, ttl);
 }
 
 function dismissNotifyToast() {
