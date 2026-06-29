@@ -1661,12 +1661,53 @@ function startMergeStatusPolling() {
 }
 
 /* ── Merge worktree button ── */
+function confirmInPage(message) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.style.cssText = 'position:fixed;inset:0;z-index:12000;background:#0009;display:flex;align-items:center;justify-content:center;padding:18px;';
+    const card = document.createElement('div');
+    card.style.cssText = 'width:min(92vw,420px);background:#0f1115;border:1px solid #30363d;border-radius:10px;box-shadow:0 18px 60px #000c;color:#e7eaee;overflow:hidden;';
+    const title = document.createElement('div');
+    title.textContent = '合并 worktree';
+    title.style.cssText = 'padding:14px 16px;border-bottom:1px solid #20242b;font-size:15px;font-weight:700;color:#f2f4f7;';
+    const body = document.createElement('div');
+    body.textContent = message;
+    body.style.cssText = 'padding:16px;white-space:pre-wrap;font-size:13px;line-height:1.55;color:#c9d1d9;';
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #20242b;';
+    const cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'border:1px solid #30363d;background:#161b22;color:#c9d1d9;border-radius:7px;padding:7px 13px;font-weight:700;cursor:pointer;';
+    const ok = document.createElement('button');
+    ok.textContent = '合并';
+    ok.style.cssText = 'border:1px solid #58a6ff;background:#1f6feb;color:#fff;border-radius:7px;padding:7px 13px;font-weight:700;cursor:pointer;';
+    const finish = (value) => {
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') finish(false);
+      if (e.key === 'Enter') finish(true);
+    };
+    cancel.onclick = () => finish(false);
+    ok.onclick = () => finish(true);
+    backdrop.onclick = (e) => { if (e.target === backdrop) finish(false); };
+    document.addEventListener('keydown', onKey);
+    actions.append(cancel, ok);
+    card.append(title, body, actions);
+    backdrop.append(card);
+    document.body.append(backdrop);
+    ok.focus();
+  });
+}
+
 async function requestMerge() {
   if (!_sessionName) { addSystemMsg('无 session id，无法合并 worktree'); return; }
   const prompt = _mergeReady
     ? tt('mergeWorktreeConfirmReady')
     : tt('mergeWorktreeConfirm');
-  if (!confirm(prompt)) return;
+  if (!await confirmInPage(prompt)) return;
   addSystemMsg('正在合并 worktree...');
   try {
     const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/merge`), { method: 'POST' });
