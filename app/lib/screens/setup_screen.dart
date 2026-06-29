@@ -16,7 +16,7 @@ class SetupScreen extends StatefulWidget {
 class _SetupScreenState extends State<SetupScreen> {
   final _hostCtrl = TextEditingController();
   final _tokenCtrl = TextEditingController();
-  final _sessionCtrl = TextEditingController();
+  late List<ServerHistoryEntry> _history;
   bool _saving = false;
   String? _error;
 
@@ -25,15 +25,22 @@ class _SetupScreenState extends State<SetupScreen> {
     super.initState();
     _hostCtrl.text = widget.settings.host;
     _tokenCtrl.text = widget.settings.token;
-    _sessionCtrl.text = widget.settings.session;
+    _history = widget.settings.serverHistory;
   }
 
   @override
   void dispose() {
     _hostCtrl.dispose();
     _tokenCtrl.dispose();
-    _sessionCtrl.dispose();
     super.dispose();
+  }
+
+  String _norm(String v) => v.trim().replaceAll(RegExp(r'/+$'), '').toLowerCase();
+
+  Future<void> _clearHistory() async {
+    await widget.settings.clearServerHistory();
+    if (!mounted) return;
+    setState(() => _history = []);
   }
 
   Future<void> _save() async {
@@ -43,11 +50,9 @@ class _SetupScreenState extends State<SetupScreen> {
       return;
     }
     setState(() { _saving = true; _error = null; });
-    await widget.settings.save(
-      host: host,
-      token: _tokenCtrl.text.trim(),
-      session: _sessionCtrl.text.trim(),
-    );
+    final token = _tokenCtrl.text.trim();
+    await widget.settings.save(host: host, token: token);
+    await widget.settings.rememberServer(host, token);
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
@@ -111,6 +116,34 @@ class _SetupScreenState extends State<SetupScreen> {
                       ),
                       const SizedBox(height: 20),
 
+                      if (_history.isNotEmpty) ...[
+                        Row(
+                          children: [
+                            const Expanded(child: _FieldLabel('Recent Servers')),
+                            InkWell(
+                              onTap: _clearHistory,
+                              child: const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                child: Text('Clear',
+                                    style: TextStyle(color: Color(0xFFff6b63), fontSize: 12)),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        _HistoryDropdown(
+                          entries: _history,
+                          currentHost: _hostCtrl.text.trim(),
+                          norm: _norm,
+                          onSelected: (e) => setState(() {
+                            _hostCtrl.text = e.host;
+                            _tokenCtrl.text = e.token;
+                            _error = null;
+                          }),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+
                       _FieldLabel('Server URL'),
                       const SizedBox(height: 6),
                       _Field(
@@ -126,14 +159,6 @@ class _SetupScreenState extends State<SetupScreen> {
                         controller: _tokenCtrl,
                         hint: 'Leave empty if not required',
                         obscure: true,
-                      ),
-                      const SizedBox(height: 16),
-
-                      _FieldLabel('Session Name (optional)'),
-                      const SizedBox(height: 6),
-                      _Field(
-                        controller: _sessionCtrl,
-                        hint: 'e.g. my-project',
                       ),
 
                       if (_error != null) ...[
@@ -175,6 +200,62 @@ class _SetupScreenState extends State<SetupScreen> {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryDropdown extends StatelessWidget {
+  final List<ServerHistoryEntry> entries;
+  final String currentHost;
+  final String Function(String) norm;
+  final ValueChanged<ServerHistoryEntry> onSelected;
+  const _HistoryDropdown({
+    required this.entries,
+    required this.currentHost,
+    required this.norm,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    ServerHistoryEntry? selected;
+    for (final e in entries) {
+      if (norm(e.host) == norm(currentHost)) {
+        selected = e;
+        break;
+      }
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF070809),
+        border: Border.all(color: const Color(0xFF20242b)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<ServerHistoryEntry>(
+          value: selected,
+          isExpanded: true,
+          dropdownColor: const Color(0xFF0f1115),
+          icon: const Icon(Icons.history, color: Color(0xFF8a909b), size: 18),
+          hint: const Text('Select a saved server…',
+              style: TextStyle(color: Color(0xFF454b54), fontSize: 14)),
+          style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+          items: entries
+              .map((e) => DropdownMenuItem<ServerHistoryEntry>(
+                    value: e,
+                    child: Text(
+                      e.token.isEmpty ? e.host : '${e.host}  ·  token saved',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+                    ),
+                  ))
+              .toList(),
+          onChanged: (e) {
+            if (e != null) onSelected(e);
+          },
         ),
       ),
     );

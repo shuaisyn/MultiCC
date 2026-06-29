@@ -1,5 +1,23 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// One remembered server connection (URL + its token).
+class ServerHistoryEntry {
+  final String host;
+  final String token;
+  const ServerHistoryEntry({required this.host, required this.token});
+
+  Map<String, String> toJson() => {'host': host, 'token': token};
+
+  static ServerHistoryEntry? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final host = (raw['host'] ?? '').toString();
+    if (host.isEmpty) return null;
+    return ServerHistoryEntry(host: host, token: (raw['token'] ?? '').toString());
+  }
+}
 
 class SettingsService {
   static const _keyHost = 'multicc_host';
@@ -11,6 +29,10 @@ class SettingsService {
   static const _keyKeepAlive = 'multicc_keepalive_enabled';
   static const _keyFontScale = 'multicc_font_scale';
   static const _keyLang = 'multicc_lang';
+  static const _keyServerHistory = 'multicc_server_history';
+
+  /// How many past server connections to remember.
+  static const _serverHistoryMax = 10;
 
   static SettingsService? _instance;
 
@@ -52,6 +74,41 @@ class SettingsService {
   bool get keepAliveEnabled => _prefs.getBool(_keyKeepAlive) ?? false;
 
   bool get isConfigured => host.isNotEmpty;
+
+  /// Remembered server connections (most recent first).
+  List<ServerHistoryEntry> get serverHistory {
+    final raw = _prefs.getString(_keyServerHistory);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final list = jsonDecode(raw);
+      if (list is! List) return [];
+      return list
+          .map(ServerHistoryEntry.fromJson)
+          .whereType<ServerHistoryEntry>()
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Record a server connection in history: dedupes by host (case-insensitive,
+  /// trailing slash ignored), keeps the latest token, and moves it to the front.
+  Future<void> rememberServer(String host, String token) async {
+    final h = host.trim();
+    if (h.isEmpty) return;
+    String norm(String v) => v.trim().replaceAll(RegExp(r'/+$'), '').toLowerCase();
+    final key = norm(h);
+    final entries = serverHistory.where((e) => norm(e.host) != key).toList()
+      ..insert(0, ServerHistoryEntry(host: h, token: token.trim()));
+    final trimmed = entries.take(_serverHistoryMax).toList();
+    await _prefs.setString(
+        _keyServerHistory, jsonEncode(trimmed.map((e) => e.toJson()).toList()));
+  }
+
+  /// Wipe all remembered server connections (privacy: e.g. shared phone).
+  Future<void> clearServerHistory() async {
+    await _prefs.remove(_keyServerHistory);
+  }
 
   Future<void> save({
     String? host,
