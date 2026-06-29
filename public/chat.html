@@ -129,7 +129,7 @@
       #header { gap: 6px; }
       #header-more-wrap { display: inline-flex; }
       #session-title { max-width: 34vw; }
-      #model-btn, #provider-btn, #role-btn, #memory-btn, #stream-btn, #share-btn { max-width: 100%; }
+      #model-btn, #provider-btn, #role-btn, #memory-btn, #stream-btn, #auto-commit-btn, #share-btn { max-width: 100%; }
     }
 
     /* Session identity (directory / alias) shown in the header */
@@ -313,6 +313,35 @@
     .msg-usage .u-in { color: #79c0ff; }
     .msg-usage .u-out { color: #3fb950; }
     .msg-usage .u-cache { color: #d29922; }
+
+    /* ── Per-message auto-commit checkbox ── */
+    .msg-auto-commit {
+      margin-top: 6px;
+      padding-top: 4px;
+      border-top: 1px solid #21262d;
+      font-size: 11px;
+      color: #8b949e;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      user-select: none;
+      cursor: pointer;
+    }
+    .msg-auto-commit:hover { color: #c9d1d9; }
+    .msg-auto-commit input[type="checkbox"] {
+      margin: 0;
+      cursor: pointer;
+      accent-color: #238636;
+    }
+    .msg-auto-commit.done {
+      color: #3fb950;
+      cursor: default;
+    }
+    .msg-auto-commit.done::after {
+      content: ' ✓ 已提交';
+      color: #3fb950;
+      font-weight: 600;
+    }
 
     /* ── Thinking indicator ── */
     .thinking-bubble {
@@ -1034,6 +1063,7 @@
     <button class="hdr-btn" id="role-btn" title="设置该会话的角色提示词（下一轮对话生效）" data-i18n="role">🎭 角色</button>
     <button class="hdr-btn" id="memory-btn" title="会话记忆：清理历史时辅助 AI 自动提炼的关键问题与解决方式，可查看/编辑" data-i18n="memory">🧠 记忆</button>
     <button class="hdr-btn" id="stream-btn" title="流式常驻 / 自动接力（claude 会话）" style="display:none" data-i18n="stream">⚡ 流式</button>
+    <button class="hdr-btn" id="auto-commit-btn" data-i18n-title="autoCommitTitle" title="任务完成后自动提交代码并合并回基分支" data-i18n="autoCommit">🚀 自动提交</button>
     <button class="hdr-btn" id="share-btn" title="把此会话分享到外部（网页链接：只读 / 密码 / 可对话）" data-i18n="share">🔗 分享</button>
     <span id="header-more-wrap">
       <button class="hdr-btn" id="header-more-btn" data-i18n="more">更多</button>
