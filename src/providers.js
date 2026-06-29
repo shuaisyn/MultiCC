@@ -163,28 +163,37 @@ function buildSettingsConfig(appType, { baseUrl, authToken, model, providerId })
 // Public-safe summary — never leaks a full token (only masked).
 function summarize(p) {
   const cfg = parseConfig(p.settingsConfig);
-  let baseUrl = '', model = '', token = '';
+  let baseUrl = '', model = '', token = '', modelOptions = [];
   if (p.appType === 'claude') {
     const env = cfg.env || {};
     baseUrl = env.ANTHROPIC_BASE_URL || '';
     model = env.ANTHROPIC_MODEL || '';
     token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
+    // Collect all models this provider can serve: primary + DEFAULT_* overrides.
+    const aliasKeys = ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+    const seen = new Set();
+    const ordered = [];
+    for (const v of [env.ANTHROPIC_MODEL, ...aliasKeys.map(k => env[k])]) {
+      if (v && !seen.has(v)) { seen.add(v); ordered.push(v); }
+    }
+    modelOptions = ordered;
   } else {
     baseUrl = tomlValue(cfg.config, 'base_url');
     model = tomlValue(cfg.config, 'model');
     token = (cfg.auth && cfg.auth.OPENAI_API_KEY) ||
-      (cfg.auth && cfg.auth.tokens && cfg.auth.tokens.access_token) || '';
+            (cfg.auth && cfg.auth.tokens && cfg.auth.tokens.access_token) || '';
   }
   return {
     id: p.id,
     appType: p.appType,
     name: p.name,
-    source: p.source || 'local',     // 'local' | 'ccswitch'
+    source: p.source || 'local', // 'local' | 'ccswitch'
     baseUrl,
     model,
+    modelOptions,
     tokenMask: maskToken(token),
     hasToken: !!token,
-    isOfficial: !baseUrl,            // no custom base url → default login / subscription
+    isOfficial: !baseUrl, // no custom base url -> default login / subscription
   };
 }
 
