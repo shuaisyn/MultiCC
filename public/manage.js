@@ -43,6 +43,14 @@ function formatRelative(iso) {
   return `${Math.floor(diff / 3600)}h ago`;
 }
 
+function formatDuration(sec) {
+  if (!sec || sec < 0) return '';
+  const s = Math.floor(sec);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${s % 60}s`;
+  return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
+}
+
 function shortenPath(p, maxLen) {
   if (!p) return '(unknown)';
   if (p.length <= maxLen) return p;
@@ -732,6 +740,12 @@ function showSessionListPopup(ev, sessions, prefix, emptyText) {
     const name = dir ? `${dir} / ${alias}` : alias;
     const b = sessionStatusBrief(s);
     let label = `${b.emoji} ${name} · ${b.text}`;
+    // Show elapsed time for actively-running sessions
+    const wb = _workspaceStatus.get(s.id);
+    if (wb && wb.turnStartedAt) {
+      const elapsed = (Date.now() - wb.turnStartedAt) / 1000;
+      if (elapsed > 0) label += ` ⏱ ${formatDuration(elapsed)}`;
+    }
     if (b.summary) label += ` — ${b.summary}`;
     return { label, onclick: () => jumpToSession(s) };
   });
@@ -2355,7 +2369,7 @@ function connectWorkspace(dirId) {
     let msg; try { msg = JSON.parse(data); } catch { return; }
     if (msg.type === 'snapshot') {
       for (const s of msg.sessions) {
-        _workspaceStatus.set(s.id, { status: s.status, currentFile: s.currentFile, lastActivity: s.lastActivity, mergeState: s.mergeState || null });
+        _workspaceStatus.set(s.id, { status: s.status, currentFile: s.currentFile, lastActivity: s.lastActivity, turnStartedAt: s.turnStartedAt || null, mergeState: s.mergeState || null });
         _workspaceNotes.set(s.id, s.pendingNotes || 0);
         if (s.summary) _workspaceSummaries.set(s.id, { summary: s.summary, ts: s.summaryTs || 0 });
         updateSessionStatusDom(s.id);
@@ -2368,7 +2382,7 @@ function connectWorkspace(dirId) {
       updateDirPreview(dirId);
       updateGlobalTaskScroller();
     } else if (msg.type === 'status') {
-      _workspaceStatus.set(msg.sessionId, { status: msg.status, currentFile: msg.currentFile, lastActivity: msg.lastActivity, mergeState: msg.mergeState || _workspaceStatus.get(msg.sessionId)?.mergeState || null });
+      _workspaceStatus.set(msg.sessionId, { status: msg.status, currentFile: msg.currentFile, lastActivity: msg.lastActivity, turnStartedAt: msg.turnStartedAt || null, mergeState: msg.mergeState || _workspaceStatus.get(msg.sessionId)?.mergeState || null });
       updateSessionStatusDom(msg.sessionId);
       updateSessionMergeDom(msg.sessionId);
       updateGlobalTaskScroller();
