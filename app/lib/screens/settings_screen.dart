@@ -31,7 +31,8 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _hostCtrl;
   late final TextEditingController _tokenCtrl;
-  late final TextEditingController _sessionCtrl;
+
+  late List<ServerHistoryEntry> _serverHistory;
 
   late String _defaultModel;
   late bool _notify;
@@ -56,7 +57,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final s = widget.settings;
     _hostCtrl = TextEditingController(text: s.host);
     _tokenCtrl = TextEditingController(text: s.token);
-    _sessionCtrl = TextEditingController(text: s.session);
+    _serverHistory = s.serverHistory;
     _defaultModel = s.defaultModel;
     _notify = s.notificationsEnabled;
     _keepAlive = s.keepAliveEnabled;
@@ -70,7 +71,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void dispose() {
     _hostCtrl.dispose();
     _tokenCtrl.dispose();
-    _sessionCtrl.dispose();
     _goalMinCtrl.dispose();
     super.dispose();
   }
@@ -128,11 +128,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _savingServer = true;
       _serverStatus = null;
     });
-    await widget.settings.save(
-      host: host,
-      token: _tokenCtrl.text.trim(),
-      session: _sessionCtrl.text.trim(),
-    );
+    final token = _tokenCtrl.text.trim();
+    await widget.settings.save(host: host, token: token);
+    await widget.settings.rememberServer(host, token);
     if (!mounted) return;
     // Reconnect with a fresh SessionManager / MainShell, same as first setup.
     Navigator.of(context).pushAndRemoveUntil(
@@ -144,6 +142,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       (route) => false,
     );
+  }
+
+  void _applyHistory(ServerHistoryEntry e) {
+    setState(() {
+      _hostCtrl.text = e.host;
+      _tokenCtrl.text = e.token;
+      _serverStatus = null;
+    });
+  }
+
+  Future<void> _clearHistory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.panel,
+        title: const Text('清除连接记录', style: TextStyle(color: AppColors.text, fontSize: 16)),
+        content: const Text(
+          '将删除所有已记住的服务器地址和 Token。当前正在使用的连接不受影响。',
+          style: TextStyle(color: AppColors.muted, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消', style: TextStyle(color: AppColors.muted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清除', style: TextStyle(color: AppColors.danger)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await widget.settings.clearServerHistory();
+    if (!mounted) return;
+    setState(() => _serverHistory = []);
+    _snack('已清除连接记录');
   }
 
   Future<void> _pickModel() async {
@@ -196,14 +231,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Section(
             title: '服务器连接',
             children: [
+              if (_serverHistory.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Expanded(child: _Label('历史记录')),
+                    InkWell(
+                      onTap: _clearHistory,
+                      borderRadius: BorderRadius.circular(6),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.delete_outline, size: 15, color: AppColors.danger),
+                            SizedBox(width: 4),
+                            Text('清除记录', style: TextStyle(color: AppColors.danger, fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                _HistoryDropdown(
+                  entries: _serverHistory,
+                  currentHost: _hostCtrl.text.trim(),
+                  onSelected: _applyHistory,
+                ),
+                const SizedBox(height: 14),
+              ],
               _Label('服务器地址'),
               _Input(controller: _hostCtrl, hint: 'http://192.168.1.100:3456', keyboardType: TextInputType.url),
               const SizedBox(height: 14),
               _Label('Access Token'),
               _Input(controller: _tokenCtrl, hint: '未设置可留空', obscure: true),
-              const SizedBox(height: 14),
-              _Label('默认会话名（可选）'),
-              _Input(controller: _sessionCtrl, hint: 'e.g. my-project'),
               if (_serverStatus != null) ...[
                 const SizedBox(height: 10),
                 Text(_serverStatus!, style: const TextStyle(color: AppColors.danger, fontSize: 13)),
@@ -559,6 +619,61 @@ class _Tile extends StatelessWidget {
             ),
             const Icon(Icons.chevron_right, color: AppColors.faint, size: 20),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryDropdown extends StatelessWidget {
+  final List<ServerHistoryEntry> entries;
+  final String currentHost;
+  final ValueChanged<ServerHistoryEntry> onSelected;
+  const _HistoryDropdown({
+    required this.entries,
+    required this.currentHost,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    String norm(String v) => v.trim().replaceAll(RegExp(r'/+$'), '').toLowerCase();
+    ServerHistoryEntry? selected;
+    for (final e in entries) {
+      if (norm(e.host) == norm(currentHost)) {
+        selected = e;
+        break;
+      }
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppColors.bgSoft,
+        border: Border.all(color: AppColors.line),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<ServerHistoryEntry>(
+          value: selected,
+          isExpanded: true,
+          dropdownColor: AppColors.panel,
+          icon: const Icon(Icons.history, color: AppColors.faint, size: 18),
+          hint: const Text('从历史记录中选择…',
+              style: TextStyle(color: AppColors.faint, fontSize: 14)),
+          style: const TextStyle(color: AppColors.text, fontSize: 14),
+          items: entries
+              .map((e) => DropdownMenuItem<ServerHistoryEntry>(
+                    value: e,
+                    child: Text(
+                      e.token.isEmpty ? e.host : '${e.host}  ·  token 已存',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: AppColors.text, fontSize: 14),
+                    ),
+                  ))
+              .toList(),
+          onChanged: (e) {
+            if (e != null) onSelected(e);
+          },
         ),
       ),
     );
