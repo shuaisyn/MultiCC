@@ -3452,7 +3452,8 @@ ${tail}`,
     if (mon) mon.classifyPending = false;
     if (result.cancelled) return;
     const { state, summary } = parseClassifyResult(result.text);
-    const msg = state === 'waiting' ? '等待交互' : '任务完成';
+    const doneMsg = summary ? `任务完成：${summary}` : '任务完成';
+    const msg = state === 'waiting' ? '等待交互' : doneMsg;
     triggerPush(sessionId, state, msg);
     terminalBroadcast(sessionId, { type: 'notify', state, message: msg });
     const dirId = persistedSessions.get(sessionId)?.dirId;
@@ -4567,11 +4568,18 @@ function workspaceBroadcast(dirId, payload) {
 function setSessionStatus(sessionId, patch) {
   const persisted = persistedSessions.get(sessionId);
   if (!persisted || persisted.type === 'aux') return;
-  const prev = workspaceStatus.get(sessionId) || { status: 'idle', currentFile: null, lastActivity: 0 };
+  const prev = workspaceStatus.get(sessionId) || { status: 'idle', currentFile: null, lastActivity: 0, turnStartedAt: 0 };
+  const newStatus = patch.status !== undefined ? patch.status : prev.status;
+  const isActive = !['idle', 'completed', 'error', 'waiting'].includes(newStatus);
   const next = {
-    status: patch.status !== undefined ? patch.status : prev.status,
+    status: newStatus,
     currentFile: patch.currentFile !== undefined ? patch.currentFile : prev.currentFile,
     lastActivity: Date.now(),
+    // Carry turnStartedAt through mid-turn status changes (thinking→editing→running).
+    // Clear it when the turn ends (idle/completed/error/waiting).
+    turnStartedAt: patch.turnStartedAt !== undefined
+      ? patch.turnStartedAt
+      : (isActive ? (prev.turnStartedAt || 0) : 0),
   };
   workspaceStatus.set(sessionId, next);
   // Only broadcast when the status or current file actually changed — callers may
@@ -4580,6 +4588,7 @@ function setSessionStatus(sessionId, patch) {
   workspaceBroadcast(persisted.dirId, {
     type: 'status', sessionId,
     status: next.status, currentFile: next.currentFile, lastActivity: next.lastActivity,
+    turnStartedAt: next.turnStartedAt || null,
     mergeState: gitWorktreeMergeState(directories.get(persisted.dirId), persisted),
   });
 }
@@ -4588,7 +4597,7 @@ function workspaceSnapshot(dirId) {
   const out = [];
   for (const s of persistedSessions.values()) {
     if (s.dirId !== dirId || s.type === 'aux' || s.type === 'gateway') continue;
-    const st = workspaceStatus.get(s.id) || { status: 'idle', currentFile: null, lastActivity: 0 };
+    const st = workspaceStatus.get(s.id) || { status: 'idle', currentFile: null, lastActivity: 0, turnStartedAt: 0 };
     const active = sessions.get(s.id);
     const chat = chatSessions.get(s.id);
     const sum = sessionSummaries.get(s.id) || null;
@@ -4596,6 +4605,7 @@ function workspaceSnapshot(dirId) {
       id: s.id, label: s.label || null, cli: s.cli || 'claude', kind: s.kind || 'terminal',
       branch: s.branch || null, invalid: invalidSessions.get(s.id) || null,
       status: st.status, currentFile: st.currentFile, lastActivity: st.lastActivity,
+      turnStartedAt: st.turnStartedAt || null,
       clients: s.kind === 'chat' ? (chat?.clients.size || 0) : (active?.clients.size || 0),
       pendingNotes: pendingNotesFor(s.id).length,
       mergeState: gitWorktreeMergeState(directories.get(s.dirId), s),
@@ -4755,7 +4765,8 @@ ${tail}`,
         return;
       }
       waitInjector.resetAuto(sessionName); // done / waiting-on-user → reset D's counter
-      const msg = state === 'waiting' ? '等待交互' : '任务完成';
+      const doneMsg = summary ? `任务完成：${summary}` : '任务完成';
+      const msg = state === 'waiting' ? '等待交互' : doneMsg;
       // This aux-AI verdict is the single source of truth for "is the turn done
       // or waiting?". Fan it out to every channel from here so nothing re-judges:
       //   1. web push / Bark / webhook (PWA + external)
@@ -4829,6 +4840,19 @@ function emitTurnOutcome(sessionName, { status, notifyState, message, alert }) {
   const persisted = persistedSessions.get(sessionName);
   if (!persisted) return;
   const sessionId = persisted.id || sessionName;
+
+  // Enrich bare "任务完成" with the last meaningful task summary, so the
+  // dashboard / chat shows "任务完成：修复登录页样式" instead of a dry "任务完成".
+  // The summary may come from the in-progress aux-AI (stored via setSessionSummary
+  // during the turn) or from a prior intent_classify.
+  if (message === '任务完成') {
+    const sm = sessionSummaries.get(sessionId);
+    const raw = sm?.summary || '';
+    // Strip any status label prefix to get the pure task description
+    const clean = raw.replace(/^(正在处理：|任务完成：)/, '').trim();
+    if (clean) message = `任务完成：${clean}`;
+  }
+
   setSessionStatus(sessionName, { status, currentFile: null });
   setSessionSummary(sessionId, message);
   if (alert) {
@@ -5133,7 +5157,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // don't recurse on their own output (see firePostTurnTriggers).
   cs._originTrigger = !!originTrigger;
   cs.originDispatchId = originDispatchId || null;
-  setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
+  setSessionStatus(sessionName, { status: 'thinking', currentFile: null, turnStartedAt: cs.turnStartedAt });
 
   const provider = cliProviders[cs.cli] || cliProviders.claude;
   // For claude: first turn → --session-id <uuid>, subsequent → --resume <uuid>.
