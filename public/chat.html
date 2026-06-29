@@ -910,6 +910,101 @@
     .dbg-cat-warn  { color: #f85149; }
     #dbg-log::-webkit-scrollbar { width: 6px; }
     #dbg-log::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    /* ── Memo popup ── */
+    #memo-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #000000cc;
+      z-index: 15000;
+      align-items: center;
+      justify-content: center;
+    }
+    #memo-modal.open { display: flex; }
+    #memo-modal-inner {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      width: min(92vw, 700px);
+      max-height: 88vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 16px 48px #00000099;
+    }
+    #memo-modal-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+    }
+    #memo-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #f0f6fc;
+    }
+    #memo-text {
+      flex: 1;
+      width: 100%;
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 0;
+      outline: 0;
+      padding: 12px 16px;
+      font-family: ui-monospace, 'Cascadia Code', 'Fira Code', SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      resize: none;
+    }
+    #memo-text::-webkit-scrollbar { width: 6px; }
+    #memo-text::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    #memo-picker {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: #00000066;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+    }
+    #memo-picker.open { display: flex; }
+    .picker-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 14px 18px;
+      width: min(90%, 440px);
+    }
+    #memo-picker-preview {
+      color: #8b949e;
+      font-size: 11px;
+      margin-bottom: 10px;
+      font-family: monospace;
+      word-break: break-word;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 6px 8px;
+      max-height: 90px;
+      overflow: auto;
+    }
+    #memo-picker-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 10px;
+      max-height: 280px;
+      overflow: auto;
+    }
+    #memo-picker-list button {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      text-align: left;
+    }
   </style>
 </head>
 <body>
@@ -1109,6 +1204,32 @@
     </div>
     <div id="dbg-state"></div>
     <div id="dbg-log"></div>
+  </div>
+
+  <!-- Memo popup -->
+  <div id="memo-modal">
+    <div id="memo-modal-inner">
+      <div id="memo-modal-head">
+        <div style="flex:1;min-width:0;">
+          <div id="memo-title">📝 备忘</div>
+          <div id="memo-subtitle" style="font-size:11px;color:var(--muted);font-family:monospace;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+        </div>
+        <button class="hdr-btn" id="memo-send-btn" title="把光标所在行发到该目录的某个 chat 会话">→ 发送当前行</button>
+        <button class="hdr-btn" id="memo-save-btn" title="保存 (Ctrl/Cmd+S)" style="background:#238636;border-color:#2ea043;color:#fff;">保存</button>
+        <button class="hdr-btn" id="memo-close-btn">关闭</button>
+      </div>
+      <textarea id="memo-text" spellcheck="false" placeholder="在这里写备忘…&#10;例：&#10;# todo&#10;- [ ] 任务一&#10;- [ ] 任务二"></textarea>
+      <div id="memo-status" style="padding:6px 12px;font-size:11px;color:var(--faint);border-top:1px solid var(--border);font-family:monospace;"></div>
+      <!-- Send-picker mini-modal (inside memo popup) -->
+      <div id="memo-picker" class="modal-backdrop" style="z-index:20050;">
+        <div class="picker-card">
+          <h3 style="font-size:13px;color:var(--text);margin-bottom:6px;">发送到 chat 会话</h3>
+          <div id="memo-picker-preview"></div>
+          <div id="memo-picker-list"></div>
+          <div style="text-align:right;"><button class="hdr-btn" onclick="memoPickerClose()">取消</button></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="i18n.js"></script>
