@@ -203,7 +203,7 @@ const mergeHintBtn = document.getElementById('merge-hint-btn');
 const headerMoreBtn = document.getElementById('header-more-btn');
 const headerMoreMenu = document.getElementById('header-more-menu');
 const headerMoreWrap = document.getElementById('header-more-wrap');
-const HEADER_MORE_IDS = ['model-btn', 'provider-btn', 'role-btn', 'memory-btn', 'stream-btn', 'share-btn'];
+const HEADER_MORE_IDS = ['model-btn', 'provider-btn', 'role-btn', 'memory-btn', 'stream-btn', 'auto-commit-btn', 'share-btn'];
 
 function syncHeaderMoreMenu() {
   if (!headerMoreMenu || !headerMoreWrap) return;
@@ -730,6 +730,8 @@ function handleEvent(msg) {
       }
       updateContextBar(msg.usage, msg.modelUsage);
       updateUI();
+      // Auto-commit & merge if enabled for this message
+      autoCommitIfNeeded(_resultBubble);
       break;
 
     case 'provider_token_stats':
@@ -943,6 +945,8 @@ function createAssistantBubble() {
   div.innerHTML = '<div class="msg-content streaming-dot"></div>';
   messagesEl.appendChild(div);
   scrollToBottom();
+  // Attach per-message auto-commit checkbox (default from session setting)
+  attachAutoCommitCheck(div, _sessionAutoCommit);
   return div;
 }
 
@@ -1212,6 +1216,9 @@ function replayHistory(messages, serverTokenUsage) {
 
       div.appendChild(contentEl);
       messagesEl.appendChild(div);
+
+      // Attach per-message auto-commit checkbox for historical messages
+      attachAutoCommitCheck(div, _sessionAutoCommit);
     }
     } catch (err) {
       console.warn('[multicc] replayHistory: skipped message', mi, err.message);
@@ -1647,6 +1654,44 @@ async function requestMerge() {
 mergeBtn?.addEventListener('click', requestMerge);
 mergeHintBtn?.addEventListener('click', requestMerge);
 
+/* ── Auto-commit after task completion ── */
+// Called after an assistant turn completes. If the per-message auto-commit
+// checkbox is checked and the worktree has mergeable changes, silently
+// trigger commit + merge.
+let _autoCommitPending = false;  // prevent duplicate auto-commits
+async function autoCommitIfNeeded(bubbleEl) {
+  if (!bubbleEl || _autoCommitPending) return;
+  const row = bubbleEl.querySelector('.msg-auto-commit');
+  if (!row || row.classList.contains('done')) return;
+  const cb = row.querySelector('input[type="checkbox"]');
+  if (!cb || !cb.checked) return;
+  // Check if there's actually something to merge
+  if (!_mergeReady) return;
+  _autoCommitPending = true;
+  try {
+    addSystemMsg('🚀 自动提交合并中（此轮开启了自动提交）...');
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/merge`), { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      addSystemMsg(data.merged
+        ? `✓ 自动提交完成：已合并 ${data.commits} 个提交回基分支${data.committed ? '（含本次自动提交）' : ''}${data.syncedBack ? '，并已自动把基分支同步回本 worktree' : ''}`
+        : `✓ 自动提交：${data.message || '没有新提交需要合并'}`);
+      // Mark the checkbox as done
+      row.classList.add('done');
+      applyMergeStatus({ mergeReady: false, dirty: false, ahead: 0 });
+      refreshMergeStatus();
+    } else if (res.status === 409) {
+      addSystemMsg('⚠️ 自动提交冲突，已 abort。冲突文件：' + (data.conflicts || []).join(', '));
+    } else {
+      addSystemMsg('自动提交失败：' + (data.error || `HTTP ${res.status}`));
+    }
+  } catch (e) {
+    addSystemMsg('自动提交请求失败：' + e.message);
+  } finally {
+    _autoCommitPending = false;
+  }
+}
+
 /* ── Diff viewer ── */
 function escapeDiffHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1836,6 +1881,8 @@ async function loadSessionModel() {
     _sessionStreaming = !!info.streaming;
     _sessionAutoContinue = !!info.autoContinue;
     updateStreamBtn();
+    _sessionAutoCommit = !!info.autoCommit;
+    updateAutoCommitBtn();
   } catch (_) {}
 }
 
@@ -2271,6 +2318,63 @@ streamBtn?.addEventListener('click', async () => {
     addSystemMsg('保存失败：' + e.message);
   }
 });
+
+/* ── Per-session auto-commit (auto commit & merge after task completion) ── */
+const autoCommitBtn = document.getElementById('auto-commit-btn');
+let _sessionAutoCommit = false;
+
+function updateAutoCommitBtn() {
+  if (!autoCommitBtn) return;
+  autoCommitBtn.style.display = '';
+  autoCommitBtn.textContent = _sessionAutoCommit ? tt('autoCommitOn') : tt('autoCommitOff');
+  autoCommitBtn.style.opacity = _sessionAutoCommit ? '1' : '0.6';
+  autoCommitBtn.title = tt('autoCommitTitle');
+}
+
+autoCommitBtn?.addEventListener('click', async () => {
+  const newVal = !_sessionAutoCommit;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoCommit: newVal }),
+    });
+    const data = await res.json();
+    if (!res.ok) { addSystemMsg('保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    _sessionAutoCommit = !!data.autoCommit;
+    updateAutoCommitBtn();
+    addSystemMsg(_sessionAutoCommit ? '✓ 已开启「任务完成后自动提交合并」，每轮完成后将自动 commit 并合并回基分支' : '✓ 已关闭「任务完成后自动提交合并」');
+  } catch (e) {
+    addSystemMsg('保存失败：' + e.message);
+  }
+});
+
+/* ── Per-message auto-commit checkbox ── */
+// Add a small checkbox under an assistant message bubble.
+// Returns the checkbox element so caller can read .checked state later.
+function attachAutoCommitCheck(bubbleEl, checked) {
+  if (!bubbleEl) return null;
+  const ce = bubbleEl.querySelector('.msg-content');
+  if (!ce) return null;
+  // Remove any existing auto-commit line
+  const old = ce.querySelector('.msg-auto-commit');
+  if (old) old.remove();
+  const row = document.createElement('div');
+  row.className = 'msg-auto-commit';
+  row.title = tt('autoCommitTitle');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!checked;
+  row.appendChild(cb);
+  row.appendChild(document.createTextNode(' ' + tt('autoCommitPerMsg')));
+  // Toggle when clicking the label area
+  row.addEventListener('click', (e) => {
+    if (e.target === cb) return; // native checkbox handles itself
+    cb.checked = !cb.checked;
+  });
+  ce.appendChild(row);
+  return cb;
+}
 
 /* ── Session sharing (external web links) ── */
 const shareBtn = document.getElementById('share-btn');
