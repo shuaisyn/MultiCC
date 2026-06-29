@@ -377,16 +377,13 @@ function resolveSpawnEnv(session) {
     // Claude CLI auth precedence (v2.1.x): OAuth/keychain > ANTHROPIC_API_KEY >
     // ANTHROPIC_AUTH_TOKEN.  Without CLAUDE_CODE_SIMPLE=1, OAuth wins and the
     // provider's ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL are silently ignored.
-    if (env.ANTHROPIC_BASE_URL) {
-      env.CLAUDE_CODE_SIMPLE = '1';
-      // Prefer the token via ANTHROPIC_API_KEY (x-api-key header — highest
-      // priority in SIMPLE mode) and keep ANTHROPIC_AUTH_TOKEN as a fallback
-      // (Authorization: Bearer header for proxies that expect it).
-      if (env.ANTHROPIC_AUTH_TOKEN && !env.ANTHROPIC_API_KEY) {
-        env.ANTHROPIC_API_KEY = env.ANTHROPIC_AUTH_TOKEN;
-      }
-    }
-    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name };
+if (env.ANTHROPIC_BASE_URL) {
+  env.CLAUDE_CODE_SIMPLE = '1';
+  // Only set ANTHROPIC_API_KEY if the provider explicitly provided one.
+  // Auto-copying AUTH_TOKEN to API_KEY forces the x-api-key header on
+  // providers that don't accept it (e.g. Zhipu GLM 401s because it only
+  // reads Authorization: Bearer). Leave AUTH_TOKEN as-is for Bearer auth.
+}    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name };
   }
 
   try {
