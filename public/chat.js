@@ -1759,7 +1759,9 @@ providerBtn?.addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) { addSystemMsg('Provider 切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionProvider = data.provider || '';
+ _sessionModel = data.model || '';
     updateProviderBtn();
+ updateModelBtn();
     addSystemMsg(`✓ Provider 已切换为 ${providerShortName(_sessionProvider)}，下一轮对话生效`);
   } catch (e) {
     addSystemMsg('Provider 切换失败：' + e.message);
