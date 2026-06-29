@@ -741,6 +741,32 @@
     </div>
   </div>
 
+  <!-- Memo popup -->
+  <div id="memo-modal" style="display:none; position:fixed; inset:0; background:#000000cc; z-index:15000; align-items:center; justify-content:center;">
+    <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; width:min(92vw, 700px); max-height:88vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 16px 48px #00000099;">
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #30363d;flex-shrink:0;">
+        <div style="flex:1;min-width:0;">
+          <div id="memo-title" style="font-size:14px;font-weight:600;color:#f0f6fc;">📝 备忘</div>
+          <div id="memo-subtitle" style="font-size:11px;color:#8b949e;font-family:monospace;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+        </div>
+        <button class="hdr-btn" id="memo-send-btn" title="把光标所在行发到该目录的某个 chat 会话">→ 发送当前行</button>
+        <button class="hdr-btn" id="memo-save-btn" title="保存 (Ctrl/Cmd+S)" style="background:#238636;border-color:#2ea043;color:#fff;">保存</button>
+        <button class="hdr-btn" id="memo-close-btn">关闭</button>
+      </div>
+      <textarea id="memo-text" spellcheck="false" style="flex:1;width:100%;background:#0d1117;color:#c9d1d9;border:0;outline:0;padding:12px 16px;font-family:monospace;font-size:13px;line-height:1.6;resize:none;" placeholder="在这里写备忘…&#10;例：&#10;# todo&#10;- [ ] 任务一&#10;- [ ] 任务二"></textarea>
+      <div id="memo-status" style="padding:6px 12px;font-size:11px;color:#6e7681;border-top:1px solid #21262d;font-family:monospace;"></div>
+      <!-- Send-picker mini-modal -->
+      <div id="memo-picker" style="display:none;position:absolute;inset:0;background:#00000066;align-items:center;justify-content:center;border-radius:12px;">
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px 18px;width:min(90%, 440px);">
+          <h3 style="font-size:13px;color:#f0f6fc;margin-bottom:6px;">发送到 chat 会话</h3>
+          <div id="memo-picker-preview" style="color:#8b949e;font-size:11px;margin-bottom:10px;font-family:monospace;word-break:break-word;background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;max-height:90px;overflow:auto;"></div>
+          <div id="memo-picker-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px;max-height:280px;overflow:auto;"></div>
+          <div style="text-align:right;"><button class="hdr-btn" onclick="memoPickerClose()">取消</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
