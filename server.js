@@ -1492,6 +1492,7 @@ app.get('/api/sessions', (req, res) => {
         model: p.model || null,
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
+        autoCommit: !!p.autoCommit,
         cwd,
         createdAt: p.createdAt,
         mergeState: p.dirId ? gitWorktreeMergeState(directories.get(p.dirId), p) : null,
@@ -2049,6 +2050,11 @@ app.patch('/api/sessions/:id', (req, res) => {
     if (!s.autoContinue) waitInjector.resetAuto(s.id);
     appendEvent(s.dirId, 'session_autocontinue_changed', `${s.label || s.id} → ${s.autoContinue ? '自动接力' : '关闭'}`, s.id);
   }
+  if (req.body.autoCommit !== undefined) {
+    // Auto-commit and merge worktree back to base branch after task completion.
+    s.autoCommit = !!req.body.autoCommit;
+    appendEvent(s.dirId, 'session_autocommit_changed', `${s.label || s.id} → ${s.autoCommit ? '自动提交合并' : '关闭'}`, s.id);
+  }
   if (req.body.provider !== undefined) {
     // Per-session cc-switch provider. '' / null clears the override → default login.
     const v = validProviderId(s.cli || 'claude', (req.body.provider || '').toString().trim());
@@ -2240,15 +2246,16 @@ app.get('/api/sessions/:id', (req, res) => {
   const memory = persisted?.memory || null;  // distilled session memory
   const streaming = !!persisted?.streaming;
   const autoContinue = !!persisted?.autoContinue;
+  const autoCommit = !!persisted?.autoCommit;
   const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   }
 });
 
