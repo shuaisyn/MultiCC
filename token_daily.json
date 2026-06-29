@@ -257,9 +257,9 @@
   },
   "2026-06-29": {
     "_default_": {
-      "inputTokens": 27646171,
-      "outputTokens": 123981,
-      "turnCount": 65
+      "inputTokens": 56050685,
+      "outputTokens": 255220,
+      "turnCount": 71
     },
     "d9b3c869-5ce6-445c-bc1e-d8ae810f6e25": {
       "inputTokens": 29035008,
@@ -282,9 +282,9 @@
       "turnCount": 1
     },
     "xlapis-ds-周卡-1782700014062": {
-      "inputTokens": 61240744,
-      "outputTokens": 26565,
-      "turnCount": 15
+      "inputTokens": 64648625,
+      "outputTokens": 37491,
+      "turnCount": 32
     },
     "59836289-c494-499e-8fbc-1b7741d6103d": {
       "inputTokens": 17123625,
@@ -292,19 +292,19 @@
       "turnCount": 4
     },
     "c0bda28c-64f0-4f99-a853-48dd5924627b": {
-      "inputTokens": 3318,
-      "outputTokens": 42,
-      "turnCount": 1
+      "inputTokens": 4020156,
+      "outputTokens": 15751,
+      "turnCount": 4
     },
     "claude-official": {
-      "inputTokens": 1409804,
-      "outputTokens": 38639,
-      "turnCount": 6
+      "inputTokens": 14385467,
+      "outputTokens": 120676,
+      "turnCount": 12
     },
     "4e0a7e2b-6ccd-4a64-bdad-6d0ebb558242": {
-      "inputTokens": 3421,
-      "outputTokens": 50,
-      "turnCount": 1
+      "inputTokens": 6419267,
+      "outputTokens": 47113,
+      "turnCount": 5
     }
   }
 }
