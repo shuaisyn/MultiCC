@@ -70,14 +70,19 @@ function responsesToChat(responsesBody) {
   }
 
   // 3. tools: Responses 扁平格式 → Chat 嵌套格式
-  const tools = (responsesBody.tools || []).map(tool => ({
-    type: 'function',
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    },
-  }));
+  //    Responses API 有非 function 类型的内置工具（web_search、namespace 等），
+  //    国产 chat/completions API 只认 type:'function'。跳过非 function 工具，
+  //    避免 function.name 缺失导致 400 "'name' is a required property"。
+  const tools = (responsesBody.tools || [])
+    .filter(tool => !tool.type || tool.type === 'function')
+    .map(tool => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      },
+    }));
 
   // 4. 构建 Chat body
   const chatBody = {
