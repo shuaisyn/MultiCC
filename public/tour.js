@@ -307,8 +307,12 @@
     if (target) {
       rect = target.getBoundingClientRect();
       spotlight.style.display = 'block';
-      spotlight.style.left = `${Math.max(8, rect.left - margin)}px`;
-      spotlight.style.top = `${Math.max(8, rect.top - margin)}px`;
+      // Clamp the spotlight inside the viewport so it never produces a
+      // horizontal scrollbar or gets clipped on phone screens.
+      const left = Math.max(8, Math.min(rect.left - margin, innerWidth - rect.width - margin - 8));
+      const top = Math.max(8, Math.min(rect.top - margin, innerHeight - rect.height - margin - 8));
+      spotlight.style.left = `${left}px`;
+      spotlight.style.top = `${top}px`;
       spotlight.style.width = `${rect.width + margin * 2}px`;
       spotlight.style.height = `${rect.height + margin * 2}px`;
     } else {
