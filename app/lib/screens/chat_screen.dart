@@ -387,6 +387,63 @@ class _Header extends StatelessWidget {
       );
   }
 
+  /// Restart the underlying CLI process for this session (stronger than
+  /// reconnect — rebuilds the claude/codex command, like the web's 🔄 button).
+  /// Asks for confirmation first because it discards any in-flight work.
+  Future<void> _confirmRestart(
+      BuildContext context, ChatProvider provider) async {
+    final sid = provider.sessionName;
+    if (sid.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF0f1115),
+        title: Text(t('restartCli'), style: const TextStyle(fontSize: 16)),
+        content: Text(t('restartCliBody'),
+            style: const TextStyle(color: Color(0xFF8a909b), fontSize: 13)),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: Text(t('cancel'),
+                  style: const TextStyle(color: Color(0xFF8a909b)))),
+          TextButton(
+            onPressed: () => Navigator.pop(c, true),
+            style: TextButton.styleFrom(foregroundColor: const Color(0xFFe3b341)),
+            child: Text(t('restart')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(t('restarting')),
+        duration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFF14171c),
+      ));
+    try {
+      await SessionService(settings: settings).restartSession(sid);
+      if (!context.mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(t('restarted')),
+          duration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFF14171c),
+        ));
+    } catch (e) {
+      if (!context.mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(t('restartFailed', {'error': '$e'})),
+          backgroundColor: const Color(0xFFff6b63),
+        ));
+    }
+  }
+
   void _openSettings(BuildContext context, SettingsService settings) {
     Navigator.of(
       context,
