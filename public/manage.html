@@ -155,6 +155,43 @@
     }
     .dir-block:hover{border-color:var(--line-strong);transform:translateY(-2px)}
     body.has-focus .dir-block{transform:none}
+
+ /* rainbow border for running cards */
+ .card-border-rainbow {
+   border-color: transparent !important;
+   outline: 3px solid transparent;
+   outline-offset: -2px;
+   animation: rainbow-border 3s linear infinite;
+   box-shadow: 0 0 0 3px transparent;
+ }
+ @keyframes rainbow-border {
+   0%   { outline-color: #ff0000; box-shadow: 0 0 12px #ff000066; }
+   14%  { outline-color: #ff8800; box-shadow: 0 0 12px #ff880066; }
+   28%  { outline-color: #ffff00; box-shadow: 0 0 12px #ffff0066; }
+   42%  { outline-color: #00ff00; box-shadow: 0 0 12px #00ff0066; }
+   57%  { outline-color: #0088ff; box-shadow: 0 0 12px #0088ff66; }
+   71%  { outline-color: #0000ff; box-shadow: 0 0 12px #0000ff66; }
+   85%  { outline-color: #8800ff; box-shadow: 0 0 12px #8800ff66; }
+   100% { outline-color: #ff0000; box-shadow: 0 0 12px #ff000066; }
+ }
+
+ /* rainbow border for running cards (dir + lean session cards) */
+ .card-border-rainbow {
+   border: none !important;
+   outline: 3px solid transparent;
+   outline-offset: -2px;
+   animation: rainbow-border 3s linear infinite;
+ }
+ @keyframes rainbow-border {
+   0%   { outline-color: #ff0000; }
+   14%  { outline-color: #ff8800; }
+   28%  { outline-color: #ffff00; }
+   42%  { outline-color: #00ff00; }
+   57%  { outline-color: #0088ff; }
+   71%  { outline-color: #0000ff; }
+   85%  { outline-color: #8800ff; }
+   100% { outline-color: #ff0000; }
+ }
     .dir-header{display:flex;align-items:flex-start;gap:11px;padding:15px 17px 12px}
     body.has-focus .dir-header{padding:12px;gap:8px}
     .dir-toggle{width:30px;height:30px;flex:0 0 30px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:9px;background:var(--bg-soft);color:var(--muted);cursor:pointer;transition:.15s}

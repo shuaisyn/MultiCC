@@ -207,6 +207,7 @@ function setSessionStatus(sessionId, type) {
   if (_sessionStatus.get(sessionId) === type) return; // no change
   _sessionStatus.set(sessionId, type);
   renderSessions(_cachedSessions);
+refreshAllCardBorders();
 }
 
 function clearSessionStatus(sessionId) {
@@ -400,7 +401,9 @@ async function loadDashboard() {
       }
     }
     renderDashboard(directories, sessions);
-    syncMonitors(sessions);
+refreshAllCardBorders();
+refreshAllCardBorders();
+syncMonitors(sessions);
     startRuntimeTicker();
   } catch (err) {
     console.error('Failed to load dashboard:', err);
