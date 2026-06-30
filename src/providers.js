@@ -412,7 +412,15 @@ if (env.ANTHROPIC_BASE_URL) {
     const home = path.join(CODEX_HOMES_DIR, providerId);
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
     if (cfg.auth) fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(cfg.auth, null, 2));
-    if (cfg.config) fs.writeFileSync(path.join(home, 'config.toml'), cfg.config);
+    if (cfg.config) {
+      // cc-switch 导入的 config 可能带 model_catalog_json 指向 cc-switch 自己目录里的
+      // 文件（codex home 里没有），导致 codex 启动时 "config could not be loaded" → exit 1。
+      // 同时折叠 [model_providers] 空表头 + [model_providers.custom] 子表的写法。
+      let toml = cfg.config;
+      toml = toml.replace(/^model_catalog_json\s*=.*$/gm, '').replace(/\n{3,}/g, '\n\n');
+      toml = toml.replace(/\[model_providers\]\s*\n\[model_providers\.custom\]/, '[model_providers.custom]');
+      fs.writeFileSync(path.join(home, 'config.toml'), toml);
+    }
     return { env: { CODEX_HOME: home }, skipDefaultModel: false, providerName: p.name, codexHome: home };
   } catch (_) {
     return { env: {}, skipDefaultModel: false, providerName: p.name };
