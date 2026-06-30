@@ -1428,6 +1428,11 @@ function renderSessionRow(s) {
   const pendingNotes = _workspaceNotes.get(s.id) || 0;
   const mergeState = wb?.mergeState || s.mergeState || {};
   const mergeReady = !!mergeState.mergeReady;
+  const hasConflict = !!mergeState.conflict;
+  const conflictFiles = mergeState.conflictFiles || [];
+  const conflictTitle = hasConflict
+    ? `同步冲突：${conflictFiles.length} 个文件待解决（${conflictFiles.slice(0, 5).join(', ')}）— 点击查看如何解决`
+    : '';
   const mergeDetail = [
     mergeState.dirty ? tt('dirtyChanges') : '',
     mergeState.ahead > 0 ? tt('aheadCommits', { n: mergeState.ahead }) : '',
@@ -1464,6 +1469,7 @@ function renderSessionRow(s) {
         <div class="sess-runtime" id="sess-runtime-${escapeHtml(s.id)}"${runtimeText ? '' : ' style="display:none"'}>${escapeHtml(runtimeText)}</div>
       </div>
       <span class="lean-actions">
+        ${hasConflict ? `<button class="sess-conflict-btn" id="sess-conflict-${escapeHtml(s.id)}" title="${escapeHtml(conflictTitle)}" onclick="event.stopPropagation(); showSyncConflictHelp('${escapeHtml(s.id)}')">⚠️${conflictFiles.length > 0 ? ' ' + conflictFiles.length : ''}</button>` : ''}
         ${mergeReady ? `<button class="sess-merge-btn" id="sess-merge-${escapeHtml(s.id)}" title="${escapeHtml(mergeTitle)} — 点击合并" onclick="event.stopPropagation(); mergeSession('${escapeHtml(s.id)}')">🔀${mergeState.ahead > 0 ? ' ' + mergeState.ahead : ''}</button>` : ''}
         ${openBtn}
         <button class="btn-icon${mergeReady ? ' merge-ready' : ''}" id="sess-menu-${escapeHtml(s.id)}" title="${escapeHtml(mergeReady ? tt('moreSessionActionsReady', { detail: mergeTitle }) : tt('moreSessionActions'))}" onclick="event.stopPropagation(); showSessionMenu(event, '${escapeHtml(s.id)}')">⋯</button>
@@ -2505,6 +2511,52 @@ async function mergeSession(id) {
   }
 }
 
+/* ── Sync conflict (parked rebase) help + resolve controls ── */
+async function showSyncConflictHelp(id) {
+  const st = _workspaceStatus.get(id);
+  const ms = st?.mergeState || {};
+  const files = ms.conflictFiles || [];
+  const wt = (_cachedSessions.find(s => s.id === id) || {}).worktreePath || '<worktree>';
+  const msg = `会话 ${id} 同步时与基分支发生冲突，rebase 已暂停。\n\n` +
+    `冲突文件（${files.length}）：\n${files.map(f => '  · ' + f).join('\n') || '  (无)'}\n\n` +
+    `手动解决步骤：\n` +
+    `1. 进入 worktree：cd ${wt}\n` +
+    `2. 编辑上面的文件，消除 <<<<<<< / ======= / >>>>>>> 冲突标记\n` +
+    `3. 解决后点「继续」（= git add -A && git rebase --continue）\n\n` +
+    `点「继续」表示已解决；点「取消」可暂时关闭。`;
+  // Primary path: user resolved → continue. Cancel just closes; aborting the
+  // rebase is offered as an explicit follow-up so it can't happen by accident.
+  const cont = await showConfirm(msg, { okText: '继续', cancelText: '取消' });
+  if (cont) { await resolveRebase(id, 'continue'); return; }
+  const abort = await showConfirm(
+    `要放弃这次同步、把 worktree 回滚到同步前的状态吗？\n（git rebase --abort，本地已提交的改动不受影响）`,
+    { okText: '放弃 rebase', cancelText: '保留冲突现场', danger: true });
+  if (abort) await resolveRebase(id, 'abort');
+}
+
+async function resolveRebase(id, action) {
+  try {
+    const res = await fetch(`/api/sessions/${id}/rebase` + tokenQS('?'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (data.aborted) showToast('已放弃 rebase，worktree 回到同步前状态');
+      else if (data.done) showToast('冲突已解决，同步完成');
+      else showToast('rebase 已继续');
+      await loadDashboard();
+    } else if (res.status === 409) {
+      showToast(`仍有冲突未解决：${(data.conflicts || []).join(', ')}`, true);
+    } else {
+      showToast(`操作失败：${data.error || res.status}`, true);
+    }
+  } catch (err) {
+    showToast(`Error: ${err.message}`, true);
+  }
+}
+
 /* ── Workspace status board (live agent statuses per directory) ── */
 const _workspaceWs = new Map();        // dirId → WebSocket
 const _workspaceStatus = new Map();    // sessionId → { status, currentFile, lastActivity, mergeState }
@@ -2718,6 +2770,27 @@ function updateSessionMergeDom(sessionId) {
   btn.title = ready
     ? `可合并：${ms.dirty ? '有未提交改动' : ''}${ms.dirty && ms.ahead > 0 ? '，' : ''}${ms.ahead > 0 ? `${ms.ahead} 个提交领先` : ''}`
     : '把 worktree 合并回基分支';
+
+  // Live-sync the conflict badge (⚠️ N) — a parked rebase conflict that needs
+  // manual resolution. Created/removed independently of the merge badge.
+  const actionsForConflict = btn.parentElement;
+  const hasConflict = !!ms.conflict;
+  const conflictFiles = ms.conflictFiles || [];
+  let cbadge = document.getElementById(`sess-conflict-${sessionId}`);
+  if (hasConflict) {
+    const ctitle = `同步冲突：${conflictFiles.length} 个文件待解决（${conflictFiles.slice(0, 5).join(', ')}）— 点击查看如何解决`;
+    if (!cbadge) {
+      cbadge = document.createElement('button');
+      cbadge.className = 'sess-conflict-btn';
+      cbadge.id = `sess-conflict-${sessionId}`;
+      cbadge.onclick = (e) => { e.stopPropagation(); showSyncConflictHelp(sessionId); };
+      actionsForConflict.insertBefore(cbadge, actionsForConflict.firstChild);
+    }
+    cbadge.textContent = `⚠️${conflictFiles.length > 0 ? ' ' + conflictFiles.length : ''}`;
+    cbadge.title = ctitle;
+  } else if (cbadge) {
+    cbadge.remove();
+  }
 
   // Live-sync the inline merge badge (🔀 N) — create/update/remove to match
   // the current merge state without re-rendering the whole row.

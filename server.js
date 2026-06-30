@@ -724,7 +724,7 @@ function recoverTmuxSessions() {
 const {
   WORKTREE_SUBDIR, gitRun, gitIsRepo, gitHasCommit, gitBaseBranch, gitEnsureExcluded,
   gitWorktreeAdd, gitWorktreeRemove, gitWorktreeCommitAll, gitWorktreeMergeState, gitMergeBack,
-  gitSyncFromBase,
+  gitSyncFromBase, gitRebaseResolve,
 } = require('./src/git');
 const gitReadyDirs = new Set();          // dir.id once its repo is verified/initialised
 const invalidSessions = new Map();       // sessionId → reason; recovery is skipped for these
@@ -2507,7 +2507,10 @@ function autoSyncSiblingWorktrees(dir, exceptId) {
     if (s.dirId !== dir.id) continue;
     if (!s.worktreePath || !s.branch) continue;
     try {
-      const r = gitSyncFromBase(dir, s);
+      // Automatic sync: abort on conflict so an unattended sibling session is
+      // never left parked mid-rebase. The conflict still surfaces via merge
+      // state (conflict badge) so the user can sync manually and resolve it.
+      const r = gitSyncFromBase(dir, s, { abortOnConflict: true });
       if (r.ok && r.merged) {
         out.push({ id: s.id, commits: r.commits });
         appendEvent(dir.id, 'synced', `自动同步 ${r.commits} 个提交（${dir.baseBranch} 合并后）`, s.id);
@@ -2541,6 +2544,14 @@ app.post('/api/sessions/:id/sync', (req, res) => {
 
   const result = gitSyncFromBase(dir, persisted);
   if (!result.ok) {
+    // A conflict leaves the worktree parked mid-rebase; broadcast the merge
+    // state so the conflict badge shows up persistently on the card + chat,
+    // not just as a one-shot toast on this response.
+    if (result.conflicts?.length) {
+      appendEvent(dir.id, 'sync_conflict',
+        `同步 rebase 冲突，需手动解决：${result.conflicts.slice(0, 5).join(', ')}`, id);
+      workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+    }
     return res.status(result.conflicts?.length ? 409 : 400).json(result);
   }
   console.log(`[multicc] sync ${dir.baseBranch} → ${persisted.branch}: ` +
@@ -2548,6 +2559,32 @@ app.post('/api/sessions/:id/sync', (req, res) => {
   appendEvent(dir.id, 'synced',
     result.merged ? `从 ${result.baseBranch} 同步 ${result.commits} 个提交` : '已是最新', id);
   workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+  res.json(result);
+});
+
+// Resolve a parked rebase (created by a conflicting sync): continue after the
+// user staged their fixes in the worktree, or abort to roll back. Body: { action }.
+app.post('/api/sessions/:id/rebase', (req, res) => {
+  const id = req.params.id;
+  const persisted = persistedSessions.get(id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  if (!persisted.worktreePath || !persisted.branch) {
+    return res.status(400).json({ error: '该会话没有 worktree' });
+  }
+  const dir = directories.get(persisted.dirId);
+  if (!dir) return res.status(404).json({ error: 'directory not found' });
+
+  const action = (req.body && req.body.action) === 'abort' ? 'abort' : 'continue';
+  const result = gitRebaseResolve(dir, persisted, action);
+  // Always re-broadcast: success clears the badge, partial-continue updates the
+  // remaining conflict list, abort returns the worktree to a clean state.
+  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+  if (!result.ok) {
+    return res.status(result.conflicts?.length ? 409 : 400).json(result);
+  }
+  appendEvent(dir.id, 'synced',
+    result.aborted ? 'rebase 已放弃，worktree 回到同步前状态'
+      : (result.done ? 'rebase 冲突已解决并完成同步' : 'rebase 已继续'), id);
   res.json(result);
 });
 

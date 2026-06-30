@@ -93,6 +93,30 @@ function gitWorktreeCommitAll(worktreePath, message) {
   return true;
 }
 
+// Detect whether the worktree is parked mid-rebase (the state gitSyncFromBase
+// leaves behind on conflict so the user can resolve by hand). Returns the list
+// of still-conflicted files, or null when no rebase is in progress. We locate
+// git's rebase scratch dir via `rev-parse --git-path` so this works for linked
+// worktrees (where the real .git lives under <main>/.git/worktrees/<id>/).
+function gitRebaseConflicts(wtPath) {
+  if (!wtPath || !fs.existsSync(wtPath)) return null;
+  let inProgress = false;
+  try {
+    for (const which of ['rebase-merge', 'rebase-apply']) {
+      const p = gitRun(wtPath, ['rev-parse', '--git-path', which]);
+      const abs = path.isAbsolute(p) ? p : path.join(wtPath, p);
+      if (fs.existsSync(abs)) { inProgress = true; break; }
+    }
+  } catch (_) { return null; }
+  if (!inProgress) return null;
+  let files = [];
+  try {
+    files = gitRun(wtPath, ['diff', '--name-only', '--diff-filter=U'])
+      .split('\n').map(s => s.trim()).filter(Boolean);
+  } catch (_) {}
+  return files;
+}
+
 function gitWorktreeMergeState(dir, session) {
   if (!dir || !session || !session.worktreePath || !session.branch) {
     return { mergeReady: false, dirty: false, ahead: 0, reason: 'no-worktree' };
@@ -103,6 +127,25 @@ function gitWorktreeMergeState(dir, session) {
   let ahead = 0;
   let behind = 0;
   let baseCheckedOut = true;
+
+  // A worktree parked mid-rebase (a prior sync hit conflicts the user must
+  // resolve) is reported first: its index is half-applied, so the ahead/behind
+  // counts below would be meaningless and merging must be blocked until the
+  // rebase is finished or aborted.
+  const conflictFiles = gitRebaseConflicts(wtPath);
+  if (conflictFiles) {
+    return {
+      mergeReady: false,
+      dirty: true,
+      ahead: 0,
+      behind: 0,
+      baseBranch,
+      branch: session.branch,
+      baseCheckedOut: gitBaseBranch(dir.path) === baseBranch,
+      conflict: true,
+      conflictFiles,
+    };
+  }
 
   try {
     dirty = fs.existsSync(wtPath) && gitRun(wtPath, ['status', '--porcelain']).length > 0;
@@ -122,7 +165,22 @@ function gitWorktreeMergeState(dir, session) {
   // mergeReady requires combined with the ability to actually merge.
   // If base is not checked out in the main dir no merge can succeed despite
   // dirty or ahead changes; gate it so the UI indicator is truthful.
-  const canMerge = dirty || ahead > 0;
+  // `ahead` counts commits, but sync via rebase means a clean worktree never
+  // accumulates empty merge commits, so a positive `ahead` now reflects real
+  // content. We still require an actual diff to avoid flagging a branch that is
+  // only topologically ahead (e.g. legacy empty merge commits from before the
+  // rebase switch) as mergeable.
+  // `git diff --quiet` exits non-zero (throws) when there IS a diff; reuse that.
+  let hasContentDiff = ahead > 0;
+  if (ahead > 0) {
+    try {
+      gitRun(dir.path, ['diff', '--quiet', `${baseBranch}...${session.branch}`]);
+      hasContentDiff = false; // exit 0 → no content difference
+    } catch (_) {
+      hasContentDiff = true;  // non-zero → real changes
+    }
+  }
+  const canMerge = dirty || (ahead > 0 && hasContentDiff);
   return {
     mergeReady: canMerge && baseCheckedOut,
     dirty,
@@ -131,6 +189,7 @@ function gitWorktreeMergeState(dir, session) {
     baseBranch,
     branch: session.branch,
     baseCheckedOut,
+    conflict: false,
   };
 }
 
@@ -271,14 +330,41 @@ function gitMergeBack(dir, session) {
 // gitMergeBack): brings a stale worktree up to date with main. Runs entirely
 // inside the worktree, so it does NOT require base to be checked out in the main
 // dir. Auto-commits dirty changes first so nothing is lost and a dirty tree
-// doesn't block the merge. On conflict it aborts and leaves the worktree clean.
-function gitSyncFromBase(dir, session) {
+// doesn't block the rebase.
+//
+// We REBASE onto base rather than merge: a clean worktree fast-forwards with no
+// commit, and any real local commits replay on top of base, so the branch never
+// accumulates empty "Merge branch 'main'" commits that make it look topologically
+// ahead while carrying no content (the bug this replaced).
+//
+// Conflict handling is governed by opts.abortOnConflict:
+//   • false (default, a user-initiated sync): leave the rebase PARKED at the
+//     conflicting commit so the user can resolve it by hand in the worktree
+//     (edit → git add → git rebase --continue). Returns { conflicts, rebaseInProgress }.
+//   • true (automatic sibling sync after someone merged into base): abort and
+//     leave the worktree untouched, so an unattended session is never dropped
+//     mid-rebase. The conflict is surfaced via merge state for the user to sync
+//     manually when ready.
+function gitSyncFromBase(dir, session, opts = {}) {
+  const abortOnConflict = !!opts.abortOnConflict;
   const dirPath = dir.path;
   const branch = session.branch;
   const baseBranch = dir.baseBranch || gitBaseBranch(dirPath);
   const wtPath = session.worktreePath;
   if (!branch || !wtPath || !fs.existsSync(wtPath)) {
     return { ok: false, error: 'session has no worktree' };
+  }
+
+  // If a previous sync left this worktree parked mid-rebase, don't start another
+  // one on top of it — report the existing conflict so the UI keeps prompting.
+  const parked = gitRebaseConflicts(wtPath);
+  if (parked) {
+    return {
+      ok: false,
+      conflicts: parked,
+      rebaseInProgress: true,
+      error: `worktree 仍处于 rebase 冲突中（${parked.length} 个文件未解决），请先解决或 abort`,
+    };
   }
 
   // Stash-free safety: commit any uncommitted work first.
@@ -298,24 +384,88 @@ function gitSyncFromBase(dir, session) {
 
   try {
     gitRun(wtPath, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
-      'merge', '--no-edit', baseBranch]);
+      'rebase', baseBranch]);
     return { ok: true, merged: true, committed, commits: behind, baseBranch };
   } catch (e) {
     let conflicts = [];
     try {
       conflicts = gitRun(wtPath, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
     } catch (_) {}
-    try { gitRun(wtPath, ['merge', '--abort']); } catch (_) {}
     if (conflicts.length > 0) {
+      if (abortOnConflict) {
+        try { gitRun(wtPath, ['rebase', '--abort']); } catch (_) {}
+        return {
+          ok: false,
+          conflicts,
+          rebaseInProgress: false,
+          error: `与 ${baseBranch} 存在冲突（${conflicts.length} 个文件）— 已 abort，worktree 未改动，请手动同步后解决`,
+        };
+      }
+      // User-initiated: keep the rebase parked for manual resolution.
       return {
         ok: false,
         conflicts,
-        error: `与 ${baseBranch} 存在冲突（${conflicts.length} 个文件）— 已 abort，worktree 未改动，请手动同步`,
+        rebaseInProgress: true,
+        committed,
+        error: `与 ${baseBranch} 存在冲突（${conflicts.length} 个文件）— rebase 已暂停，请在 worktree 解决后继续`,
       };
     }
+    // No conflict markers but rebase still failed: abort to leave a clean tree.
+    try { gitRun(wtPath, ['rebase', '--abort']); } catch (_) {}
     const details = e.stderr ? String(e.stderr).trim() : e.message;
     return { ok: false, error: details || 'sync failed' };
   }
+}
+
+// Resolve a parked rebase: continue it (after the user staged their fixes) or
+// abort it (give up and return the worktree to its pre-sync branch tip).
+// Used by the "继续 / 放弃" controls the conflict banner exposes.
+function gitRebaseResolve(dir, session, action) {
+  const wtPath = session.worktreePath;
+  if (!wtPath || !fs.existsSync(wtPath)) return { ok: false, error: 'session has no worktree' };
+  if (!gitRebaseConflicts(wtPath)) {
+    return { ok: false, error: '当前没有进行中的 rebase' };
+  }
+  if (action === 'abort') {
+    try {
+      gitRun(wtPath, ['rebase', '--abort']);
+      return { ok: true, aborted: true };
+    } catch (e) {
+      return { ok: false, error: e.stderr ? String(e.stderr).trim() : e.message };
+    }
+  }
+  // continue: stage whatever the user resolved, then advance the rebase.
+  try {
+    gitRun(wtPath, ['add', '-A']);
+  } catch (_) {}
+  // Still-unmerged files mean the user hasn't finished; refuse to continue.
+  const remaining = gitRebaseConflicts(wtPath) || [];
+  const stillConflicted = (() => {
+    try { return gitRun(wtPath, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean); }
+    catch (_) { return remaining; }
+  })();
+  if (stillConflicted.length > 0) {
+    return { ok: false, conflicts: stillConflicted, rebaseInProgress: true,
+      error: `仍有 ${stillConflicted.length} 个文件存在冲突标记，请全部解决后再继续` };
+  }
+  try {
+    gitRun(wtPath, ['-c', 'user.email=multicc@local', '-c', 'user.name=multicc',
+      'rebase', '--continue'], );
+  } catch (e) {
+    // Continuing can surface the NEXT commit's conflicts; report them, still parked.
+    let conflicts = [];
+    try { conflicts = gitRun(wtPath, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean); }
+    catch (_) {}
+    if (conflicts.length > 0) {
+      return { ok: false, conflicts, rebaseInProgress: true,
+        error: `下一个提交又出现 ${conflicts.length} 个冲突文件，请继续解决` };
+    }
+    return { ok: false, error: e.stderr ? String(e.stderr).trim() : e.message };
+  }
+  // Rebase may still be in progress if more commits remain but applied cleanly;
+  // loop is handled by git itself, so a success here means fully done.
+  const done = !gitRebaseConflicts(wtPath);
+  return { ok: true, continued: true, done };
 }
 
 module.exports = {
@@ -331,4 +481,6 @@ module.exports = {
   gitWorktreeMergeState,
   gitMergeBack,
   gitSyncFromBase,
+  gitRebaseConflicts,
+  gitRebaseResolve,
 };
