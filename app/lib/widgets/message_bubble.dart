@@ -272,6 +272,30 @@ class _TimingLine extends StatelessWidget {
   }
 }
 
+/// Regex matching a local-filesystem image path referenced in assistant
+/// markdown — mirrors the web's `_LOCAL_IMG_RE` (see public/chat.js). When the
+/// agent writes `![](/tmp/x.png)` we can't load that directly, so the image
+/// builder rewrites it to `/api/download?path=…&inline=1` (streamed through
+/// the multicc server) exactly like the web chat does.
+final _localImgRe = RegExp(
+  r'^(?:file:///|/(?:tmp|Users|home|var|private|opt|Volumes|mnt|root|data)/|[A-Za-z]:[\\/])',
+);
+
+/// Build the full HTTP url for a local-filesystem image, routed through the
+/// multicc server's `/api/download?inline=1` endpoint (with token if set).
+String? _localImageUrl(String rawPath) {
+  final s = SettingsService.current;
+  if (s == null) return null;
+  final p = rawPath.replaceFirst(RegExp(r'^file://'), '');
+  var url = s.buildHttpUrl(
+    '/api/download?path=${Uri.encodeQueryComponent(p)}&inline=1',
+  );
+  if (s.token.isNotEmpty) {
+    url += '&token=${Uri.encodeQueryComponent(s.token)}';
+  }
+  return url;
+}
+
 class _MarkdownContent extends StatelessWidget {
   final String text;
   final bool isStreaming;
@@ -284,6 +308,18 @@ class _MarkdownContent extends StatelessWidget {
       children: [
         MarkdownBody(
           data: text,
+          imageBuilder: (uri, title, alt) {
+            final raw = uri.toString();
+            final isLocal = _localImgRe.hasMatch(raw);
+            final url = isLocal ? _localImageUrl(raw) : raw;
+            if (url == null || url.isEmpty) {
+              return _ImageErrorNote(name: alt ?? raw);
+            }
+            return _InlineImage(
+              url: url,
+              name: alt ?? (isLocal ? raw : 'image'),
+            );
+          },
           styleSheet: MarkdownStyleSheet(
             p: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14, height: 1.6),
             code: const TextStyle(
