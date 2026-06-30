@@ -134,6 +134,12 @@ async function loadSessionIdentity() {
   } catch (e) { /* keep the id-based title */ }
 }
 loadSessionIdentity();
+// Double-click the visible session title in the header to rename it.
+  const _stEl = document.getElementById('session-title');
+  if (_stEl) {
+    _stEl.style.cursor = 'pointer';
+    _stEl.addEventListener('dblclick', (ev) => { ev.preventDefault(); ev.stopPropagation(); renameSessionFromChat(); });
+  }
 
 /* ── Markdown setup ── */
 if (typeof marked !== 'undefined' && marked.setOptions) {
@@ -1779,6 +1785,84 @@ function confirmInPage(message) {
     document.body.append(backdrop);
     ok.focus();
   });
+}
+
+// Lightweight in-page text prompt (window.prompt is unreliable in WebViews).
+// Resolves to the trimmed string, or null if cancelled.
+function promptInPage(title, defaultValue) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.style.cssText = 'position:fixed;inset:0;z-index:12000;background:#0009;display:flex;align-items:center;justify-content:center;padding:18px;';
+    const card = document.createElement('div');
+    card.style.cssText = 'width:min(92vw,440px);background:#0f1115;border:1px solid #30363d;border-radius:10px;box-shadow:0 18px 60px #000c;color:#e7eaee;overflow:hidden;';
+    const head = document.createElement('div');
+    head.textContent = title;
+    head.style.cssText = 'padding:14px 16px;border-bottom:1px solid #20242b;font-size:15px;font-weight:700;color:#f2f4f7;';
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:16px;';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = defaultValue || '';
+    input.maxLength = 80;
+    input.style.cssText = 'width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:9px 11px;font-size:14px;color:#e7eaee;outline:none;';
+    input.placeholder = '会话别名（留空则重置为 id）';
+    body.append(input);
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid #20242b;';
+    const cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'border:1px solid #30363d;background:#161b22;color:#c9d1d9;border-radius:7px;padding:7px 13px;font-weight:700;cursor:pointer;';
+    const ok = document.createElement('button');
+    ok.textContent = '保存';
+    ok.style.cssText = 'border:1px solid #58a6ff;background:#1f6feb;color:#fff;border-radius:7px;padding:7px 13px;font-weight:700;cursor:pointer;';
+    const finish = (value) => {
+      document.removeEventListener('keydown', onKey);
+      backdrop.remove();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+      else if (e.key === 'Enter') { e.preventDefault(); finish(input.value.trim()); }
+    };
+    cancel.onclick = () => finish(null);
+    ok.onclick = () => finish(input.value.trim());
+    backdrop.onclick = (e) => { if (e.target === backdrop) finish(null); };
+    document.addEventListener('keydown', onKey);
+    actions.append(cancel, ok);
+    card.append(head, body, actions);
+    backdrop.append(card);
+    document.body.append(backdrop);
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  });
+}
+
+// Double-click the header session title to rename it.
+async function renameSessionFromChat() {
+  if (!_sessionName) { addSystemMsg('无 session id，无法改名'); return; }
+  let current = _sessionName;
+  try {
+    const r = await fetch(withToken('/api/sessions'));
+    const arr = (await r.json()) || [];
+    const list = Array.isArray(arr) ? arr : (arr.sessions || []);
+    const s = list.find(x => x.id === _sessionName);
+    if (s && s.label) current = s.label;
+  } catch (_) {}
+  const next = await promptInPage('重命名会话', current);
+  if (next === null) return;
+  if (next.length > 80) { addSystemMsg('名称过长（最多 80 字符）'); return; }
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: next }),
+    });
+    const data = await res.json();
+    if (!res.ok) { addSystemMsg('改名失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    addSystemMsg(next ? `✓ 会话已改名为 ${next}` : '✓ 会话名称已重置');
+    await loadSessionIdentity();
+  } catch (e) {
+    addSystemMsg('改名失败：' + e.message);
+  }
 }
 
 async function requestMerge() {
