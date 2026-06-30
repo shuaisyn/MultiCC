@@ -2,8 +2,14 @@
 # ============================================================================
 # MultiCC — One-Click Install Script
 # ============================================================================
+# MultiCC version  1.0.0
+# Release channel  stable — see https://github.com/lsjwzh/MultiCC/releases
+# ============================================================================
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/main/install.sh | bash
+#   Stable release:
+#     curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/v1.0.0/install.sh | bash
+#   Latest (main branch, may be ahead of the latest stable release):
+#     curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/main/install.sh | bash
 #
 # Or download and run locally:
 #   chmod +x install.sh && ./install.sh
@@ -84,6 +90,9 @@ banner() {
   echo ""
 }
 
+# MultiCC version — keep in sync with package.json when cutting a release
+INSTALLER_VERSION="1.0.0"
+
 # ── Parse flags ──────────────────────────────────────────────────────────
 INSTALL_DIR=""
 ACCESS_TOKEN=""
@@ -105,10 +114,13 @@ while [ $# -gt 0 ]; do
     --no-clone)  NO_CLONE=true; shift ;;
     --branch)    need_val "$1" "$#"; BRANCH="$2"; shift 2 ;;
     --help|-h)
-      cat << 'HELP'
-MultiCC — One-Click Install Script
+      cat << HELP
+MultiCC — One-Click Install Script  v${INSTALLER_VERSION}
 
-Usage:
+Usage — stable release:
+  curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/v${INSTALLER_VERSION}/install.sh | bash
+
+Usage — latest (main branch, may be ahead of stable):
   curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/main/install.sh | bash
 
 Or download and run locally:
@@ -132,6 +144,7 @@ HELP
     *) err "Unknown option: $1 (use --help)"; exit 1 ;;
   esac
 done
+
 
 REPO_URL="https://github.com/lsjwzh/MultiCC.git"
 
