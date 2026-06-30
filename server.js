@@ -53,6 +53,7 @@ const cronTasks = require('./cron-tasks');
 const webpush = require('web-push');
 const macosPower = require('./macos-power');
 const gitPush = require('./git-push');
+const { runGit: gitRunQueued, makeTtlCache } = require('./src/git-queue');
 
 const crypto = require('crypto');
 const bus = require('./src/bus');
@@ -726,6 +727,30 @@ const {
   gitWorktreeAdd, gitWorktreeRemove, gitWorktreeCommitAll, gitWorktreeMergeState, gitMergeBack,
   gitSyncFromBase, gitRebaseResolve,
 } = require('./src/git');
+
+// gitWorktreeMergeState fires ~4 synchronous git subprocesses per session. It is
+// read once per session on every /api/sessions poll, so on a busy server (dozens
+// of sessions × many open clients) it forks git nonstop and blocks the event
+// loop. Wrap it in a short TTL memo (with per-entry jitter so a batch populated
+// in one poll doesn't all expire on the same later tick). Mutating endpoints
+// (merge/sync/commit) call mergeStateFresh() to recompute and refresh the cache
+// so the UI never shows a stale indicator after an actual git change. WS
+// broadcasts already push fresh state to active viewers, so the bounded staleness
+// only ever affects passive REST polling.
+const _mergeStateCache = makeTtlCache(4000, 3000);
+function mergeStateKey(session) { return session && session.id ? session.id : null; }
+function mergeStateCached(dir, session) {
+  const key = mergeStateKey(session);
+  if (!key) return gitWorktreeMergeState(dir, session);
+  return _mergeStateCache.get(key, () => gitWorktreeMergeState(dir, session));
+}
+function mergeStateFresh(dir, session) {
+  const value = gitWorktreeMergeState(dir, session);
+  const key = mergeStateKey(session);
+  if (key) _mergeStateCache.set(key, value);
+  return value;
+}
+
 const gitReadyDirs = new Set();          // dir.id once its repo is verified/initialised
 const invalidSessions = new Map();       // sessionId → reason; recovery is skipped for these
 
@@ -1495,7 +1520,7 @@ app.get('/api/sessions', (req, res) => {
         autoCommit: !!p.autoCommit,
         cwd,
         createdAt: p.createdAt,
-        mergeState: p.dirId ? gitWorktreeMergeState(directories.get(p.dirId), p) : null,
+        mergeState: p.dirId ? mergeStateCached(directories.get(p.dirId), p) : null,
       };
       if (p.kind === 'chat' || active === undefined) {
         // Chat sessions don't live in `sessions` (terminal) map; derive active state from chatSessions
@@ -1677,9 +1702,11 @@ app.get('/api/fs/list', (req, res) => {
   }
 });
 
-app.get('/api/directories', (req, res) => {
-  // Annotate each directory with counts per (cli, kind)
-  const list = [...directories.values()].map(d => {
+app.get('/api/directories', async (req, res) => {
+  // Annotate each directory with counts per (cli, kind). pushState is cached +
+  // serialized in git-push.js, so this Promise.all never forks more than one git
+  // at a time and most polls resolve from cache without spawning git at all.
+  const list = await Promise.all([...directories.values()].map(async d => {
     const counts = { claude_terminal: 0, claude_chat: 0, codex_terminal: 0, codex_chat: 0 };
     for (const s of persistedSessions.values()) {
       if (s.dirId !== d.id) continue;
@@ -1688,12 +1715,12 @@ app.get('/api/directories', (req, res) => {
     }
     let pushState;
     try {
-      pushState = gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path));
+      pushState = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path));
     } catch (error) {
       pushState = { available: false, hasRemote: false, ahead: 0, behind: 0, reason: error.message };
     }
     return { ...d, counts, pushState };
-  });
+  }));
   res.json(list);
 });
 
@@ -1905,7 +1932,7 @@ app.get('/api/directories/:id/sessions', (req, res) => {
         branch: s.branch || null,
         worktreePath: s.worktreePath || null,
         invalid: invalidSessions.get(s.id) || null,
-        mergeState: gitWorktreeMergeState(d, s),
+        mergeState: mergeStateCached(d, s),
         lastActivity: s.kind === 'chat' ? chatLastActivity(s.id, activeChat) : active?.lastActivity || null,
         active: s.kind === 'terminal' ? !!active : !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)),
         clients: s.kind === 'terminal' ? (active?.clients.size || 0) : (activeChat?.clients.size || 0),
@@ -2238,7 +2265,7 @@ app.get('/api/sessions/:id', (req, res) => {
   const persisted = persistedSessions.get(id);
   if (!active && !persisted) return res.status(404).json({ error: 'Session not found' });
   const dir = persisted?.dirId ? directories.get(persisted.dirId) : null;
-  const mergeState = persisted ? gitWorktreeMergeState(dir, persisted) : null;
+  const mergeState = persisted ? mergeStateCached(dir, persisted) : null;
   const cli = persisted?.cli || 'claude';
   const model = persisted?.model || null;
   // The session's own role override (null = inherits the directory default).
@@ -2264,10 +2291,10 @@ app.get('/api/sessions/:id/merge-status', (req, res) => {
   if (!persisted) return res.status(404).json({ error: 'session not found' });
   const dir = directories.get(persisted.dirId);
   if (!dir) return res.status(404).json({ error: 'directory not found' });
-  res.json(gitWorktreeMergeState(dir, persisted));
+  res.json(mergeStateCached(dir, persisted));
 });
 
-app.get('/api/sessions/:id/diff', (req, res) => {
+app.get('/api/sessions/:id/diff', async (req, res) => {
   const persisted = persistedSessions.get(req.params.id);
   if (!persisted) return res.status(404).json({ error: 'session not found' });
   const dir = directories.get(persisted.dirId);
@@ -2279,10 +2306,10 @@ app.get('/api/sessions/:id/diff', (req, res) => {
   const wt = persisted.worktreePath;
   const MAX_DIFF = 1024 * 1024;   // 1 MiB cap; keep UI snappy
   let diff = '', stat = '', truncated = false, error = null;
+  // Async + serialized via the git queue: a big/slow diff no longer blocks the
+  // event loop, and never runs concurrently with other git work.
   try {
-    diff = execFileSync('git', ['diff', '--no-color', baseBranch], {
-      cwd: wt, encoding: 'utf8', maxBuffer: MAX_DIFF + 16 * 1024,
-    });
+    diff = await gitRunQueued(wt, ['diff', '--no-color', baseBranch], { maxBuffer: MAX_DIFF + 16 * 1024 });
     if (diff.length > MAX_DIFF) { diff = diff.slice(0, MAX_DIFF); truncated = true; }
   } catch (e) {
     if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
@@ -2293,9 +2320,7 @@ app.get('/api/sessions/:id/diff', (req, res) => {
     }
   }
   try {
-    stat = execFileSync('git', ['diff', '--stat', '--no-color', baseBranch], {
-      cwd: wt, encoding: 'utf8', maxBuffer: 256 * 1024,
-    });
+    stat = await gitRunQueued(wt, ['diff', '--stat', '--no-color', baseBranch], { maxBuffer: 256 * 1024 });
   } catch (_) { /* stat is best-effort */ }
   res.json({
     baseBranch,
@@ -2303,7 +2328,7 @@ app.get('/api/sessions/:id/diff', (req, res) => {
     stat,
     diff,
     truncated,
-    mergeState: gitWorktreeMergeState(dir, persisted),
+    mergeState: mergeStateCached(dir, persisted),
     error,
   });
 });
@@ -2482,7 +2507,7 @@ app.post('/api/sessions/:id/merge', (req, res) => {
     (result.merged ? `${result.commits} commit(s)` : 'nothing to merge'));
   appendEvent(dir.id, 'merged',
     result.merged ? `${result.commits} 个提交 → ${dir.baseBranch}` : '无新提交', id);
-  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: mergeStateFresh(dir, persisted) });
 
   // When this merge actually advanced the base branch, every OTHER worktree in
   // the same directory is now behind base. Auto-sync them so siblings don't have
@@ -2513,11 +2538,11 @@ function autoSyncSiblingWorktrees(dir, exceptId) {
       if (r.ok && r.merged) {
         out.push({ id: s.id, commits: r.commits });
         appendEvent(dir.id, 'synced', `自动同步 ${r.commits} 个提交（${dir.baseBranch} 合并后）`, s.id);
-        workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: s.id, mergeState: gitWorktreeMergeState(dir, s) });
+        workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: s.id, mergeState: mergeStateFresh(dir, s) });
       } else if (!r.ok && r.conflicts?.length) {
         out.push({ id: s.id, conflict: true, files: r.conflicts });
         appendEvent(dir.id, 'sync_conflict', `自动同步遇冲突，需手动处理：${r.conflicts.slice(0, 5).join(', ')}`, s.id);
-        workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: s.id, mergeState: gitWorktreeMergeState(dir, s) });
+        workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: s.id, mergeState: mergeStateFresh(dir, s) });
       }
     } catch (e) {
       console.warn(`[multicc] auto-sync sibling ${s.id} failed: ${e.message}`);
@@ -2549,7 +2574,7 @@ app.post('/api/sessions/:id/sync', (req, res) => {
     if (result.conflicts?.length) {
       appendEvent(dir.id, 'sync_conflict',
         `同步 rebase 冲突，需手动解决：${result.conflicts.slice(0, 5).join(', ')}`, id);
-      workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+      workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: mergeStateFresh(dir, persisted) });
     }
     return res.status(result.conflicts?.length ? 409 : 400).json(result);
   }
@@ -2557,7 +2582,7 @@ app.post('/api/sessions/:id/sync', (req, res) => {
     (result.merged ? `${result.commits} commit(s)` : 'already up to date'));
   appendEvent(dir.id, 'synced',
     result.merged ? `从 ${result.baseBranch} 同步 ${result.commits} 个提交` : '已是最新', id);
-  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: mergeStateFresh(dir, persisted) });
   res.json(result);
 });
 
@@ -2577,7 +2602,7 @@ app.post('/api/sessions/:id/rebase', (req, res) => {
   const result = gitRebaseResolve(dir, persisted, action);
   // Always re-broadcast: success clears the badge, partial-continue updates the
   // remaining conflict list, abort returns the worktree to a clean state.
-  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: gitWorktreeMergeState(dir, persisted) });
+  workspaceBroadcast(dir.id, { type: 'merge_status', sessionId: id, mergeState: mergeStateFresh(dir, persisted) });
   if (!result.ok) {
     return res.status(result.conflicts?.length ? 409 : 400).json(result);
   }
@@ -4637,7 +4662,7 @@ function setSessionStatus(sessionId, patch) {
     type: 'status', sessionId,
     status: next.status, currentFile: next.currentFile, lastActivity: next.lastActivity,
     runStartedAt: next.runStartedAt, runEndedAt: next.runEndedAt,
-    mergeState: gitWorktreeMergeState(directories.get(persisted.dirId), persisted),
+    mergeState: mergeStateCached(directories.get(persisted.dirId), persisted),
   });
 }
 
@@ -4656,7 +4681,7 @@ function workspaceSnapshot(dirId) {
       runStartedAt: st.runStartedAt || null, runEndedAt: st.runEndedAt || null,
       clients: s.kind === 'chat' ? (chat?.clients.size || 0) : (active?.clients.size || 0),
       pendingNotes: pendingNotesFor(s.id).length,
-      mergeState: gitWorktreeMergeState(directories.get(s.dirId), s),
+      mergeState: mergeStateCached(directories.get(s.dirId), s),
       summary: sum?.summary || null, summaryTs: sum?.ts || null,
     });
   }
