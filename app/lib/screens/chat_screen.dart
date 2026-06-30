@@ -22,6 +22,7 @@ import '../widgets/message_bubble.dart';
 import '../widgets/model_picker.dart';
 import '../widgets/thinking_indicator.dart';
 import 'memo_screen.dart';
+import 'file_browser_screen.dart';
 import 'settings_screen.dart';
 import 'share_messages_screen.dart';
 
@@ -355,6 +356,16 @@ class _Header extends StatelessWidget {
                     ),
                   ),
                 ),
+                onFiles: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => FileBrowserScreen(
+                      sessionId: provider.sessionName,
+                      settings: settings,
+                    ),
+                  ),
+                ),
+                onRestart: () => _confirmRestart(context, provider),
               ),
             ],
           );
@@ -1668,6 +1679,8 @@ class _HeaderOverflowMenu extends StatelessWidget {
   final VoidCallback onSettings;
   final VoidCallback onShare;
   final VoidCallback onShareMessages;
+  final VoidCallback onFiles;
+  final VoidCallback onRestart;
   const _HeaderOverflowMenu({
     required this.mergeReady,
     required this.onRole,
@@ -1677,6 +1690,8 @@ class _HeaderOverflowMenu extends StatelessWidget {
     required this.onSettings,
     required this.onShare,
     required this.onShareMessages,
+    required this.onFiles,
+    required this.onRestart,
   });
 
   @override
@@ -1709,6 +1724,12 @@ class _HeaderOverflowMenu extends StatelessWidget {
           case 'share-msgs':
             onShareMessages();
             break;
+          case 'files':
+            onFiles();
+            break;
+          case 'restart':
+            onRestart();
+            break;
           case 'settings':
             onSettings();
             break;
@@ -1731,6 +1752,10 @@ class _HeaderOverflowMenu extends StatelessWidget {
           mergeReady ? t('mergeWorktreeReady', {'base': ''}) : t('mergeWorktree'),
           mergeReady ? const Color(0xFFe3b341) : const Color(0xFFe7eaee),
         ),
+        _item('files', Icons.folder_open_outlined, t('fileBrowser'),
+            const Color(0xFFe7eaee)),
+        _item('restart', Icons.restart_alt_rounded, t('restartCli'),
+            const Color(0xFFe3b341)),
         const PopupMenuDivider(),
         _item('settings', Icons.settings_outlined, t('settings'),
             const Color(0xFFe7eaee)),

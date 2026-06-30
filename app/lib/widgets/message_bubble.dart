@@ -272,6 +272,30 @@ class _TimingLine extends StatelessWidget {
   }
 }
 
+/// Regex matching a local-filesystem image path referenced in assistant
+/// markdown — mirrors the web's `_LOCAL_IMG_RE` (see public/chat.js). When the
+/// agent writes `![](/tmp/x.png)` we can't load that directly, so the image
+/// builder rewrites it to `/api/download?path=…&inline=1` (streamed through
+/// the multicc server) exactly like the web chat does.
+final _localImgRe = RegExp(
+  r'^(?:file:///|/(?:tmp|Users|home|var|private|opt|Volumes|mnt|root|data)/|[A-Za-z]:[\\/])',
+);
+
+/// Build the full HTTP url for a local-filesystem image, routed through the
+/// multicc server's `/api/download?inline=1` endpoint (with token if set).
+String? _localImageUrl(String rawPath) {
+  final s = SettingsService.current;
+  if (s == null) return null;
+  final p = rawPath.replaceFirst(RegExp(r'^file://'), '');
+  var url = s.buildHttpUrl(
+    '/api/download?path=${Uri.encodeQueryComponent(p)}&inline=1',
+  );
+  if (s.token.isNotEmpty) {
+    url += '&token=${Uri.encodeQueryComponent(s.token)}';
+  }
+  return url;
+}
+
 class _MarkdownContent extends StatelessWidget {
   final String text;
   final bool isStreaming;
@@ -284,6 +308,18 @@ class _MarkdownContent extends StatelessWidget {
       children: [
         MarkdownBody(
           data: text,
+          imageBuilder: (uri, title, alt) {
+            final raw = uri.toString();
+            final isLocal = _localImgRe.hasMatch(raw);
+            final url = isLocal ? _localImageUrl(raw) : raw;
+            if (url == null || url.isEmpty) {
+              return _ImageErrorNote(name: alt ?? raw);
+            }
+            return _InlineImage(
+              url: url,
+              name: alt ?? (isLocal ? raw : 'image'),
+            );
+          },
           styleSheet: MarkdownStyleSheet(
             p: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14, height: 1.6),
             code: const TextStyle(
@@ -379,6 +415,176 @@ class _SystemBubble extends StatelessWidget {
             message.content,
             style: const TextStyle(color: Color(0xFF5b616c), fontSize: 12),
             textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Inline image rendering for assistant markdown
+//  Local filesystem paths (`![](/tmp/x.png)`) are rewritten to the multicc
+//  server's `/api/download?inline=1` route — same trick the web chat uses —
+//  so the agent can show users screenshots / generated charts. Tap to open a
+//  fullscreen zoomable view (InteractiveViewer, pinch + drag).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inline image shown inside a markdown message bubble. Constrained to a
+/// sensible max width, rounded corners, loading spinner, graceful error note.
+class _InlineImage extends StatelessWidget {
+  final String url;
+  final String name;
+  const _InlineImage({required this.url, required this.name});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: GestureDetector(
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => _ImageZoomScreen(url: url, name: name),
+            fullscreenDialog: true,
+          ),
+        ),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 280),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.network(
+              url,
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+              loadingBuilder: (ctx, child, progress) => progress == null
+                  ? child
+                  : Container(
+                      height: 80,
+                      color: const Color(0xFF0f1115),
+                      alignment: Alignment.center,
+                      child: const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Color(0xFF6aa3ff)),
+                      ),
+                    ),
+              errorBuilder: (ctx, err, _) =>
+                  _ImageErrorNote(name: name, compact: true),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Fallback shown when a referenced image can't be resolved or loaded.
+class _ImageErrorNote extends StatelessWidget {
+  final String name;
+  final bool compact;
+  const _ImageErrorNote({required this.name, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: EdgeInsets.symmetric(
+          horizontal: 8, vertical: compact ? 6 : 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF140a0a),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF5b2d28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.broken_image_outlined,
+              size: 14, color: Color(0xFFff6b63)),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              compact ? '图片无法加载: $name' : '⚠ 无法加载图片: $name',
+              style: const TextStyle(color: Color(0xFFff6b63), fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Fullscreen, pinch-to-zoom image viewer. Black background, drag to pan,
+/// double-tap to reset. Reached by tapping an inline image.
+class _ImageZoomScreen extends StatefulWidget {
+  final String url;
+  final String name;
+  const _ImageZoomScreen({required this.url, required this.name});
+
+  @override
+  State<_ImageZoomScreen> createState() => _ImageZoomScreenState();
+}
+
+class _ImageZoomScreenState extends State<_ImageZoomScreen> {
+  final _tctrl = TransformationController();
+
+  @override
+  void dispose() {
+    _tctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text(widget.name,
+            style: const TextStyle(fontSize: 13),
+            overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, size: 20),
+            tooltip: '重置缩放',
+            onPressed: () => _tctrl.value = Matrix4.identity(),
+          ),
+        ],
+      ),
+      body: GestureDetector(
+        onDoubleTap: () => _tctrl.value = Matrix4.identity(),
+        child: Center(
+          child: InteractiveViewer(
+            transformationController: _tctrl,
+            minScale: 0.5,
+            maxScale: 5.0,
+            boundaryMargin: const EdgeInsets.all(double.infinity),
+            child: Image.network(
+              widget.url,
+              fit: BoxFit.contain,
+              loadingBuilder: (ctx, child, progress) => progress == null
+                  ? child
+                  : const Center(
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white70),
+                    ),
+              errorBuilder: (ctx, err, _) => Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.broken_image,
+                        size: 48, color: Color(0xFFff6b63)),
+                    const SizedBox(height: 12),
+                    Text('无法加载: ${widget.name}',
+                        style: const TextStyle(
+                            color: Color(0xFFff6b63), fontSize: 13)),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ),
