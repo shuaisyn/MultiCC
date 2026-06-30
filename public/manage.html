@@ -377,7 +377,12 @@
       body.nav-open #nav{transform:none}
       body.nav-open::before{content:"";position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:10002;pointer-events:auto}
       #nav-toggle{display:grid !important}
-      #directory-list{grid-template-columns:1fr}
+      /* minmax(0,1fr) prevents grid track from being forced wider by long
+         non-breaking content (e.g. nowrap path strings) inside the cards —
+         plain "1fr" expands to minmax(auto,1fr) and gets pushed to 400px on
+         narrow viewports, which used to clip cards on phones. */
+      #directory-list{grid-template-columns:minmax(0,1fr)}
+      .dir-block,.dir-header,.dir-preview,.dir-main{min-width:0}
       .search{display:none}
       .setting-row{flex-direction:column;align-items:stretch;gap:5px}
       .setting-row label{text-align:left;flex:none}
