@@ -272,6 +272,13 @@
     }
     .msg.assistant table {
       border-collapse: collapse; margin: 8px 0; font-size: 13px; width: 100%;
+      /* On narrow viewports, wide markdown tables used to push the message
+         bubble past 92% and clip the right side. Make the table itself a
+         scroll container so the bubble width is preserved. */
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .msg.assistant th, .msg.assistant td {
       border: 1px solid #30363d; padding: 4px 8px; text-align: left;
@@ -280,10 +287,12 @@
     .msg.assistant code:not([class]) {
       background: #21262d; padding: 2px 5px; border-radius: 4px; font-size: 13px;
       font-family: 'Cascadia Code', 'Fira Code', monospace;
+      word-break: break-word;
     }
     .msg.assistant pre {
       background: #0d1117; border: 1px solid #21262d; border-radius: 8px;
       padding: 12px; margin: 8px 0; overflow-x: auto; font-size: 13px; line-height: 1.5;
+      max-width: 100%;
     }
     .msg.assistant pre code {
       background: none !important; padding: 0 !important;
