@@ -463,6 +463,8 @@ let activeContentType = null;
 let activeContentIndex = -1;
 let currentCli = 'claude';
 let _mergeReady = false;
+let _syncConflict = false;
+let _syncConflictFiles = [];
 let _mergePollTimer = null;
 // Track last-warned behind count so we surface a notice when the worktree first
 // falls behind its base branch (or falls further), not on every 5s poll.
@@ -1570,6 +1572,8 @@ function mergeStatusText(st) {
 
 function applyMergeStatus(st) {
   _mergeReady = !!(st && st.mergeReady);
+  _syncConflict = !!(st && st.conflict);
+  _syncConflictFiles = (st && st.conflictFiles) || [];
   if (mergeBtn) {
     mergeBtn.classList.toggle('merge-ready', _mergeReady);
     mergeBtn.title = _mergeReady ? mergeStatusText(st) : tt('mergeWorktreeTitle');
@@ -1580,6 +1584,79 @@ function applyMergeStatus(st) {
     if (text) text.textContent = mergeStatusText(st);
   }
   applyBehindStatus(st);
+}
+
+// Persistent conflict banner: rendered while the worktree is parked mid-rebase
+// after a conflicting sync. Stays put across refreshes (driven by merge state,
+// not a one-shot toast) and offers in-place 继续 / 放弃 controls.
+function applyConflictBanner(st) {
+  let bar = document.getElementById('worktree-conflict-bar');
+  const conflict = !!(st && st.conflict);
+  if (!conflict) { if (bar) bar.remove(); return; }
+  const files = (st && st.conflictFiles) || [];
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'worktree-conflict-bar';
+    bar.className = 'worktree-conflict-bar';
+    const anchor = document.getElementById('worktree-bar');
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor.nextSibling);
+    else document.body.insertBefore(bar, document.body.firstChild);
+  }
+  bar.innerHTML = '';
+  const label = document.createElement('span');
+  label.className = 'conflict-label';
+  label.textContent = `⚠️ 同步冲突：${files.length} 个文件待解决`;
+  label.title = files.join('\n');
+  const help = document.createElement('button');
+  help.textContent = '如何解决';
+  help.onclick = () => showConflictHelp(files);
+  const cont = document.createElement('button');
+  cont.className = 'conflict-continue';
+  cont.textContent = '继续';
+  cont.onclick = () => resolveRebase('continue');
+  const abort = document.createElement('button');
+  abort.className = 'conflict-abort';
+  abort.textContent = '放弃';
+  abort.onclick = () => resolveRebase('abort');
+  bar.appendChild(label);
+  bar.appendChild(help);
+  bar.appendChild(cont);
+  bar.appendChild(abort);
+}
+
+function showConflictHelp(files) {
+  addSystemMsg(
+    `同步与基分支冲突，rebase 已暂停。请按下面步骤手动解决：\n` +
+    `冲突文件（${files.length}）：\n${files.map(f => '  · ' + f).join('\n') || '  (无)'}\n` +
+    `1. 在本会话的 worktree 里编辑上述文件，消除 <<<<<<< / ======= / >>>>>>> 冲突标记\n` +
+    `2. 解决后点横幅上的「继续」（= git add -A && git rebase --continue）\n` +
+    `3. 想放弃本次同步、回到同步前状态，点「放弃」（= git rebase --abort）`);
+}
+
+// Continue or abort the parked rebase from the chat banner.
+async function resolveRebase(action) {
+  if (!_sessionName) { addSystemMsg('无 session id，无法操作 rebase'); return; }
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/rebase`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (data.aborted) addSystemMsg('✓ 已放弃 rebase，worktree 回到同步前状态');
+      else if (data.done) addSystemMsg('✓ 冲突已解决，同步完成');
+      else addSystemMsg('✓ rebase 已继续');
+      refreshMergeStatus();
+    } else if (res.status === 409 && data.conflicts) {
+      addSystemMsg(`✗ 仍有冲突未解决：\n${data.conflicts.join(', ')}\n请全部解决后再点「继续」。`);
+      refreshMergeStatus();
+    } else {
+      addSystemMsg(`✗ 操作失败：${data.error || res.status}`);
+    }
+  } catch (e) {
+    addSystemMsg(`✗ 请求失败：${e.message}`);
+  }
 }
 
 // Show the current worktree branch + a "behind base" warning at the top of the
@@ -1618,6 +1695,7 @@ function applyBehindStatus(st) {
     addSystemMsg(tt('behindBanner', { branch, base, n: behind }));
   }
   _lastWarnedBehind = behind;
+  applyConflictBanner(st);
 }
 
 // One-click sync: pull the base branch into this session's worktree.
@@ -1634,7 +1712,8 @@ async function syncWorktree() {
         : (data.message || '已是最新'));
       refreshMergeStatus();
     } else if (res.status === 409 && data.conflicts) {
-      addSystemMsg(`✗ 同步存在冲突，已自动 abort，worktree 未改动：\n${data.conflicts.join(', ')}\n请在终端手动合并。`);
+      addSystemMsg(`✗ 同步与基分支冲突，rebase 已暂停（worktree 处于冲突态）：\n${data.conflicts.join(', ')}\n请用上方横幅的「继续 / 放弃」处理，或在 worktree 手动解决。`);
+      refreshMergeStatus();
     } else {
       addSystemMsg(`✗ 同步失败：${data.error || res.status}`);
     }

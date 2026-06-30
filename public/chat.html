@@ -584,6 +584,22 @@
     }
     #worktree-sync-btn:hover { background: #f2cc60; }
     #worktree-sync-btn:disabled { opacity: 0.6; cursor: default; }
+    .worktree-conflict-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px; font-size: 12px;
+      background: rgba(255,107,99,.14); color: #ff6b63;
+      border-bottom: 1px solid rgba(255,107,99,.4);
+    }
+    .worktree-conflict-bar .conflict-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .worktree-conflict-bar button {
+      flex-shrink: 0; cursor: pointer; font-size: 11px; font-weight: 600;
+      padding: 3px 9px; border-radius: 6px; border: 1px solid rgba(255,107,99,.5);
+      background: transparent; color: #ff6b63; transition: .15s;
+    }
+    .worktree-conflict-bar button:hover { background: rgba(255,107,99,.2); }
+    .worktree-conflict-bar .conflict-continue { border-color: #3fb950; color: #3fb950; }
+    .worktree-conflict-bar .conflict-continue:hover { background: rgba(63,185,80,.18); }
+    .worktree-conflict-bar .conflict-abort { opacity: .85; }
     #merge-hint button {
       flex-shrink: 0;
       border: 1px solid #e3b341;
