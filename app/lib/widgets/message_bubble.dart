@@ -308,16 +308,16 @@ class _MarkdownContent extends StatelessWidget {
       children: [
         MarkdownBody(
           data: text,
-          imageBuilder: (uri, title, alt) {
-            final raw = uri.toString();
+          sizedImageBuilder: (config) {
+            final raw = config.uri.toString();
             final isLocal = _localImgRe.hasMatch(raw);
             final url = isLocal ? _localImageUrl(raw) : raw;
             if (url == null || url.isEmpty) {
-              return _ImageErrorNote(name: alt ?? raw);
+              return _ImageErrorNote(name: config.alt ?? raw);
             }
             return _InlineImage(
               url: url,
-              name: alt ?? (isLocal ? raw : 'image'),
+              name: config.alt ?? (isLocal ? raw : 'image'),
             );
           },
           styleSheet: MarkdownStyleSheet(
