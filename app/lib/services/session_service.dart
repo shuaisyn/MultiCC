@@ -148,8 +148,10 @@ class SessionService {
 
   /// Switch the per-session provider (cc-switch). Empty string clears the
   /// override → the session falls back to the default login / subscription.
-  /// Applies on the next chat turn.
-  Future<void> updateSessionProvider(String id, String provider) async {
+  /// Applies on the next chat turn. Returns the updated model that the server
+  /// auto-filled from the new provider's model list (null if the provider
+  /// supplies its own default via env).
+  Future<String?> updateSessionProvider(String id, String provider) async {
     final res = await http
         .patch(
           Uri.parse(_url('/api/sessions/$id')),
@@ -160,6 +162,13 @@ class SessionService {
     if (res.statusCode >= 400) {
       final err = _tryParseError(res.body);
       throw Exception(err ?? '${res.statusCode}');
+    }
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final m = body['model'];
+      return (m is String && m.isNotEmpty) ? m : null;
+    } catch (_) {
+      return null;
     }
   }
 
