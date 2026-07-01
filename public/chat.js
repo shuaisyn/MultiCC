@@ -2067,7 +2067,8 @@ const CLAUDE_MODEL_OPTIONS = [
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
   { value: '__custom__', labelKey: 'custom' },
 ];
-let _sessionModel = '';
+let _sessionModel = '';        // raw per-session override (null/'' = follow default)
+let _sessionEffectiveModel = ''; // model actually used at spawn time (for display)
 
 function modelShortName(model) {
   const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
@@ -2076,7 +2077,8 @@ function modelShortName(model) {
 
 function updateModelBtn() {
   if (!modelBtn) return;
-  modelBtn.textContent = `🧠 ${_sessionModel ? modelShortName(_sessionModel) : tt('default')}`;
+  const shown = _sessionEffectiveModel || _sessionModel;
+  modelBtn.textContent = `🧠 ${shown ? modelShortName(shown) : tt('default')}`;
   modelBtn.style.display = '';
 }
 
@@ -2155,6 +2157,7 @@ async function loadSessionModel() {
     if (_sessionProvider) await ensureProviderList(_sessionCli === 'codex' ? 'codex' : 'claude');
     updateProviderBtn();
     _sessionModel = info.model || '';
+    _sessionEffectiveModel = info.effectiveModel || info.model || '';
     updateModelBtn();
     if ((info.cli || 'claude') !== 'claude') {
       updateAutoCommitBtn();
@@ -2181,6 +2184,7 @@ modelBtn?.addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) { addSystemMsg('模型切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionModel = data.model || '';
+    _sessionEffectiveModel = data.effectiveModel || data.model || '';
     updateModelBtn();
     addSystemMsg(`✓ 模型已切换为 ${_sessionModel ? modelShortName(_sessionModel) : tt('defaultClaudeSetting')}，下一轮对话生效`);
   } catch (e) {
@@ -2281,6 +2285,7 @@ providerBtn?.addEventListener('click', async () => {
     if (!res.ok) { addSystemMsg('Provider 切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionProvider = data.provider || '';
  _sessionModel = data.model || '';
+    _sessionEffectiveModel = data.effectiveModel || data.model || '';
     updateProviderBtn();
  updateModelBtn();
     addSystemMsg(`✓ Provider 已切换为 ${providerShortName(_sessionProvider)}，下一轮对话生效`);
