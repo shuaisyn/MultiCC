@@ -104,33 +104,139 @@ The open-source ecosystem around Claude Code and Codex has grown fast. Below is 
 
 Only projects that explicitly support **both** Claude Code and Codex are included. Capabilities marked as of July 2026 based on public READMEs.
 
+#### Architecture & deployment
+
 | Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
 |------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Architecture** | Desktop GUI | CLI + MCP | Desktop + Web | Desktop IDE | Desktop + Mobile | Web + Mobile | **Self-hosted server** |
+| **Architecture** | Desktop GUI (Tauri) | CLI + MCP | Desktop + Web | Desktop IDE (Electron) | Desktop + Mobile | Web + Mobile | **Self-hosted server** |
+| **Runs headless on a server** | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (cloud) | ✅ |
+| **Always-on without desktop** | ❌ | ✅ (daemon) | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **Zero frontend build step** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **One-click install script** | ❌ | ✅ (`npx`) | ❌ | ❌ | ❌ | ❌ | ✅ (`curl \| bash`) |
+| **Service manager (launchd/systemd)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Self-update mechanism** | ✅ (app update) | ✅ (`npx`) | ✅ (app update) | ✅ (app update) | ✅ (app update) | ❌ | ✅ (`./multicc update` + APK) |
+| **Public tunnel (Tailscale/DDNS)** | N/A | ❌ | ❌ | N/A | ❌ | ❌ | ✅ |
+| **HTTPS auto-cert with SAN IPs** | N/A | ❌ | N/A | N/A | N/A | ✅ (cloud) | ✅ |
+
+#### CLI & provider management
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Drives Claude Code** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Drives Codex** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Per-session provider isolation** | ❌ (global) | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Per-session model selection** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Provider-aware model options** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Import providers from cc-switch** | N/A | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Codex provider isolation (CODEX_HOME)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Codex proxy for non-OpenAI endpoints** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Per-CLI default provider** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### Git worktree & multi-agent
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Git worktree per session** | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ | ✅ |
 | **Merge/sync back to base branch** | N/A | ❌ | N/A | ✅ | ✅ | N/A | ✅ (API + UI) |
+| **Auto-commit before merge** | N/A | ❌ | N/A | ❌ | ❌ | N/A | ✅ |
+| **Sibling worktree auto-sync** | N/A | ❌ | N/A | ❌ | ❌ | N/A | ✅ |
 | **Syntax-gated merges** | N/A | ❌ | N/A | ❌ | ❌ | N/A | ✅ |
+| **Multi-directory support** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Agent Commander role** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Role presets / templates** | ✅ (skills) | ✅ (100+ agents) | ✅ (skills) | ❌ | ❌ | ❌ | ✅ |
+| **Cross-session dispatch** | ❌ | ✅ (swarm) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Passive inter-agent notes** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### Session modes & UI
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Terminal mode (xterm.js)** | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Chat mode (streaming bubbles)** | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ |
-| **Multi-client per session** | N/A | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (web + app concurrent) |
-| **Mobile app (native)** | ❌ | ❌ | ❌ | ❌ | ✅ (iOS + Android) | ✅ (responsive web) | ✅ (Flutter) |
-| **Push notifications** | ❌ | ❌ | ❌ | ❌ | ✅ (mobile) | ❌ | ✅ (5 channels) |
-| **IM bridges** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (WeChat, Feishu, TG, Discord, Slack) |
-| **Cron / scheduled tasks** | ❌ | ✅ (daemon) | ✅ (24/7) | ❌ | ❌ | ❌ | ✅ |
-| **Wait/poll auto-resume** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **run-detached (background)** | ❌ | ✅ (daemon) | ✅ | ❌ | ❌ | ❌ | ✅ |
-| **Cross-session dispatch** | ❌ | ✅ (swarm) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Streaming tool cards** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Inline image rendering** | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Multi-client per session** | N/A | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ (web + app + IM) |
+| **Reconnect replay buffer** | N/A | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (last 500 events) |
+| **Session status indicators** | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ (7 states) |
+| **Directory workspace dashboard** | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Event timeline per directory** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Directory memo (shared notes)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Session sharing (snapshot link)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **S2S real-time voice** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Onboarding tour** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **i18n (zh/en)** | ✅ (multi-lang) | ❌ | ✅ (multi-lang) | ❌ | ✅ (multi-lang) | ✅ (multi-lang) | ✅ (zh/en) |
+
+#### Mobile & notifications
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Mobile app (native)** | ❌ | ❌ | ❌ | ❌ | ✅ (iOS+Android) | ✅ (responsive web) | ✅ (Flutter) |
+| **PWA support** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **In-app APK auto-update** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **QR code phone onboarding** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Web Push (VAPID)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Bark push (iOS)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Webhook notifications** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Voice alert (speechSynthesis)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Flutter local notifications** | N/A | ❌ | ❌ | N/A | ❌ | N/A | ✅ |
+| **Smart "don't notify when watching"** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### IM bridges
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **WeChat bridge** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Feishu / Lark bridge** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Telegram bridge** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Discord bridge** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Slack bridge** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **IM dispatch with confirmation** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **IM → agent result auto-reply** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### Scheduling & autonomous work
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Cron / scheduled tasks** | ❌ | ✅ (daemon) | ✅ (24/7) | ❌ | ❌ | ❌ | ✅ |
+| **Persistent context across cron runs** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Wait/poll auto-resume** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Callback wait (external system)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **run-detached (setsid background)** | ❌ | ✅ (daemon) | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Per-session auto-triggers** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **File-change triggers** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Post-turn triggers** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### Voice
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Voice input (STT + AI refine)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Vocabulary learning loop** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **S2S real-time voice** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **VAD with barge-in interrupt** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Streaming TTS output** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Multi-engine TTS (Edge/OpenAI/Volcano)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### Observability & cost
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Token usage tracking** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| **Public tunnel (Tailscale/DDNS)** | N/A | ❌ | ❌ | N/A | ❌ | ❌ | ✅ |
-| **Self-update mechanism** | ✅ (app update) | ✅ (npx) | ✅ (app update) | ✅ (app update) | ✅ (app update) | ❌ | ✅ (`./multicc update` + APK) |
-| **Zero frontend build step** | ❌ (Tauri) | ✅ | ❌ | ❌ (Electron) | ❌ | ❌ | ✅ |
-| **Runs headless on a server** | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ (cloud) | ✅ |
+| **Per-provider token stats** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ (daily/weekly/monthly) |
+| **Per-message token display** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Global usage panel** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Task duration tracking** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Task progress scroller** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+#### API & programmability
+
+| Capability | cc-switch | Ruflo | AionUi | Superset | Orca | CloudCLI | **MultiCC** |
+|------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **REST API for all operations** | ❌ | ✅ (MCP) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **WebSocket real-time protocol** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Programmatic session creation** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Webhook for external integrations** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Detached task API** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Wait/poll API** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 ### Where MultiCC is unique
 
