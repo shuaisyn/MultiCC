@@ -475,6 +475,46 @@ function claudeDefaultModel() {
   }
 }
 
+// Resolve the model that will actually be used when spawning this session.
+//   session.model (explicit per-session override) wins;
+//   otherwise a named provider's primary model (ANTHROPIC_MODEL / codex model);
+//   otherwise, for Claude on the default login, the user's /model setting.
+// Returns null when unknown (e.g. codex default login, or a Claude provider
+// whose env decides the model without declaring ANTHROPIC_MODEL).
+function effectiveSessionModel(session) {
+  if (!session) return null;
+  if (session.model) return session.model;
+  const appType = (session.cli === 'codex') ? 'codex' : 'claude';
+  const providerId = session.provider;
+  if (providerId) {
+    try {
+      const p = providers.getProviderSummary(appType, providerId);
+      if (p && p.model) return p.model;
+      // Claude provider with custom base URL but no explicit ANTHROPIC_MODEL:
+      // the provider's own env decides at spawn time; we have no concrete value.
+      if (appType === 'claude' && p && p.baseUrl) return null;
+    } catch (_) { /* fall through */ }
+  }
+  // Default login (no provider override).
+  if (appType === 'claude') return claudeDefaultModel();
+  return null;
+}
+
+// The concrete model to snapshot onto a session when switching provider, so
+// the card always shows a real model name instead of "默认". Mirrors
+// effectiveSessionModel but is meant to be *written back* to session.model.
+function providerDefaultModel(appType, providerId) {
+  if (!providerId) {
+    // Switching back to the default login → snapshot the current /model setting.
+    return appType === 'claude' ? claudeDefaultModel() : null;
+  }
+  try {
+    const p = providers.getProviderSummary(appType, providerId);
+    if (!p) return null;
+    return p.model || (p.modelOptions && p.modelOptions[0]) || null;
+  } catch (_) { return null; }
+}
+
 // ── Codex CLI binary resolution (mirrors claude lookup) ──
 function resolveCodex() {
   if (process.env.CODEX_CMD) return process.env.CODEX_CMD;
@@ -1515,6 +1555,7 @@ app.get('/api/sessions', (req, res) => {
         cliSessionId: p.cliSessionId || null,
         label: p.label || null,
         model: p.model || null,
+        effectiveModel: effectiveSessionModel(p),
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
         autoCommit: !!p.autoCommit,
@@ -2092,10 +2133,12 @@ app.patch('/api/sessions/:id', (req, res) => {
     // When switching provider the old session.model may hold a model that
     // only works with the previous backend (e.g. claude-opus-4-8 set while
     // on Anthropic Official, then switching to DeepSeek/GLM which don't
-    // ship that model). Clear it so the provider's own ANTHROPIC_MODEL /
-    // ANTHROPIC_DEFAULT_*_MODEL env takes effect and the user can re-set
-    // via /model afterwards if they need something specific.
-    if (s.model) s.model = null;
+    // ship that model). Replace it with the new provider's primary model
+    // (or the user's /model default when switching back to the default login)
+    // so the card always shows a concrete, correct model name instead of a
+    // stale "默认" placeholder. The user can still re-set via /model afterwards.
+    const appType = (s.cli === 'codex') ? 'codex' : 'claude';
+    s.model = providerDefaultModel(appType, v.value) || null;
     // Chat sessions pick it up on the next per-turn spawn; a warm streaming
     // process must be torn down so it relaunches with the new env.
     if (s.streaming) chatStream.close(s.id);
@@ -2103,7 +2146,7 @@ app.patch('/api/sessions/:id', (req, res) => {
     appendEvent(s.dirId, 'session_provider_changed', `${s.label || s.id} → ${pname}`, s.id);
   }
   savePersistedSessions();
-  res.json(s);
+  res.json({ ...s, effectiveModel: effectiveSessionModel(s) });
 });
 
 // ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
@@ -2270,6 +2313,7 @@ app.get('/api/sessions/:id', (req, res) => {
   const mergeState = persisted ? mergeStateCached(dir, persisted) : null;
   const cli = persisted?.cli || 'claude';
   const model = persisted?.model || null;
+  const effectiveModel = effectiveSessionModel(persisted);
   // The session's own role override (null = inherits the directory default).
   const rolePrompt = persisted?.rolePrompt || null;
   const memory = persisted?.memory || null;  // distilled session memory
@@ -2280,11 +2324,11 @@ app.get('/api/sessions/:id', (req, res) => {
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   }
 });
 
