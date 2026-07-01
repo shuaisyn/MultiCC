@@ -1084,7 +1084,7 @@ function renderDirPreview(dirId, dirSessions) {
   const sessionSummary = latestSession ? _workspaceSummaries.get(latestSession.id) : null;
   const sessionActive = sessionInfo && sessionInfo.active;
   const sessionLabel = sessionInfo ? (sessionInfo.label || sessionInfo.id) : null;
-  const sessionModel = sessionInfo && sessionInfo.model ? modelShortName(sessionInfo.model) : '';
+  const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelShortName(sessionInfo.effectiveModel || sessionInfo.model) : '';
 
   // 活动块内容
   let activityContent = '';
@@ -1489,7 +1489,7 @@ function renderSessionRow(s) {
     ? tt('mergeReadyTitle', { detail: mergeDetail })
     : tt('mergeWorktreeTitle');
   const displayName = s.label || s.id;
-  const model = s.model ? modelShortName(s.model) : '';
+  const model = s.effectiveModel ? modelShortName(s.effectiveModel) : '';
   const wbFile = (wb && wb.currentFile) ? wb.currentFile.split('/').pop() : '';
   const sm = _workspaceSummaries.get(s.id);
   const summary = sm && sm.summary ? sm.summary : '';
@@ -1510,7 +1510,7 @@ function renderSessionRow(s) {
         <div class="lean-name" title="#${escapeHtml(s.id)}">${escapeHtml(displayName)}<span class="sess-notes" id="sess-notes-${escapeHtml(s.id)}"${pendingNotes > 0 ? '' : ' style="display:none"'}>${pendingNotes > 0 ? '📨 ' + pendingNotes : ''}</span></div>
         <div class="lean-meta">
           <span>${escapeHtml(formatRelative(sessionLastInteractionMs(s) || s.createdAt))}</span>
-          ${model ? `<span class="sep">·</span><span class="model" title="模型：${escapeHtml(s.model)}">${escapeHtml(model)}</span>` : ''}
+          ${model ? `<span class="sep">·</span><span class="model" title="模型：${escapeHtml(s.effectiveModel || '')}">${escapeHtml(model)}</span>` : ''}
         </div>
         <div class="sess-file" id="sess-file-${escapeHtml(s.id)}"${wbFile ? '' : ' style="display:none"'}>${wbFile ? '✎ ' + escapeHtml(wbFile) : ''}</div>
         <div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${summary ? '最近任务：' + escapeHtml(summary) : ''}"${summary ? '' : ' style="display:none"'}>${summary ? '🗒 ' + escapeHtml(summary) : ''}</div>
@@ -3394,7 +3394,7 @@ async function loadCronTasks() {
       const sessionSummary = _getCronSessionSummary(t.lastSessionId);
       const sessionActive = sessionInfo && sessionInfo.active;
       const sessionLabel = sessionInfo ? (sessionInfo.label || sessionInfo.id) : null;
-      const sessionModel = sessionInfo && sessionInfo.model ? modelShortName(sessionInfo.model) : '';
+      const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelShortName(sessionInfo.effectiveModel || sessionInfo.model) : '';
 
       // 活动状态
       const statusColor = t.lastStatus === 'ok' ? 'var(--accent)' : (t.lastStatus ? 'var(--danger)' : 'var(--faint)');
