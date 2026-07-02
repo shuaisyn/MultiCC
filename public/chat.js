@@ -2102,18 +2102,25 @@ function updateModelBtn() {
   const shown = _sessionEffectiveModel || _sessionModel;
   const provider = providerShortName(_sessionProvider);
   const model = shown ? modelShortName(shown) : tt('default');
+<<<<<<< HEAD
   const effort = effortShortName(_sessionEffectiveEffort || _sessionEffort);
+=======
+  const effort = _sessionCli === 'claude' ? effortShortName(_sessionEffectiveEffort || _sessionEffort || 'medium') : '—';
+>>>>>>> 06aa3c2 (multicc: session multicc-codex-chat-01 @ 2026-07-02T09:53:44.175Z)
   modelBtn.textContent = `🧠 ${provider} | ${model} | ${effort}`;
   modelBtn.style.display = '';
 }
 
 function effortShortName(effort) {
+<<<<<<< HEAD
   if (_sessionCli === 'codex') {
     if (effort === 'xhigh') return 'Extra high';
     if (effort === 'low') return 'Low';
     if (effort === 'medium') return 'Medium';
     if (effort === 'high') return 'High';
   }
+=======
+>>>>>>> 06aa3c2 (multicc: session multicc-codex-chat-01 @ 2026-07-02T09:53:44.175Z)
   return effort || 'medium';
 }
 
@@ -2277,7 +2284,15 @@ function showAIConfigPicker({ provider, model, effort }) {
       opt.textContent = o.desc ? `${o.label} — ${o.desc}` : o.label;
       effortSel.appendChild(opt);
     }
+<<<<<<< HEAD
     effortSel.value = effortOptions.some(o => o.value === effort) ? effort : 'medium';
+=======
+    effortSel.value = EFFORT_OPTIONS.some(o => o.value === effort) ? effort : 'medium';
+    if (_sessionCli !== 'claude') {
+      effortSel.style.display = 'none';
+      effortLabel.style.display = 'none';
+    }
+>>>>>>> 06aa3c2 (multicc: session multicc-codex-chat-01 @ 2026-07-02T09:53:44.175Z)
 
     function rebuildModels(nextProvider, preferredModel) {
       const choices = buildModelChoices(nextProvider);
@@ -2336,7 +2351,10 @@ async function loadSessionModel() {
     _sessionEffectiveModel = info.effectiveModel || info.model || '';
     _sessionEffort = info.effort || '';
     _sessionEffectiveEffort = info.effectiveEffort || _sessionEffort || 'medium';
+<<<<<<< HEAD
     updateModelBtn();
+=======
+>>>>>>> 06aa3c2 (multicc: session multicc-codex-chat-01 @ 2026-07-02T09:53:44.175Z)
     updateEffortBtn();
     if ((info.cli || 'claude') !== 'claude') {
       updateAutoCommitBtn();
@@ -2372,7 +2390,11 @@ modelBtn?.addEventListener('click', async () => {
     _sessionEffort = data.effort || '';
     _sessionEffectiveEffort = data.effectiveEffort || _sessionEffort || 'medium';
     updateModelBtn();
+<<<<<<< HEAD
     addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${effortShortName(_sessionEffectiveEffort)}，下一轮对话生效`);
+=======
+    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${_sessionCli === 'claude' ? effortShortName(_sessionEffectiveEffort) : '—'}，下一轮对话生效`);
+>>>>>>> 06aa3c2 (multicc: session multicc-codex-chat-01 @ 2026-07-02T09:53:44.175Z)
   } catch (e) {
     addSystemMsg('AI 配置保存失败：' + e.message);
   }
