@@ -117,8 +117,11 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
   List<Session> get activeSessions {
     final now = DateTime.now();
     final list = _sessions
-        .where((s) =>
-            !s.isAux && now.difference(_lastInteractionAt(s)) <= _recentUseWindow)
+        .where(
+          (s) =>
+              !s.isAux &&
+              now.difference(_lastInteractionAt(s)) <= _recentUseWindow,
+        )
         .toList();
     list.sort((a, b) => _lastInteractionAt(b).compareTo(_lastInteractionAt(a)));
     return list;
@@ -344,8 +347,8 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     final outcome = state == 'waiting'
         ? '等待交互'
         : state == 'error'
-            ? '出现异常'
-            : '任务完成';
+        ? '出现异常'
+        : '任务完成';
     NotificationService.show(
       title: 'MultiCC · $who: $outcome',
       body: message.isNotEmpty ? message : who,
@@ -485,6 +488,7 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     String? label,
     String? model,
     String? provider,
+    String? effort,
     String? rolePrompt,
   }) async {
     final s = await _sessionService.createSessionInDir(
@@ -494,6 +498,7 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
       label: label,
       model: model,
       provider: provider,
+      effort: effort,
       rolePrompt: rolePrompt,
     );
     await loadDashboard();
@@ -507,6 +512,21 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> updateSessionEffort(String id, String effort) async {
     await _sessionService.updateSessionEffort(id, effort);
+    await loadDashboard();
+  }
+
+  Future<void> updateSessionAIConfig(
+    String id, {
+    required String provider,
+    required String model,
+    required String effort,
+  }) async {
+    await _sessionService.updateSessionAIConfig(
+      id,
+      provider: provider,
+      model: model,
+      effort: effort,
+    );
     await loadDashboard();
   }
 

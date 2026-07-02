@@ -606,18 +606,59 @@ const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 console.log(`[multicc] Using codex: ${CODEX_CMD}`);
 
 const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']);
+const CODEX_REASONING_LEVELS = new Set(['low', 'medium', 'high', 'xhigh']);
 function normalizeEffort(v) {
   const s = (v == null ? '' : String(v)).trim().toLowerCase();
   if (!s) return null;
   return EFFORT_LEVELS.has(s) ? s : undefined;
+}
+function validEffortForCli(cli, effort) {
+  if (!effort) return true;
+  return (cli === 'codex') ? CODEX_REASONING_LEVELS.has(effort) : true;
 }
 function cliEffortLevel(session) {
   const e = normalizeEffort(session?.effort);
   if (!e) return null;
   return e === 'ultracode' ? 'xhigh' : e;
 }
+function codexReasoningLevel(session) {
+  const e = normalizeEffort(session?.effort);
+  return e && CODEX_REASONING_LEVELS.has(e) ? e : null;
+}
+function codexReasoningConfigArg(session) {
+  const level = codexReasoningLevel(session);
+  return level ? `model_reasoning_effort="${level}"` : null;
+}
 function effortLabel(e) {
-  return e || '默认';
+  return e || claudeDefaultEffort();
+}
+function claudeDefaultEffort() {
+  for (const file of ['settings.local.json', 'settings.json']) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', file), 'utf8'));
+      const effort = normalizeEffort(settings.effort || settings.thinkingEffort);
+      if (effort) return effort;
+    } catch (_) { /* fall through */ }
+  }
+  return 'medium';
+}
+function effectiveSessionEffort(session) {
+  if (!session) return null;
+  const cli = session.cli || 'claude';
+  if (cli === 'codex') return codexReasoningLevel(session) || codexDefaultReasoningLevel();
+  return normalizeEffort(session.effort) || claudeDefaultEffort();
+}
+function codexDefaultReasoningLevel() {
+  const homes = [process.env.CODEX_HOME, path.join(os.homedir(), '.codex')].filter(Boolean);
+  for (const home of homes) {
+    try {
+      const toml = fs.readFileSync(path.join(home, 'config.toml'), 'utf8');
+      const m = toml.match(/^\s*model_reasoning_effort\s*=\s*["']?([A-Za-z0-9_-]+)["']?\s*$/m);
+      const effort = normalizeEffort(m && m[1]);
+      if (effort && CODEX_REASONING_LEVELS.has(effort)) return effort;
+    } catch (_) { /* fall through */ }
+  }
+  return 'medium';
 }
 
 // ── CLI provider abstraction ──
@@ -724,8 +765,10 @@ const cliProviders = {
     // Add `--dangerously-bypass-approvals-and-sandbox` to skip prompts (we run trusted local code).
     buildTerminalCmd(session) {
       const baseArgs = CODEX_ARGS.length ? ' ' + CODEX_ARGS.join(' ') : '';
-      if (session.cliSessionId) return `${CODEX_CMD}${baseArgs} resume ${session.cliSessionId}`;
-      return `${CODEX_CMD}${baseArgs}`;
+      const effortArg = codexReasoningConfigArg(session);
+      const effortArgs = effortArg ? ` -c '${effortArg}'` : '';
+      if (session.cliSessionId) return `${CODEX_CMD}${baseArgs}${effortArgs} resume ${session.cliSessionId}`;
+      return `${CODEX_CMD}${baseArgs}${effortArgs}`;
     },
     // Chat-mode spawn args: `exec --json [--skip-git-repo-check] [--dangerously-bypass-approvals-and-sandbox] [resume <id>] <prompt>`
     buildChatSpawnArgs(session, prompt, opts) {
@@ -738,10 +781,16 @@ const cliProviders = {
         p = `[角色设定]\n${opts.rolePrompt}\n[角色设定结束]\n\n${prompt}`;
       }
       if (opts.isFirstTurn) {
-        args.push('exec', '--json', '--skip-git-repo-check',
+        args.push('exec');
+        const effortArg = codexReasoningConfigArg(session);
+        if (effortArg) args.push('-c', effortArg);
+        args.push('--json', '--skip-git-repo-check',
           '--dangerously-bypass-approvals-and-sandbox', p);
       } else {
-        args.push('exec', 'resume', session.cliSessionId, '--json',
+        args.push('exec');
+        const effortArg = codexReasoningConfigArg(session);
+        if (effortArg) args.push('-c', effortArg);
+        args.push('resume', session.cliSessionId, '--json',
           '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', p);
       }
       return args;
@@ -1723,6 +1772,7 @@ app.get('/api/sessions', (req, res) => {
         model: p.model || null,
         effectiveModel: effectiveSessionModel(p),
         effort: p.effort || null,
+        effectiveEffort: effectiveSessionEffort(p),
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
         autoCommit: !!p.autoCommit,
@@ -2134,7 +2184,7 @@ app.get('/api/directories/:id/sessions', (req, res) => {
       return {
         id: s.id, dirId: s.dirId, cli: s.cli, kind: s.kind,
         cliSessionId: s.cliSessionId || null, label: s.label || null,
-        model: s.model || null, effort: s.effort || null, rolePrompt: s.rolePrompt || null,
+        model: s.model || null, effort: s.effort || null, effectiveEffort: effectiveSessionEffort(s), rolePrompt: s.rolePrompt || null,
         provider: s.provider || null,  // cc-switch provider id; null = default login
         createdAt: s.createdAt,
         branch: s.branch || null,
@@ -2172,7 +2222,7 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
   }
   const effortLevel = normalizeEffort(effort);
   if (effortLevel === undefined) return { ok: false, error: 'invalid effort' };
-  if (effortLevel && cli !== 'claude') return { ok: false, error: 'effort is claude-only' };
+  if (!validEffortForCli(cli, effortLevel)) return { ok: false, error: 'invalid reasoning level' };
   const rp = rolePrompt == null ? null : String(rolePrompt).trim();
   if (rp && rp.length > 40000) return { ok: false, error: 'rolePrompt too long (max 40000)' };
   // Provider override (cc-switch). An explicit value is validated; when omitted
@@ -2265,12 +2315,10 @@ app.patch('/api/sessions/:id', (req, res) => {
   if (req.body.effort !== undefined) {
     const effort = normalizeEffort(req.body.effort);
     if (effort === undefined) return res.status(400).json({ error: 'invalid effort' });
-    if (effort && (s.cli || 'claude') !== 'claude') {
-      return res.status(400).json({ error: 'effort is claude-only' });
-    }
+    if (!validEffortForCli(s.cli || 'claude', effort)) return res.status(400).json({ error: 'invalid reasoning level' });
     s.effort = effort || null;
     if (s.streaming) chatStream.close(s.id);
-    appendEvent(s.dirId, 'session_effort_changed', `${s.label || s.id} → ${effortLabel(s.effort)}`, s.id);
+    appendEvent(s.dirId, 'session_effort_changed', `${s.label || s.id} → ${effectiveSessionEffort(s) || effortLabel(s.effort)}`, s.id);
   }
   if (req.body.rolePrompt !== undefined) {
     const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
@@ -2329,7 +2377,7 @@ app.patch('/api/sessions/:id', (req, res) => {
     appendEvent(s.dirId, 'session_provider_changed', `${s.label || s.id} → ${pname}`, s.id);
   }
   savePersistedSessions();
-  res.json({ ...s, effectiveModel: effectiveSessionModel(s) });
+  res.json({ ...s, effectiveModel: effectiveSessionModel(s), effectiveEffort: effectiveSessionEffort(s) });
 });
 
 // ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
@@ -2498,6 +2546,7 @@ app.get('/api/sessions/:id', (req, res) => {
   const model = persisted?.model || null;
   const effectiveModel = effectiveSessionModel(persisted);
   const effort = persisted?.effort || null;
+  const effectiveEffort = effectiveSessionEffort(persisted);
   // The session's own role override (null = inherits the directory default).
   const rolePrompt = persisted?.rolePrompt || null;
   const memory = persisted?.memory || null;  // distilled session memory
@@ -2508,11 +2557,11 @@ app.get('/api/sessions/:id', (req, res) => {
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   }
 });
 
@@ -2591,6 +2640,9 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (dir) gitWorktreeRemove(dir.path, persisted.worktreePath, persisted.branch);
   }
   if (persisted) appendEvent(persisted.dirId, 'session_deleted', persisted.label || persisted.id, null);
+  // Clean chat history on disk so a future session that reuses the same id
+  // won't pick up stale messages from the deleted session.
+  try { fs.unlinkSync(chatHistoryPath(id)); } catch (_) {}
   teardownTriggers(id);
   purgeNotesForSession(id);
   persistedSessions.delete(id);
@@ -6239,6 +6291,7 @@ function handleChatWs(ws, req, urlObj) {
     cli: cs.cli,
     is_streaming: cs.isStreaming,
     effort: persisted.effort || null,
+    effectiveEffort: effectiveSessionEffort(persisted),
     providerId: provId,
     providerName: provName,
     providerTokenWindows: provWindows,
