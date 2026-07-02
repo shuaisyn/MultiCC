@@ -14,7 +14,8 @@ class MessageUsage {
     this.cacheCreationTokens = 0,
   });
 
-  int get total => inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+  int get total =>
+      inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
   bool get isEmpty => total == 0;
 
   factory MessageUsage.fromJson(Map<String, dynamic> json) {
@@ -22,7 +23,8 @@ class MessageUsage {
       inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
       outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
       cacheReadTokens: (json['cache_read_input_tokens'] as num?)?.toInt() ?? 0,
-      cacheCreationTokens: (json['cache_creation_input_tokens'] as num?)?.toInt() ?? 0,
+      cacheCreationTokens:
+          (json['cache_creation_input_tokens'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -78,6 +80,7 @@ class ChatMessage {
   bool isStreaming;
   double? cost;
   MessageUsage? usage;
+
   /// Wall-clock time from user submit to AI reply completion (ms).
   /// Stamped by the server (cs.turnStartedAt → result) and persisted in
   /// chat_history; shown under each assistant bubble as "任务耗时".
@@ -163,6 +166,27 @@ String claudeModelShortName(String? model) {
   return model;
 }
 
+String modelShortNameForCli(SessionCli cli, String? model) {
+  return cli == SessionCli.claude ? claudeModelShortName(model) : (model ?? '');
+}
+
+String effortShortNameForCli(SessionCli cli, String? effort) {
+  final v = (effort == null || effort.isEmpty) ? 'medium' : effort;
+  if (cli == SessionCli.codex) {
+    switch (v) {
+      case 'low':
+        return 'Low';
+      case 'medium':
+        return 'Medium';
+      case 'high':
+        return 'High';
+      case 'xhigh':
+        return 'Extra high';
+    }
+  }
+  return v;
+}
+
 class Session {
   final String id;
   final String? dirId;
@@ -171,8 +195,11 @@ class Session {
   final String? cliSessionId;
   final String? label;
   final String? model;
-  final String? effectiveModel; // model actually used at spawn time (override > provider > /model default)
-  final String? effort; // Claude Code effort: low/medium/high/xhigh/max/ultracode
+  final String?
+  effectiveModel; // model actually used at spawn time (override > provider > /model default)
+  final String? effort; // Claude effort / Codex reasoning level override
+  final String?
+  effectiveEffort; // concrete effort / reasoning level used for display
   final String? rolePrompt;
   final String? provider; // cc-switch provider id; null = default login
   final String cwd;
@@ -193,6 +220,7 @@ class Session {
     this.model,
     this.effectiveModel,
     this.effort,
+    this.effectiveEffort,
     this.rolePrompt,
     this.provider,
     this.cwd = '',
@@ -215,6 +243,7 @@ class Session {
       model: json['model']?.toString(),
       effectiveModel: json['effectiveModel']?.toString(),
       effort: json['effort']?.toString(),
+      effectiveEffort: json['effectiveEffort']?.toString(),
       rolePrompt: json['rolePrompt']?.toString(),
       provider: json['provider']?.toString(),
       cwd: (json['cwd'] ?? '').toString(),

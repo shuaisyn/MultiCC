@@ -19,7 +19,6 @@ import '../widgets/conflict_diff_dialog.dart';
 import '../widgets/session_diff_dialog.dart';
 import '../widgets/input_bar.dart';
 import '../widgets/message_bubble.dart';
-import '../widgets/model_picker.dart';
 import '../widgets/thinking_indicator.dart';
 import 'memo_screen.dart';
 import 'file_browser_screen.dart';
@@ -293,8 +292,10 @@ class _Header extends StatelessWidget {
                     ? null
                     : provider.reconnect,
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 2,
+                    vertical: 4,
+                  ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -318,20 +319,9 @@ class _Header extends StatelessWidget {
                 tooltip: t('reconnect'),
                 onTap: () => _forceReconnect(context, provider),
               ),
-              // Model & Provider chips — compact variants on narrow screens.
+              // Provider / Model / Effort unified chip.
               const SizedBox(width: 4),
               _ModelChip(
-                  sessionId: provider.sessionName,
-                  cli: provider.cli,
-                  settings: settings,
-                  compact: narrow),
-              const SizedBox(width: 4),
-              _EffortChip(
-                  sessionId: provider.sessionName,
-                  cli: provider.cli,
-                  compact: narrow),
-              const SizedBox(width: 4),
-              _ProviderChip(
                 sessionId: provider.sessionName,
                 cli: provider.cli,
                 settings: settings,
@@ -350,8 +340,8 @@ class _Header extends StatelessWidget {
                     _openMemoFromSession(context, provider.sessionName),
                 onMerge: onMerge,
                 onSettings: () => _openSettings(context, settings),
-                onShare: () => _shareFromSession(
-                    context, provider.sessionName, settings),
+                onShare: () =>
+                    _shareFromSession(context, provider.sessionName, settings),
                 onShareMessages: () => Navigator.push(
                   context,
                   MaterialPageRoute<void>(
@@ -396,7 +386,9 @@ class _Header extends StatelessWidget {
   /// reconnect — rebuilds the claude/codex command, like the web's 🔄 button).
   /// Asks for confirmation first because it discards any in-flight work.
   Future<void> _confirmRestart(
-      BuildContext context, ChatProvider provider) async {
+    BuildContext context,
+    ChatProvider provider,
+  ) async {
     final sid = provider.sessionName;
     if (sid.isEmpty) return;
     final messenger = ScaffoldMessenger.of(context);
@@ -405,16 +397,23 @@ class _Header extends StatelessWidget {
       builder: (c) => AlertDialog(
         backgroundColor: const Color(0xFF0f1115),
         title: Text(t('restartCli'), style: const TextStyle(fontSize: 16)),
-        content: Text(t('restartCliBody'),
-            style: const TextStyle(color: Color(0xFF8a909b), fontSize: 13)),
+        content: Text(
+          t('restartCliBody'),
+          style: const TextStyle(color: Color(0xFF8a909b), fontSize: 13),
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(c, false),
-              child: Text(t('cancel'),
-                  style: const TextStyle(color: Color(0xFF8a909b)))),
+            onPressed: () => Navigator.pop(c, false),
+            child: Text(
+              t('cancel'),
+              style: const TextStyle(color: Color(0xFF8a909b)),
+            ),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(c, true),
-            style: TextButton.styleFrom(foregroundColor: const Color(0xFFe3b341)),
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFFe3b341),
+            ),
             child: Text(t('restart')),
           ),
         ],
@@ -423,36 +422,42 @@ class _Header extends StatelessWidget {
     if (confirmed != true) return;
     messenger
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(t('restarting')),
-        duration: const Duration(seconds: 2),
-        backgroundColor: const Color(0xFF14171c),
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(t('restarting')),
+          duration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFF14171c),
+        ),
+      );
     try {
       await SessionService(settings: settings).restartSession(sid);
       if (!context.mounted) return;
       messenger
         ..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(
-          content: Text(t('restarted')),
-          duration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFF14171c),
-        ));
+        ..showSnackBar(
+          SnackBar(
+            content: Text(t('restarted')),
+            duration: const Duration(seconds: 2),
+            backgroundColor: const Color(0xFF14171c),
+          ),
+        );
     } catch (e) {
       if (!context.mounted) return;
       messenger
         ..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(
-          content: Text(t('restartFailed', {'error': '$e'})),
-          backgroundColor: const Color(0xFFff6b63),
-        ));
+        ..showSnackBar(
+          SnackBar(
+            content: Text(t('restartFailed', {'error': '$e'})),
+            backgroundColor: const Color(0xFFff6b63),
+          ),
+        );
     }
   }
 
   void _openSettings(BuildContext context, SettingsService settings) {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => SettingsScreen(settings: settings)));
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => SettingsScreen(settings: settings)),
+    );
   }
 }
 
@@ -465,7 +470,12 @@ class _ModelChip extends StatefulWidget {
   final SessionCli cli;
   final SettingsService settings;
   final bool compact;
-  const _ModelChip({required this.sessionId, required this.cli, required this.settings, this.compact = false});
+  const _ModelChip({
+    required this.sessionId,
+    required this.cli,
+    required this.settings,
+    this.compact = false,
+  });
 
   @override
   State<_ModelChip> createState() => _ModelChipState();
@@ -485,7 +495,9 @@ class _ModelChipState extends State<_ModelChip> {
 
   Future<void> _load() async {
     try {
-      final d = await ManageService(settings: widget.settings).fetchProviders(_appType);
+      final d = await ManageService(
+        settings: widget.settings,
+      ).fetchProviders(_appType);
       if (!mounted) return;
       setState(() {
         _providers = (d['providers'] as List? ?? [])
@@ -498,20 +510,23 @@ class _ModelChipState extends State<_ModelChip> {
     }
   }
 
-  /// Effective model label: prefer the server-resolved effectiveModel (which
-  /// accounts for session override > provider model > user's /model default),
-  /// fall back to the local estimate, or "默认" if neither is available.
+  String _providerLabel(String? id) {
+    if (id == null || id.isEmpty) return '默认登录';
+    for (final p in _providers) {
+      if (p['id'] == id) return (p['name'] as String?) ?? id;
+    }
+    return id.length > 8 ? id.substring(0, 8) : id;
+  }
+
+  /// Effective model label: prefer the server-resolved effectiveModel.
   String _modelLabel(Session? s) {
     if (s == null) return '默认';
-    // Server-provided effective model wins (includes /model default fallback).
     if (s.effectiveModel != null && s.effectiveModel!.isNotEmpty) {
-      return claudeModelShortName(s.effectiveModel);
+      return modelShortNameForCli(s.cli, s.effectiveModel);
     }
-    // Explicit session model override.
     if (s.model != null && s.model!.isNotEmpty) {
-      return claudeModelShortName(s.model);
+      return modelShortNameForCli(s.cli, s.model);
     }
-    // Check if a custom provider supplies a default model.
     final pid = s.provider;
     if (pid != null && pid.isNotEmpty) {
       for (final p in _providers) {
@@ -524,26 +539,9 @@ class _ModelChipState extends State<_ModelChip> {
     return '默认';
   }
 
-  /// True when the session's custom provider supplies its own model.
-  bool _providerSuppliesModel(String? pid) {
-    if (pid == null || pid.isEmpty) return false;
-    for (final p in _providers) {
-      if (p['id'] == pid) return (p['model'] as String?)?.isNotEmpty == true;
-    }
-    return false;
-  }
-
-  List<String> _providerModels(String? pid) {
-    if (pid == null || pid.isEmpty) return const [];
-    for (final p in _providers) {
-      if (p['id'] == pid) {
-        return (p['modelOptions'] as List? ?? [])
-            .map((e) => e.toString())
-            .where((e) => e.trim().isNotEmpty)
-            .toList();
-      }
-    }
-    return const [];
+  String _effortLabel(Session? s) {
+    if (s == null) return 'medium';
+    return effortShortNameForCli(s.cli, s.effectiveEffort ?? s.effort);
   }
 
   @override
@@ -551,26 +549,24 @@ class _ModelChipState extends State<_ModelChip> {
     final mgr = context.watch<SessionManager>();
     Session? s;
     for (final x in mgr.sessions) {
-      if (x.id == widget.sessionId) { s = x; break; }
+      if (x.id == widget.sessionId) {
+        s = x;
+        break;
+      }
     }
-    // For Claude, provider-supplied single-model configs already make the
-    // provider chip clear enough. Keep Codex visible because model switching is
-    // otherwise unavailable there.
-    if (widget.cli == SessionCli.claude &&
-        s != null &&
-        (s.model == null || s.model!.isEmpty) &&
-        _providerSuppliesModel(s.provider) &&
-        _providerModels(s.provider).length <= 1) {
-      return const SizedBox.shrink();
-    }
-    final label = _modelLabel(s);
+    final label =
+        '${_providerLabel(s?.provider)} | ${_modelLabel(s)} | ${_effortLabel(s)}';
     return Tooltip(
-      message: t('switchModel'),
+      message: widget.cli == SessionCli.codex
+          ? 'Provider / Model / Reasoning Level'
+          : 'Provider / Model / Effort',
       child: GestureDetector(
-        onTap: () => _switchModel(context, mgr, s),
+        onTap: () => _switchAIConfig(context, mgr, s),
         child: Container(
           padding: EdgeInsets.symmetric(
-              horizontal: widget.compact ? 6 : 8, vertical: 5),
+            horizontal: widget.compact ? 6 : 8,
+            vertical: 5,
+          ),
           decoration: BoxDecoration(
             color: const Color(0xFF14171c),
             border: Border.all(color: const Color(0xFF20242b)),
@@ -587,7 +583,9 @@ class _ModelChipState extends State<_ModelChip> {
               if (!widget.compact) ...[
                 const SizedBox(width: 4),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 64),
+                  constraints: BoxConstraints(
+                    maxWidth: widget.compact ? 110 : 220,
+                  ),
                   child: Text(
                     label,
                     style: const TextStyle(
@@ -606,369 +604,398 @@ class _ModelChipState extends State<_ModelChip> {
     );
   }
 
-  Future<void> _switchModel(
+  Future<void> _switchAIConfig(
     BuildContext context,
     SessionManager mgr,
     Session? s,
   ) async {
     if (s == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(t('sessionNotLoaded'))),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(t('sessionNotLoaded'))));
       return;
     }
     if (!_loaded) await _load();
     if (!context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
-    final picked = await showClaudeModelPicker(
-      context,
-      current: s.model ?? '',
-      title: t('switchModel'),
-      providerOptions: _providerModels(s.provider),
+    final picked = await showModalBottomSheet<_AIConfigResult>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.panel,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => _AIConfigSheet(
+        cli: widget.cli,
+        providers: _providers,
+        provider: s.provider ?? '',
+        model: s.model ?? '',
+        effort: s.effectiveEffort ?? s.effort ?? 'medium',
+      ),
     );
     if (picked == null) return;
     try {
-      await mgr.updateSessionModel(s.id, picked);
-      final name = picked.isEmpty
-          ? t('modelNameDefault')
-          : claudeModelShortName(picked);
+      await mgr.updateSessionAIConfig(
+        s.id,
+        provider: picked.provider,
+        model: picked.model,
+        effort: picked.effort,
+      );
       messenger.showSnackBar(
-        SnackBar(content: Text(t('modelSwitched', {'name': name}))),
+        SnackBar(
+          content: Text(
+            '✓ AI 配置已保存：${picked.providerLabel} | ${picked.modelLabel} | ${picked.effortLabel}，下一轮对话生效',
+          ),
+        ),
       );
     } catch (e) {
-      messenger.showSnackBar(
-          SnackBar(content: Text(t('modelSwitchFailed', {'error': '$e'}))));
+      messenger.showSnackBar(SnackBar(content: Text('AI 配置保存失败：$e')));
     }
   }
 }
 
-class _EffortChip extends StatelessWidget {
-  final String sessionId;
-  final SessionCli cli;
-  final bool compact;
-  const _EffortChip({required this.sessionId, required this.cli, this.compact = false});
+class _AIConfigResult {
+  final String provider;
+  final String model;
+  final String effort;
+  final String providerLabel;
+  final String modelLabel;
+  final String effortLabel;
+  const _AIConfigResult({
+    required this.provider,
+    required this.model,
+    required this.effort,
+    required this.providerLabel,
+    required this.modelLabel,
+    required this.effortLabel,
+  });
+}
 
-  static const _options = <MapEntry<String, String>>[
-    MapEntry('', '默认'),
-    MapEntry('low', 'low'),
-    MapEntry('medium', 'medium'),
-    MapEntry('high', 'high'),
-    MapEntry('xhigh', 'xhigh'),
-    MapEntry('max', 'max'),
-    MapEntry('ultracode', 'ultracode'),
+class _AIConfigSheet extends StatefulWidget {
+  final SessionCli cli;
+  final List<Map<String, dynamic>> providers;
+  final String provider;
+  final String model;
+  final String effort;
+  const _AIConfigSheet({
+    required this.cli,
+    required this.providers,
+    required this.provider,
+    required this.model,
+    required this.effort,
+  });
+
+  @override
+  State<_AIConfigSheet> createState() => _AIConfigSheetState();
+}
+
+class _AIConfigSheetState extends State<_AIConfigSheet> {
+  late String _provider;
+  late String _model;
+  late String _effort;
+  bool _customModel = false;
+  late final TextEditingController _customCtrl;
+
+  bool get _isClaude => widget.cli == SessionCli.claude;
+
+  static const _claudeEfforts = <String>[
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+    'ultracode',
   ];
-
-  @override
-  Widget build(BuildContext context) {
-    if (cli != SessionCli.claude) return const SizedBox.shrink();
-    final mgr = context.watch<SessionManager>();
-    Session? s;
-    for (final x in mgr.sessions) {
-      if (x.id == sessionId) { s = x; break; }
-    }
-    final current = s?.effort ?? '';
-    final label = current.isEmpty ? '默认' : current;
-    return Tooltip(
-      message: '切换努力程度（下一轮生效）',
-      child: GestureDetector(
-        onTap: s == null ? null : () => _pick(context, mgr, s!, current),
-        child: Container(
-          padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 8, vertical: 5),
-          decoration: BoxDecoration(
-            color: const Color(0xFF14171c),
-            border: Border.all(color: const Color(0xFF20242b)),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.speed_rounded, size: 15, color: Color(0xFFe7eaee)),
-              if (!compact) ...[
-                const SizedBox(width: 4),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 72),
-                  child: Text(
-                    label,
-                    style: const TextStyle(
-                      color: Color(0xFFe7eaee),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _pick(BuildContext context, SessionManager mgr, Session s, String current) async {
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: const Color(0xFF0f1115),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 16, 18, 4),
-              child: Text('选择努力程度',
-                  style: TextStyle(color: Color(0xFFf2f4f7), fontSize: 15, fontWeight: FontWeight.w600)),
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 0, 18, 8),
-              child: Text('ultracode 会使用 xhigh，并启用 MultiCC 跨会话 workflow 编排。',
-                  style: TextStyle(color: Color(0xFF8a909b), fontSize: 12)),
-            ),
-            for (final e in _options)
-              ListTile(
-                dense: true,
-                title: Text(e.value.isEmpty ? '默认' : e.value,
-                    style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14)),
-                trailing: e.key == current
-                    ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a))
-                    : null,
-                onTap: () => Navigator.pop(ctx, e.key),
-              ),
-            const SizedBox(height: 6),
-          ],
-        ),
-      ),
-    );
-    if (picked == null) return;
-    if (!context.mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      await mgr.updateSessionEffort(s.id, picked);
-      messenger.showSnackBar(SnackBar(
-        content: Text('✓ 努力程度已切换为 ${picked.isEmpty ? '默认' : picked}，下一轮对话生效'),
-      ));
-    } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('努力程度切换失败：$e')));
-    }
-  }
-}
-
-/// Compact per-session provider indicator + switcher for the chat header.
-/// Works for both claude & codex; tap to pick a provider (next turn applies).
-class _ProviderChip extends StatefulWidget {
-  final String sessionId;
-  final SessionCli cli;
-  final SettingsService settings;
-  final bool compact;
-  const _ProviderChip({required this.sessionId, required this.cli, required this.settings, this.compact = false});
-
-  @override
-  State<_ProviderChip> createState() => _ProviderChipState();
-}
-
-class _ProviderChipState extends State<_ProviderChip> {
-  List<Map<String, dynamic>> _providers = [];
-  bool _loaded = false;
-
-  String get _appType => widget.cli == SessionCli.codex ? 'codex' : 'claude';
+  static const _codexEfforts = <String>['low', 'medium', 'high', 'xhigh'];
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _provider = widget.provider;
+    _model = widget.model;
+    _effort = _validEfforts.contains(widget.effort) ? widget.effort : 'medium';
+    final known = _modelChoices(_provider).contains(_model);
+    _customModel = _model.isNotEmpty && !known;
+    _customCtrl = TextEditingController(text: _customModel ? _model : '');
   }
 
-  Future<void> _load() async {
-    try {
-      final d = await ManageService(settings: widget.settings).fetchProviders(_appType);
-      if (!mounted) return;
-      setState(() {
-        _providers = (d['providers'] as List? ?? [])
-            .map((e) => (e as Map).cast<String, dynamic>())
-            .toList();
-        _loaded = true;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _loaded = true);
+  @override
+  void dispose() {
+    _customCtrl.dispose();
+    super.dispose();
+  }
+
+  List<String> get _validEfforts => _isClaude ? _claudeEfforts : _codexEfforts;
+
+  Map<String, dynamic>? _providerMap(String id) {
+    for (final p in widget.providers) {
+      if (p['id'] == id) return p;
     }
+    return null;
   }
 
-  String _nameOf(String? id) {
-    if (id == null || id.isEmpty) return t('defaultModel');
-    final p = _providers.where((x) => x['id'] == id);
-    return p.isNotEmpty ? (p.first['name'] as String? ?? id) : t('customModel');
+  String _providerName(String id) {
+    if (id.isEmpty) return '默认登录';
+    final p = _providerMap(id);
+    return p?['name']?.toString() ?? id;
+  }
+
+  List<String> _modelChoices(String provider) {
+    final opts = _providerMap(provider)?['modelOptions'];
+    if (opts is List && opts.isNotEmpty) {
+      return [
+        '',
+        ...opts.map((e) => e.toString()).where((e) => e.trim().isNotEmpty),
+      ];
+    }
+    return _isClaude ? kClaudeModelOptions.map((e) => e.key).toList() : [''];
+  }
+
+  String _modelLabel(String model) {
+    if (model.isEmpty) return '默认 / 跟随 Provider';
+    return modelShortNameForCli(widget.cli, model);
+  }
+
+  String _effortDescription(String value) {
+    if (!_isClaude) {
+      switch (value) {
+        case 'low':
+          return 'Low — Fast responses with lighter reasoning';
+        case 'medium':
+          return 'Medium — Balances speed and reasoning depth for everyday tasks';
+        case 'high':
+          return 'High — Greater reasoning depth for complex problems';
+        case 'xhigh':
+          return 'Extra high — Extra high reasoning depth for complex problems';
+      }
+    }
+    return value;
+  }
+
+  void _onProviderChanged(String? value) {
+    final next = value ?? '';
+    final choices = _modelChoices(next);
+    setState(() {
+      _provider = next;
+      if (!choices.contains(_model)) {
+        _model = '';
+        _customModel = false;
+        _customCtrl.clear();
+      }
+    });
+  }
+
+  void _submit() {
+    final model = _customModel ? _customCtrl.text.trim() : _model;
+    Navigator.pop(
+      context,
+      _AIConfigResult(
+        provider: _provider,
+        model: model,
+        effort: _effort,
+        providerLabel: _providerName(_provider),
+        modelLabel: model.isEmpty ? '默认' : _modelLabel(model),
+        effortLabel: effortShortNameForCli(widget.cli, _effort),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final mgr = context.watch<SessionManager>();
-    Session? s;
-    for (final x in mgr.sessions) {
-      if (x.id == widget.sessionId) { s = x; break; }
-    }
-    final label = _nameOf(s?.provider);
-    return Tooltip(
-      message: t('switchProvider'),
-      child: GestureDetector(
-        onTap: () => _switchProvider(context, mgr, s),
-        child: Container(
-          padding: EdgeInsets.symmetric(
-              horizontal: widget.compact ? 6 : 8, vertical: 5),
-          decoration: BoxDecoration(
-            color: const Color(0xFF14171c),
-            border: Border.all(color: const Color(0xFF20242b)),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.swap_horiz_rounded, size: 15, color: Color(0xFFe7eaee)),
-              if (!widget.compact) ...[
-                const SizedBox(width: 4),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 64),
-                  child: Text(label,
-                      style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 11, fontWeight: FontWeight.w600),
-                      overflow: TextOverflow.ellipsis),
+    final modelChoices = _modelChoices(_provider);
+    final providerIds = widget.providers
+        .map((p) => p['id']?.toString() ?? '')
+        .toSet();
+    final includeCurrentProvider =
+        _provider.isNotEmpty && !providerIds.contains(_provider);
+    final modelValue = _customModel
+        ? '__custom__'
+        : (modelChoices.contains(_model) ? _model : '');
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 18,
+          right: 18,
+          top: 16,
+          bottom: 18 + MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              _isClaude
+                  ? 'AI 配置（Provider / Model / Effort）'
+                  : 'AI 配置（Provider / Model / Reasoning Level）',
+              style: const TextStyle(
+                color: AppColors.text,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Provider',
+              style: TextStyle(color: AppColors.faint, fontSize: 12),
+            ),
+            const SizedBox(height: 5),
+            DropdownButtonFormField<String>(
+              value: _provider,
+              dropdownColor: AppColors.panel,
+              decoration: _sheetInputDecoration(),
+              style: const TextStyle(color: AppColors.text, fontSize: 13),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('默认登录 / 订阅')),
+                if (includeCurrentProvider)
+                  DropdownMenuItem(value: _provider, child: Text(_provider)),
+                ...widget.providers.map(
+                  (p) => DropdownMenuItem(
+                    value: p['id']?.toString() ?? '',
+                    child: Text(
+                      '${p['name'] ?? p['id']}${p['model'] != null && p['model'].toString().isNotEmpty ? ' · ${p['model']}' : ''}',
+                    ),
+                  ),
                 ),
               ],
+              onChanged: _onProviderChanged,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Model',
+              style: TextStyle(color: AppColors.faint, fontSize: 12),
+            ),
+            const SizedBox(height: 5),
+            DropdownButtonFormField<String>(
+              value: modelValue,
+              dropdownColor: AppColors.panel,
+              decoration: _sheetInputDecoration(),
+              style: const TextStyle(color: AppColors.text, fontSize: 13),
+              items: [
+                ...modelChoices.map(
+                  (m) =>
+                      DropdownMenuItem(value: m, child: Text(_modelLabel(m))),
+                ),
+                const DropdownMenuItem(
+                  value: '__custom__',
+                  child: Text('自定义…'),
+                ),
+              ],
+              onChanged: (v) {
+                setState(() {
+                  _customModel = v == '__custom__';
+                  if (!_customModel) _model = v ?? '';
+                });
+              },
+            ),
+            if (_customModel) ...[
+              const SizedBox(height: 8),
+              TextField(
+                controller: _customCtrl,
+                autofocus: true,
+                style: const TextStyle(
+                  color: AppColors.text,
+                  fontSize: 13,
+                  fontFamily: 'monospace',
+                ),
+                decoration: _sheetInputDecoration(
+                  hint: _isClaude ? 'claude-opus-4-8' : '模型 ID',
+                ),
+              ),
             ],
-          ),
+            const SizedBox(height: 12),
+            Text(
+              _isClaude ? 'Effort' : 'Reasoning Level',
+              style: const TextStyle(color: AppColors.faint, fontSize: 12),
+            ),
+            const SizedBox(height: 5),
+            DropdownButtonFormField<String>(
+              value: _effort,
+              dropdownColor: AppColors.panel,
+              decoration: _sheetInputDecoration(),
+              style: const TextStyle(color: AppColors.text, fontSize: 13),
+              items: _validEfforts
+                  .map(
+                    (e) => DropdownMenuItem(
+                      value: e,
+                      child: Text(_effortDescription(e)),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (v) => setState(() => _effort = v ?? 'medium'),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(onPressed: _submit, child: const Text('保存')),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
-
-  Future<void> _switchProvider(BuildContext context, SessionManager mgr, Session? s) async {
-    if (s == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(t('sessionNotLoaded'))));
-      return;
-    }
-    if (!_loaded) await _load();
-    if (!context.mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    final picked = await showModalBottomSheet<_PickResult>(
-      context: context,
-      backgroundColor: AppColors.panel,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (_) => _ProviderPickerSheet(
-        providers: _providers,
-        current: s.provider ?? '',
-        appType: _appType,
-      ),
-    );
-    if (picked == null) return;
-    try {
-      await mgr.updateSessionProvider(s.id, picked.id);
-      final name = picked.id.isEmpty ? t('defaultLogin') : picked.name;
-      messenger.showSnackBar(
-        SnackBar(content: Text(t('providerSwitched', {'name': name}))),
-      );
-    } catch (e) {
-      messenger.showSnackBar(
-          SnackBar(content: Text(t('providerSwitchFailed', {'error': '$e'}))));
-    }
-  }
 }
 
-class _PickResult {
-  final String id;
-  final String name;
-  _PickResult(this.id, this.name);
-}
-
-class _ProviderPickerSheet extends StatelessWidget {
-  final List<Map<String, dynamic>> providers;
-  final String current;
-  final String appType;
-  const _ProviderPickerSheet({required this.providers, required this.current, required this.appType});
-
-  @override
-  Widget build(BuildContext context) {
-    Widget tile(String id, String name, String? sub) {
-      final sel = current == id;
-      return ListTile(
-        onTap: () => Navigator.pop(context, _PickResult(id, name)),
-        leading: Icon(sel ? Icons.radio_button_checked : Icons.radio_button_off,
-            color: sel ? AppColors.accent : AppColors.faint, size: 20),
-        title: Text(name, style: const TextStyle(color: AppColors.text, fontSize: 14)),
-        subtitle: sub != null && sub.isNotEmpty
-            ? Text(sub, style: const TextStyle(color: AppColors.faint, fontSize: 12), overflow: TextOverflow.ellipsis)
-            : null,
-        dense: true,
-      );
-    }
-
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 38, height: 4,
-            margin: const EdgeInsets.symmetric(vertical: 12),
-            decoration: BoxDecoration(color: AppColors.line, borderRadius: BorderRadius.circular(2)),
-          ),
-          const Padding(
-            padding: EdgeInsets.only(bottom: 6),
-            child: Text('切换该会话的 Provider（下一轮生效）',
-                style: TextStyle(color: AppColors.textBright, fontSize: 14, fontWeight: FontWeight.w600)),
-          ),
-          Flexible(
-            child: ListView(
-              shrinkWrap: true,
-              children: [
-                tile('', '默认登录 / 订阅', '不覆盖，走本机登录'),
-                ...providers.map((p) => tile(
-                      p['id'] as String,
-                      p['name'] as String? ?? '',
-                      p['isOfficial'] == true ? '订阅' : (p['baseUrl'] as String? ?? ''),
-                    )),
-                if (providers.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text('暂无可用 provider，请到「设置 → Provider 配置」导入或新建。',
-                        textAlign: TextAlign.center, style: TextStyle(color: AppColors.faint, fontSize: 13)),
-                  ),
-                const SizedBox(height: 12),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+InputDecoration _sheetInputDecoration({String? hint}) {
+  return InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(color: AppColors.faint),
+    filled: true,
+    fillColor: const Color(0xFF070809),
+    isDense: true,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(6),
+      borderSide: const BorderSide(color: Color(0xFF20242b)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(6),
+      borderSide: const BorderSide(color: AppColors.accent),
+    ),
+  );
 }
 
 // Edit the per-session role prompt (system-prompt override) from the chat
 // header overflow menu. Empty = clear → inherits the directory default.
 Future<void> _editRoleFromSession(
-    BuildContext context, String sessionId) async {
+  BuildContext context,
+  String sessionId,
+) async {
   final mgr = Provider.of<SessionManager>(context, listen: false);
   final messenger = ScaffoldMessenger.of(context);
   Session? s;
   for (final x in mgr.sessions) {
-    if (x.id == sessionId) { s = x; break; }
+    if (x.id == sessionId) {
+      s = x;
+      break;
+    }
   }
   if (s == null) {
-    messenger.showSnackBar(
-      const SnackBar(content: Text('Session 信息未加载')),
-    );
+    messenger.showSnackBar(const SnackBar(content: Text('Session 信息未加载')));
     return;
   }
-  final picked = await _showRolePromptEditor(context,
-      current: s.rolePrompt ?? '', settings: mgr.settings);
+  final picked = await _showRolePromptEditor(
+    context,
+    current: s.rolePrompt ?? '',
+    settings: mgr.settings,
+  );
   if (picked == null) return; // cancelled
   try {
     await mgr.updateSessionRolePrompt(s.id, picked);
     messenger.showSnackBar(
       SnackBar(
-        content: Text(picked.trim().isEmpty
-            ? '✓ 已清除会话角色（继承目录默认），下一轮对话生效'
-            : '✓ 角色提示词已更新，下一轮对话生效'),
+        content: Text(
+          picked.trim().isEmpty
+              ? '✓ 已清除会话角色（继承目录默认），下一轮对话生效'
+              : '✓ 角色提示词已更新，下一轮对话生效',
+        ),
       ),
     );
   } catch (e) {
@@ -980,7 +1007,9 @@ Future<void> _editRoleFromSession(
 // solved). The aux AI maintains it on history clear/trim; here the user can read
 // and tweak it. Fetched fresh since the AI may have updated it.
 Future<void> _editMemoryFromSession(
-    BuildContext context, String sessionId) async {
+  BuildContext context,
+  String sessionId,
+) async {
   final mgr = Provider.of<SessionManager>(context, listen: false);
   final messenger = ScaffoldMessenger.of(context);
   String current = '';
@@ -992,23 +1021,29 @@ Future<void> _editMemoryFromSession(
   if (picked == null) return; // cancelled
   try {
     await mgr.updateSessionMemory(sessionId, picked);
-    messenger.showSnackBar(SnackBar(
-      content: Text(picked.trim().isEmpty ? '✓ 已清空会话记忆' : '✓ 会话记忆已更新'),
-    ));
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(picked.trim().isEmpty ? '✓ 已清空会话记忆' : '✓ 会话记忆已更新'),
+      ),
+    );
   } catch (e) {
     messenger.showSnackBar(SnackBar(content: Text('记忆保存失败：$e')));
   }
 }
 
-Future<String?> _showMemoryEditor(BuildContext context,
-    {required String current}) {
+Future<String?> _showMemoryEditor(
+  BuildContext context, {
+  required String current,
+}) {
   final ctrl = TextEditingController(text: current);
   return showDialog<String>(
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: const Color(0xFF14171c),
-      title: const Text('🧠 会话记忆',
-          style: TextStyle(color: Color(0xFFe7eaee), fontSize: 16)),
+      title: const Text(
+        '🧠 会话记忆',
+        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 16),
+      ),
       content: SizedBox(
         width: double.maxFinite,
         child: Column(
@@ -1025,9 +1060,13 @@ Future<String?> _showMemoryEditor(BuildContext context,
               maxLines: 12,
               minLines: 6,
               style: const TextStyle(
-                  color: Color(0xFFc9d1d9), fontSize: 13, fontFamily: 'monospace'),
+                color: Color(0xFFc9d1d9),
+                fontSize: 13,
+                fontFamily: 'monospace',
+              ),
               decoration: const InputDecoration(
-                hintText: '（还没有积累记忆。聊一段后 Clear 历史，或历史超长自动滚动时，辅助 AI 会在这里记下关键问题与解决方式。）',
+                hintText:
+                    '（还没有积累记忆。聊一段后 Clear 历史，或历史超长自动滚动时，辅助 AI 会在这里记下关键问题与解决方式。）',
                 hintStyle: TextStyle(color: Color(0xFF5b616c), fontSize: 12),
                 filled: true,
                 fillColor: Color(0xFF0d1117),
@@ -1035,20 +1074,24 @@ Future<String?> _showMemoryEditor(BuildContext context,
               ),
             ),
             const SizedBox(height: 6),
-            const Text('留空＝清除全部记忆。',
-                style: TextStyle(color: Color(0xFF6e7681), fontSize: 11)),
+            const Text(
+              '留空＝清除全部记忆。',
+              style: TextStyle(color: Color(0xFF6e7681), fontSize: 11),
+            ),
           ],
         ),
       ),
       actions: [
         TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b)))),
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b))),
+        ),
         TextButton(
           onPressed: () {
             if (ctrl.text.length > 8000) {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                  const SnackBar(content: Text('记忆过长（上限 8000 字）')));
+              ScaffoldMessenger.of(
+                ctx,
+              ).showSnackBar(const SnackBar(content: Text('记忆过长（上限 8000 字）')));
               return;
             }
             Navigator.pop(ctx, ctrl.text);
@@ -1064,7 +1107,10 @@ Future<String?> _showMemoryEditor(BuildContext context,
 // access type + optional password + expiry, list existing shares with type
 // badges and revoke buttons, copy link to clipboard.
 Future<void> _shareFromSession(
-    BuildContext context, String sessionId, SettingsService settings) async {
+  BuildContext context,
+  String sessionId,
+  SettingsService settings,
+) async {
   final svc = SessionService(settings: settings);
   String access = 'view';
   final pwCtrl = TextEditingController();
@@ -1098,8 +1144,10 @@ Future<void> _shareFromSession(
             borderRadius: BorderRadius.circular(12),
             side: const BorderSide(color: Color(0xFF20242b)),
           ),
-          title: const Text('分享会话',
-              style: TextStyle(color: Color(0xFFe7eaee), fontSize: 16)),
+          title: const Text(
+            '分享会话',
+            style: TextStyle(color: Color(0xFFe7eaee), fontSize: 16),
+          ),
           content: SizedBox(
             width: 380,
             child: SingleChildScrollView(
@@ -1107,50 +1155,93 @@ Future<void> _shareFromSession(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('接收方在浏览器打开链接即可。',
-                      style: TextStyle(color: Color(0xFF8b949e), fontSize: 12)),
+                  const Text(
+                    '接收方在浏览器打开链接即可。',
+                    style: TextStyle(color: Color(0xFF8b949e), fontSize: 12),
+                  ),
                   const SizedBox(height: 4),
-                  const Text('「可对话」= 对方能通过此会话在你机器上执行操作，务必设强密码。',
-                      style: TextStyle(color: Color(0xFFe3853f), fontSize: 12)),
+                  const Text(
+                    '「可对话」= 对方能通过此会话在你机器上执行操作，务必设强密码。',
+                    style: TextStyle(color: Color(0xFFe3853f), fontSize: 12),
+                  ),
                   const SizedBox(height: 14),
                   // ── Access type ──
                   Row(
                     children: [
-                      _expandedChoice('view', '只读查看', access, (v) => setState(() => access = v)),
+                      _expandedChoice(
+                        'view',
+                        '只读查看',
+                        access,
+                        (v) => setState(() => access = v),
+                      ),
                       const SizedBox(width: 8),
-                      _expandedChoice('operate', '可对话', access, (v) => setState(() => access = v)),
+                      _expandedChoice(
+                        'operate',
+                        '可对话',
+                        access,
+                        (v) => setState(() => access = v),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 10),
                   // ── Password ──
                   TextField(
                     controller: pwCtrl,
-                    style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14),
+                    style: const TextStyle(
+                      color: Color(0xFFe7eaee),
+                      fontSize: 14,
+                    ),
                     decoration: const InputDecoration(
                       hintText: '密码（只读可留空；可对话必填）',
-                      hintStyle: TextStyle(color: Color(0xFF6e7681), fontSize: 13),
+                      hintStyle: TextStyle(
+                        color: Color(0xFF6e7681),
+                        fontSize: 13,
+                      ),
                       filled: true,
                       fillColor: Color(0xFF1c2128),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 10,
+                      ),
                       border: OutlineInputBorder(
-                          borderRadius: BorderRadius.all(Radius.circular(8)),
-                          borderSide: BorderSide(color: Color(0xFF20242b))),
+                        borderRadius: BorderRadius.all(Radius.circular(8)),
+                        borderSide: BorderSide(color: Color(0xFF20242b)),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 10),
                   // ── Expiry ──
-                  const Text('有效期', style: TextStyle(color: Color(0xFF8b949e), fontSize: 11)),
+                  const Text(
+                    '有效期',
+                    style: TextStyle(color: Color(0xFF8b949e), fontSize: 11),
+                  ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      _expiryChip('永不过期', 0, expiryHrs,
-                          (v) => setState(() => expiryHrs = v)),
-                      _expiryChip('1h', 1, expiryHrs,
-                          (v) => setState(() => expiryHrs = v)),
-                      _expiryChip('1天', 24, expiryHrs,
-                          (v) => setState(() => expiryHrs = v)),
-                      _expiryChip('7天', 168, expiryHrs,
-                          (v) => setState(() => expiryHrs = v)),
+                      _expiryChip(
+                        '永不过期',
+                        0,
+                        expiryHrs,
+                        (v) => setState(() => expiryHrs = v),
+                      ),
+                      _expiryChip(
+                        '1h',
+                        1,
+                        expiryHrs,
+                        (v) => setState(() => expiryHrs = v),
+                      ),
+                      _expiryChip(
+                        '1天',
+                        24,
+                        expiryHrs,
+                        (v) => setState(() => expiryHrs = v),
+                      ),
+                      _expiryChip(
+                        '7天',
+                        168,
+                        expiryHrs,
+                        (v) => setState(() => expiryHrs = v),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 14),
@@ -1159,40 +1250,66 @@ Future<void> _shareFromSession(
                     width: double.infinity,
                     height: 42,
                     child: ElevatedButton(
-                      onPressed: busy ? null : () async {
-                        final pw = pwCtrl.text.trim();
-                        if (access == 'operate' && pw.isEmpty) {
-                          setState(() => error = '「可对话」必须设置密码');
-                          return;
-                        }
-                        setState(() { busy = true; error = null; });
-                        try {
-                          final r = await svc.createShare(sessionId,
-                              access: access,
-                              password: pw.isEmpty ? null : pw,
-                              expiresAt: expiryHrs > 0
-                                  ? (DateTime.now().millisecondsSinceEpoch + expiryHrs * 3600 * 1000)
-                                  : null);
-                          setState(() { url = r['url'] as String?; busy = false; });
-                          pwCtrl.clear();
-                          refreshShares(setState);
-                        } catch (e) {
-                          setState(() { error = '$e'; busy = false; });
-                        }
-                      },
+                      onPressed: busy
+                          ? null
+                          : () async {
+                              final pw = pwCtrl.text.trim();
+                              if (access == 'operate' && pw.isEmpty) {
+                                setState(() => error = '「可对话」必须设置密码');
+                                return;
+                              }
+                              setState(() {
+                                busy = true;
+                                error = null;
+                              });
+                              try {
+                                final r = await svc.createShare(
+                                  sessionId,
+                                  access: access,
+                                  password: pw.isEmpty ? null : pw,
+                                  expiresAt: expiryHrs > 0
+                                      ? (DateTime.now().millisecondsSinceEpoch +
+                                            expiryHrs * 3600 * 1000)
+                                      : null,
+                                );
+                                setState(() {
+                                  url = r['url'] as String?;
+                                  busy = false;
+                                });
+                                pwCtrl.clear();
+                                refreshShares(setState);
+                              } catch (e) {
+                                setState(() {
+                                  error = '$e';
+                                  busy = false;
+                                });
+                              }
+                            },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF238636),
                         foregroundColor: Colors.white,
                       ),
                       child: busy
-                          ? const SizedBox(width: 18, height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
                           : Text(url == null ? '生成链接' : '重新生成'),
                     ),
                   ),
                   if (error != null) ...[
                     const SizedBox(height: 8),
-                    Text(error!, style: const TextStyle(color: Color(0xFFff6b63), fontSize: 12)),
+                    Text(
+                      error!,
+                      style: const TextStyle(
+                        color: Color(0xFFff6b63),
+                        fontSize: 12,
+                      ),
+                    ),
                   ],
                   if (url != null) ...[
                     const SizedBox(height: 10),
@@ -1206,17 +1323,27 @@ Future<void> _shareFromSession(
                       child: Row(
                         children: [
                           Expanded(
-                            child: SelectableText(url!,
-                                style: const TextStyle(color: Color(0xFF79c0ff), fontSize: 12)),
+                            child: SelectableText(
+                              url!,
+                              style: const TextStyle(
+                                color: Color(0xFF79c0ff),
+                                fontSize: 12,
+                              ),
+                            ),
                           ),
                           const SizedBox(width: 8),
                           GestureDetector(
                             onTap: () {
                               Clipboard.setData(ClipboardData(text: url!));
                               ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('链接已复制')));
+                                const SnackBar(content: Text('链接已复制')),
+                              );
                             },
-                            child: const Icon(Icons.copy, size: 18, color: Color(0xFF8b949e)),
+                            child: const Icon(
+                              Icons.copy,
+                              size: 18,
+                              color: Color(0xFF8b949e),
+                            ),
                           ),
                         ],
                       ),
@@ -1224,30 +1351,53 @@ Future<void> _shareFromSession(
                   ],
                   // ── Existing shares ──
                   const SizedBox(height: 18),
-                  const Text('已有分享',
-                      style: TextStyle(color: Color(0xFF8b949e), fontSize: 12, fontWeight: FontWeight.w600)),
+                  const Text(
+                    '已有分享',
+                    style: TextStyle(
+                      color: Color(0xFF8b949e),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   const SizedBox(height: 6),
                   if (loadingShares)
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Center(child: SizedBox(width: 18, height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF8b949e)))),
+                      child: Center(
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFF8b949e),
+                          ),
+                        ),
+                      ),
                     )
                   else if (shares.isEmpty)
-                    const Text('暂无', style: TextStyle(color: Color(0xFF6e7681), fontSize: 13))
+                    const Text(
+                      '暂无',
+                      style: TextStyle(color: Color(0xFF6e7681), fontSize: 13),
+                    )
                   else
-                    ...shares.map((s) => _shareCard(s, () async {
-                      final token = s['token'] as String;
-                      try {
-                        await svc.deleteShare(sessionId, token);
-                        setState(() => shares.removeWhere((x) => x['token'] == token));
-                      } catch (e) {
-                        if (ctx.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('撤销失败：$e')));
+                    ...shares.map(
+                      (s) => _shareCard(s, () async {
+                        final token = s['token'] as String;
+                        try {
+                          await svc.deleteShare(sessionId, token);
+                          setState(
+                            () =>
+                                shares.removeWhere((x) => x['token'] == token),
+                          );
+                        } catch (e) {
+                          if (ctx.mounted) {
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text('撤销失败：$e')));
+                          }
                         }
-                      }
-                    })),
+                      }),
+                    ),
                 ],
               ),
             ),
@@ -1255,7 +1405,10 @@ Future<void> _shareFromSession(
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('关闭', style: TextStyle(color: Color(0xFF8b949e))),
+              child: const Text(
+                '关闭',
+                style: TextStyle(color: Color(0xFF8b949e)),
+              ),
             ),
           ],
         );
@@ -1264,7 +1417,12 @@ Future<void> _shareFromSession(
   );
 }
 
-Widget _expandedChoice(String value, String label, String current, ValueChanged<String> onChanged) {
+Widget _expandedChoice(
+  String value,
+  String label,
+  String current,
+  ValueChanged<String> onChanged,
+) {
   final sel = current == value;
   return Expanded(
     child: GestureDetector(
@@ -1275,18 +1433,29 @@ Widget _expandedChoice(String value, String label, String current, ValueChanged<
         decoration: BoxDecoration(
           color: sel ? const Color(0xFF1a3a5c) : const Color(0xFF1c2128),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: sel ? const Color(0xFF58a6ff) : const Color(0xFF20242b)),
+          border: Border.all(
+            color: sel ? const Color(0xFF58a6ff) : const Color(0xFF20242b),
+          ),
         ),
-        child: Text(label, style: TextStyle(
+        child: Text(
+          label,
+          style: TextStyle(
             color: sel ? const Color(0xFF79c0ff) : const Color(0xFF8b949e),
             fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
-            fontSize: 13)),
+            fontSize: 13,
+          ),
+        ),
       ),
     ),
   );
 }
 
-Widget _expiryChip(String label, int value, int current, ValueChanged<int> onChanged) {
+Widget _expiryChip(
+  String label,
+  int value,
+  int current,
+  ValueChanged<int> onChanged,
+) {
   final sel = current == value;
   return Padding(
     padding: const EdgeInsets.only(right: 8),
@@ -1297,12 +1466,18 @@ Widget _expiryChip(String label, int value, int current, ValueChanged<int> onCha
         decoration: BoxDecoration(
           color: sel ? const Color(0xFF1a3a5c) : const Color(0xFF1c2128),
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: sel ? const Color(0xFF58a6ff) : const Color(0xFF20242b)),
+          border: Border.all(
+            color: sel ? const Color(0xFF58a6ff) : const Color(0xFF20242b),
+          ),
         ),
-        child: Text(label, style: TextStyle(
+        child: Text(
+          label,
+          style: TextStyle(
             color: sel ? const Color(0xFF79c0ff) : const Color(0xFF8b949e),
             fontWeight: sel ? FontWeight.w500 : FontWeight.w400,
-            fontSize: 12)),
+            fontSize: 12,
+          ),
+        ),
       ),
     ),
   );
@@ -1337,9 +1512,11 @@ Widget _shareCard(Map<String, dynamic> s, VoidCallback onRevoke) {
         Row(
           children: [
             Expanded(
-              child: Text('${_shareTypeLabel(s)}$expStr',
-                  style: const TextStyle(color: Color(0xFF79c0ff), fontSize: 12),
-                  overflow: TextOverflow.ellipsis),
+              child: Text(
+                '${_shareTypeLabel(s)}$expStr',
+                style: const TextStyle(color: Color(0xFF79c0ff), fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
             const SizedBox(width: 8),
             GestureDetector(
@@ -1357,14 +1534,25 @@ Widget _shareCard(Map<String, dynamic> s, VoidCallback onRevoke) {
             const SizedBox(width: 6),
             GestureDetector(
               onTap: onRevoke,
-              child: const Icon(Icons.close_rounded, size: 18, color: Color(0xFFf85149)),
+              child: const Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: Color(0xFFf85149),
+              ),
             ),
           ],
         ),
         const SizedBox(height: 4),
-        Text(url,
-            style: const TextStyle(color: Color(0xFF6e7681), fontSize: 11, fontFamily: 'monospace'),
-            maxLines: 1, overflow: TextOverflow.ellipsis),
+        Text(
+          url,
+          style: const TextStyle(
+            color: Color(0xFF6e7681),
+            fontSize: 11,
+            fontFamily: 'monospace',
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ],
     ),
   );
@@ -1373,11 +1561,15 @@ Widget _shareCard(Map<String, dynamic> s, VoidCallback onRevoke) {
 // Multi-line role-prompt editor dialog. Returns the new text, or null on cancel.
 // [settings] enables the preset picker (small chip strip + full browser). When
 // omitted the editor degrades to a plain text field.
-Future<String?> _showRolePromptEditor(BuildContext context,
-    {required String current, SettingsService? settings}) {
+Future<String?> _showRolePromptEditor(
+  BuildContext context, {
+  required String current,
+  SettingsService? settings,
+}) {
   return showDialog<String>(
     context: context,
-    builder: (ctx) => _RolePromptEditorDialog(current: current, settings: settings),
+    builder: (ctx) =>
+        _RolePromptEditorDialog(current: current, settings: settings),
   );
 }
 
@@ -1455,10 +1647,14 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
             borderRadius: BorderRadius.circular(12),
             side: const BorderSide(color: AppColors.line),
           ),
-          title: const Text('替换当前内容?',
-              style: TextStyle(color: AppColors.text, fontSize: 15)),
-          content: const Text('文本框已有内容，使用该模板会覆盖现有文字。',
-              style: TextStyle(color: AppColors.muted, fontSize: 13)),
+          title: const Text(
+            '替换当前内容?',
+            style: TextStyle(color: AppColors.text, fontSize: 15),
+          ),
+          content: const Text(
+            '文本框已有内容，使用该模板会覆盖现有文字。',
+            style: TextStyle(color: AppColors.muted, fontSize: 13),
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(c, false),
@@ -1466,7 +1662,10 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
             ),
             TextButton(
               onPressed: () => Navigator.pop(c, true),
-              child: const Text('替换', style: TextStyle(color: AppColors.danger)),
+              child: const Text(
+                '替换',
+                style: TextStyle(color: AppColors.danger),
+              ),
             ),
           ],
         ),
@@ -1484,8 +1683,9 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _applying = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('模板加载失败：$e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('模板加载失败：$e')));
     }
   }
 
@@ -1495,8 +1695,7 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) =>
-          AgentPresetPickerSheet(service: _svc!, index: _index),
+      builder: (_) => AgentPresetPickerSheet(service: _svc!, index: _index),
     );
     if (id != null && id.isNotEmpty) {
       await _applyPreset(id);
@@ -1512,7 +1711,10 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
         child: SizedBox(
           height: 16,
           width: 16,
-          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent),
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: AppColors.accent,
+          ),
         ),
       );
     } else if (_indexError != null && _index == null) {
@@ -1521,16 +1723,21 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
         child: Row(
           children: [
             const Expanded(
-              child: Text('模板加载失败',
-                  style: TextStyle(color: AppColors.danger, fontSize: 12)),
+              child: Text(
+                '模板加载失败',
+                style: TextStyle(color: AppColors.danger, fontSize: 12),
+              ),
             ),
             TextButton(
               onPressed: () => _loadIndex(forceRefresh: true),
               style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 28),
-                  padding: const EdgeInsets.symmetric(horizontal: 8)),
-              child: const Text('重试',
-                  style: TextStyle(color: AppColors.accent, fontSize: 12)),
+                minimumSize: const Size(0, 28),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              child: const Text(
+                '重试',
+                style: TextStyle(color: AppColors.accent, fontSize: 12),
+              ),
             ),
           ],
         ),
@@ -1542,8 +1749,10 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
         child: featured.isEmpty
             ? const Align(
                 alignment: Alignment.centerLeft,
-                child: Text('暂无推荐模板',
-                    style: TextStyle(color: AppColors.faint, fontSize: 12)),
+                child: Text(
+                  '暂无推荐模板',
+                  style: TextStyle(color: AppColors.faint, fontSize: 12),
+                ),
               )
             : ListView.separated(
                 scrollDirection: Axis.horizontal,
@@ -1565,16 +1774,21 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
       children: [
         Row(
           children: [
-            const Text('预设角色',
-                style: TextStyle(color: AppColors.muted, fontSize: 12)),
+            const Text(
+              '预设角色',
+              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
             const Spacer(),
             TextButton(
               onPressed: _browseAll,
               style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 28),
-                  padding: const EdgeInsets.symmetric(horizontal: 6)),
-              child: const Text('浏览全部模板 →',
-                  style: TextStyle(color: AppColors.accent, fontSize: 12)),
+                minimumSize: const Size(0, 28),
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+              child: const Text(
+                '浏览全部模板 →',
+                style: TextStyle(color: AppColors.accent, fontSize: 12),
+              ),
             ),
           ],
         ),
@@ -1594,15 +1808,19 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
       ),
       title: Row(
         children: [
-          const Text('角色提示词',
-              style: TextStyle(color: AppColors.text, fontSize: 16)),
+          const Text(
+            '角色提示词',
+            style: TextStyle(color: AppColors.text, fontSize: 16),
+          ),
           if (_applying) ...[
             const SizedBox(width: 10),
             const SizedBox(
               height: 14,
               width: 14,
               child: CircularProgressIndicator(
-                  strokeWidth: 2, color: AppColors.accent),
+                strokeWidth: 2,
+                color: AppColors.accent,
+              ),
             ),
           ],
         ],
@@ -1626,13 +1844,17 @@ class _RolePromptEditorDialogState extends State<_RolePromptEditorDialog> {
                     '例如：你是开发保姆，被触发时用 multicc-trigger skill 检查 git 改动并提醒提交和测试，不要擅自改代码。',
                 hintStyle: TextStyle(color: Color(0xFF6b7280), fontSize: 12),
                 enabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: AppColors.line)),
+                  borderSide: BorderSide(color: AppColors.line),
+                ),
                 focusedBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: AppColors.accentDark)),
+                  borderSide: BorderSide(color: AppColors.accentDark),
+                ),
               ),
             ),
-            const Text('留空＝清除（会话将继承目录默认角色）',
-                style: TextStyle(color: AppColors.muted, fontSize: 11)),
+            const Text(
+              '留空＝清除（会话将继承目录默认角色）',
+              style: TextStyle(color: AppColors.muted, fontSize: 11),
+            ),
           ],
         ),
       ),
@@ -1679,11 +1901,14 @@ class _PresetChip extends StatelessWidget {
                 Text(preset.emoji, style: const TextStyle(fontSize: 13)),
                 const SizedBox(width: 6),
               ],
-              Text(preset.name,
-                  style: TextStyle(
-                      color: AppColors.text,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500)),
+              Text(
+                preset.name,
+                style: TextStyle(
+                  color: AppColors.text,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ],
           ),
         ),
@@ -1698,22 +1923,28 @@ void _openMemoFromSession(BuildContext context, String sessionId) {
   final mgr = Provider.of<SessionManager>(context, listen: false);
   Session? s;
   for (final x in mgr.sessions) {
-    if (x.id == sessionId) { s = x; break; }
+    if (x.id == sessionId) {
+      s = x;
+      break;
+    }
   }
   if (s == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Session 信息未加载')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Session 信息未加载')));
     return;
   }
   Directory? d;
   for (final x in mgr.directories) {
-    if (x.id == s.dirId) { d = x; break; }
+    if (x.id == s.dirId) {
+      d = x;
+      break;
+    }
   }
   if (d == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('找不到对应目录')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('找不到对应目录')));
     return;
   }
   Navigator.push(
@@ -1816,11 +2047,7 @@ class _HeaderBtn extends StatelessWidget {
             border: Border.all(color: const Color(0xFF20242b)),
             borderRadius: BorderRadius.circular(6),
           ),
-          child: Icon(
-            icon,
-            color: const Color(0xFFe7eaee),
-            size: 18,
-          ),
+          child: Icon(icon, color: const Color(0xFFe7eaee), size: 18),
         ),
       ),
     );
@@ -1976,22 +2203,33 @@ class _ClearMenuBody extends StatelessWidget {
                     borderRadius: BorderRadius.circular(6),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 9),
+                        horizontal: 10,
+                        vertical: 9,
+                      ),
                       child: Row(
                         children: [
-                          const Icon(Icons.delete_sweep_outlined,
-                              size: 16, color: Color(0xFFff6b63)),
+                          const Icon(
+                            Icons.delete_sweep_outlined,
+                            size: 16,
+                            color: Color(0xFFff6b63),
+                          ),
                           const SizedBox(width: 8),
-                          Text(t('clearAll'),
-                              style: const TextStyle(
-                                  color: Color(0xFFff6b63), fontSize: 13)),
+                          Text(
+                            t('clearAll'),
+                            style: const TextStyle(
+                              color: Color(0xFFff6b63),
+                              fontSize: 13,
+                            ),
+                          ),
                         ],
                       ),
                     ),
                   ),
                   Padding(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 4),
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
                     child: Row(
                       children: [
                         SizedBox(
@@ -2000,19 +2238,25 @@ class _ClearMenuBody extends StatelessWidget {
                             controller: keepCtrl,
                             keyboardType: TextInputType.number,
                             style: const TextStyle(
-                                color: Color(0xFFe7eaee), fontSize: 12),
+                              color: Color(0xFFe7eaee),
+                              fontSize: 12,
+                            ),
                             decoration: InputDecoration(
                               isDense: true,
                               contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 6),
+                                horizontal: 6,
+                                vertical: 6,
+                              ),
                               enabledBorder: OutlineInputBorder(
                                 borderSide: const BorderSide(
-                                    color: Color(0xFF20242b)),
+                                  color: Color(0xFF20242b),
+                                ),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               focusedBorder: OutlineInputBorder(
                                 borderSide: const BorderSide(
-                                    color: Color(0xFF3ad6c5)),
+                                  color: Color(0xFF3ad6c5),
+                                ),
                                 borderRadius: BorderRadius.circular(4),
                               ),
                             ),
@@ -2023,7 +2267,9 @@ class _ClearMenuBody extends StatelessWidget {
                           child: Text(
                             t('clearKeepLast'),
                             style: const TextStyle(
-                                color: Color(0xFF8a909b), fontSize: 12),
+                              color: Color(0xFF8a909b),
+                              fontSize: 12,
+                            ),
                           ),
                         ),
                       ],
@@ -2037,8 +2283,10 @@ class _ClearMenuBody extends StatelessWidget {
                         foregroundColor: const Color(0xFF22ab9c),
                         padding: const EdgeInsets.symmetric(vertical: 4),
                       ),
-                      child: Text(t('clearKeepConfirm'),
-                          style: const TextStyle(fontSize: 13)),
+                      child: Text(
+                        t('clearKeepConfirm'),
+                        style: const TextStyle(fontSize: 13),
+                      ),
                     ),
                   ),
                 ],
@@ -2121,37 +2369,72 @@ class _HeaderOverflowMenu extends StatelessWidget {
         }
       },
       itemBuilder: (_) => [
-        _item('role', Icons.theater_comedy_outlined, t('rolePrompt'),
-            const Color(0xFFe7eaee)),
-        _item('memory', Icons.psychology_outlined, t('sessionMemory'),
-            const Color(0xFFe7eaee)),
-        _item('memo', Icons.sticky_note_2_outlined, t('projectMemo'),
-            const Color(0xFFe7eaee)),
-        _item('share', Icons.share_outlined, t('shareSession'),
-            const Color(0xFFe7eaee)),
-        _item('share-msgs', Icons.checklist_rtl_outlined, t('shareMessages'),
-            const Color(0xFFe7eaee)),
+        _item(
+          'role',
+          Icons.theater_comedy_outlined,
+          t('rolePrompt'),
+          const Color(0xFFe7eaee),
+        ),
+        _item(
+          'memory',
+          Icons.psychology_outlined,
+          t('sessionMemory'),
+          const Color(0xFFe7eaee),
+        ),
+        _item(
+          'memo',
+          Icons.sticky_note_2_outlined,
+          t('projectMemo'),
+          const Color(0xFFe7eaee),
+        ),
+        _item(
+          'share',
+          Icons.share_outlined,
+          t('shareSession'),
+          const Color(0xFFe7eaee),
+        ),
+        _item(
+          'share-msgs',
+          Icons.checklist_rtl_outlined,
+          t('shareMessages'),
+          const Color(0xFFe7eaee),
+        ),
         _item(
           'merge',
           Icons.merge_type,
-          mergeReady ? t('mergeWorktreeReady', {'base': ''}) : t('mergeWorktree'),
+          mergeReady
+              ? t('mergeWorktreeReady', {'base': ''})
+              : t('mergeWorktree'),
           mergeReady ? const Color(0xFFe3b341) : const Color(0xFFe7eaee),
         ),
-        _item('files', Icons.folder_open_outlined, t('fileBrowser'),
-            const Color(0xFFe7eaee)),
-        _item('restart', Icons.restart_alt_rounded, t('restartCli'),
-            const Color(0xFFe3b341)),
+        _item(
+          'files',
+          Icons.folder_open_outlined,
+          t('fileBrowser'),
+          const Color(0xFFe7eaee),
+        ),
+        _item(
+          'restart',
+          Icons.restart_alt_rounded,
+          t('restartCli'),
+          const Color(0xFFe3b341),
+        ),
         const PopupMenuDivider(),
-        _item('settings', Icons.settings_outlined, t('settings'),
-            const Color(0xFFe7eaee)),
+        _item(
+          'settings',
+          Icons.settings_outlined,
+          t('settings'),
+          const Color(0xFFe7eaee),
+        ),
       ],
       child: Container(
         padding: const EdgeInsets.all(6),
         decoration: BoxDecoration(
           color: mergeReady ? const Color(0xFFe3b341) : const Color(0xFF14171c),
           border: Border.all(
-            color:
-                mergeReady ? const Color(0xFFe3b341) : const Color(0xFF20242b),
+            color: mergeReady
+                ? const Color(0xFFe3b341)
+                : const Color(0xFF20242b),
           ),
           borderRadius: BorderRadius.circular(6),
         ),
@@ -2165,7 +2448,11 @@ class _HeaderOverflowMenu extends StatelessWidget {
   }
 
   PopupMenuItem<String> _item(
-      String value, IconData icon, String label, Color color) {
+    String value,
+    IconData icon,
+    String label,
+    Color color,
+  ) {
     return PopupMenuItem<String>(
       value: value,
       height: 44,
@@ -2576,7 +2863,8 @@ class _MessageListState extends State<_MessageList> {
             // this message is the first, or its gap from the previous message
             // exceeds the threshold — so back-to-back turns stay uncluttered.
             final prev = i > 0 ? messages[i - 1] : null;
-            final showTime = prev == null ||
+            final showTime =
+                prev == null ||
                 msg.timestamp.difference(prev.timestamp).inMinutes.abs() >=
                     _timeSeparatorGapMinutes;
             if (!showTime) return MessageBubble(message: msg);
@@ -2749,15 +3037,21 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
             padding: const EdgeInsets.fromLTRB(16, 10, 8, 6),
             child: Row(
               children: [
-                const Text('选择角色模板',
-                    style: TextStyle(
-                        color: AppColors.textBright,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600)),
+                const Text(
+                  '选择角色模板',
+                  style: TextStyle(
+                    color: AppColors.textBright,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const Spacer(),
                 IconButton(
-                  icon: const Icon(Icons.close,
-                      color: AppColors.muted, size: 20),
+                  icon: const Icon(
+                    Icons.close,
+                    color: AppColors.muted,
+                    size: 20,
+                  ),
                   onPressed: () => Navigator.pop(context),
                 ),
               ],
@@ -2771,18 +3065,26 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
               style: const TextStyle(color: AppColors.text, fontSize: 14),
               decoration: InputDecoration(
                 isDense: true,
-                prefixIcon:
-                    const Icon(Icons.search, color: AppColors.faint, size: 18),
+                prefixIcon: const Icon(
+                  Icons.search,
+                  color: AppColors.faint,
+                  size: 18,
+                ),
                 hintText: '搜索名称或描述…',
-                hintStyle: const TextStyle(color: AppColors.faint, fontSize: 13),
+                hintStyle: const TextStyle(
+                  color: AppColors.faint,
+                  fontSize: 13,
+                ),
                 filled: true,
                 fillColor: AppColors.panel2,
                 enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: AppColors.line)),
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.line),
+                ),
                 focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: AppColors.accentDark)),
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.accentDark),
+                ),
               ),
             ),
           ),
@@ -2805,7 +3107,9 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
                   }
                   final cat = categories[i - 1];
                   return _CategoryChip(
-                    label: cat.count > 0 ? '${cat.label} ${cat.count}' : cat.label,
+                    label: cat.count > 0
+                        ? '${cat.label} ${cat.count}'
+                        : cat.label,
                     selected: _category == cat.key,
                     onTap: () => setState(() => _category = cat.key),
                   );
@@ -2860,7 +3164,9 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
     if (_loading && _index == null) {
       return const Center(
         child: CircularProgressIndicator(
-            strokeWidth: 2, color: AppColors.accent),
+          strokeWidth: 2,
+          color: AppColors.accent,
+        ),
       );
     }
     if (_error != null && _index == null) {
@@ -2868,13 +3174,17 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('加载失败：$_error',
-                style: const TextStyle(color: AppColors.danger, fontSize: 13)),
+            Text(
+              '加载失败：$_error',
+              style: const TextStyle(color: AppColors.danger, fontSize: 13),
+            ),
             const SizedBox(height: 8),
             TextButton(
               onPressed: () => _load(forceRefresh: true),
-              child: const Text('重试',
-                  style: TextStyle(color: AppColors.accent)),
+              child: const Text(
+                '重试',
+                style: TextStyle(color: AppColors.accent),
+              ),
             ),
           ],
         ),
@@ -2883,8 +3193,10 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
     final items = _filtered;
     if (items.isEmpty) {
       return const Center(
-        child: Text('没有匹配的模板',
-            style: TextStyle(color: AppColors.faint, fontSize: 13)),
+        child: Text(
+          '没有匹配的模板',
+          style: TextStyle(color: AppColors.faint, fontSize: 13),
+        ),
       );
     }
 
@@ -2934,11 +3246,14 @@ class _AgentPresetPickerSheetState extends State<AgentPresetPickerSheet> {
         if (adj == 0) {
           return const Padding(
             padding: EdgeInsets.only(top: 10, bottom: 8),
-            child: Text('全部模板',
-                style: TextStyle(
-                    color: AppColors.muted,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600)),
+            child: Text(
+              '全部模板',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           );
         }
         final p = rest[adj - 1];
@@ -2959,8 +3274,11 @@ class _CategoryChip extends StatelessWidget {
   final String label;
   final bool selected;
   final VoidCallback onTap;
-  const _CategoryChip(
-      {required this.label, required this.selected, required this.onTap});
+  const _CategoryChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2978,14 +3296,17 @@ class _CategoryChip extends StatelessWidget {
                   : AppColors.panel2,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                  color: selected ? AppColors.accent : AppColors.line),
+                color: selected ? AppColors.accent : AppColors.line,
+              ),
             ),
-            child: Text(label,
-                style: TextStyle(
-                    color: selected ? AppColors.accent : AppColors.muted,
-                    fontSize: 12,
-                    fontWeight:
-                        selected ? FontWeight.w600 : FontWeight.w400)),
+            child: Text(
+              label,
+              style: TextStyle(
+                color: selected ? AppColors.accent : AppColors.muted,
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              ),
+            ),
           ),
         ),
       ),
@@ -3000,8 +3321,12 @@ class _PresetCard extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
   final bool featured;
-  const _PresetCard(
-      {required this.preset, required this.selected, required this.onTap, this.featured = false});
+  const _PresetCard({
+    required this.preset,
+    required this.selected,
+    required this.onTap,
+    this.featured = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -3013,11 +3338,18 @@ class _PresetCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         child: Container(
           decoration: BoxDecoration(
-            color: featured ? AppColors.accent.withValues(alpha: 0.06) : AppColors.panel2,
+            color: featured
+                ? AppColors.accent.withValues(alpha: 0.06)
+                : AppColors.panel2,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-                color: selected ? AppColors.accent : (featured ? AppColors.accent.withValues(alpha: 0.3) : AppColors.line),
-                width: selected ? 1.5 : 1),
+              color: selected
+                  ? AppColors.accent
+                  : (featured
+                        ? AppColors.accent.withValues(alpha: 0.3)
+                        : AppColors.line),
+              width: selected ? 1.5 : 1,
+            ),
           ),
           child: IntrinsicHeight(
             child: Row(
@@ -3029,7 +3361,8 @@ class _PresetCard extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: c,
                     borderRadius: const BorderRadius.horizontal(
-                        left: Radius.circular(11)),
+                      left: Radius.circular(11),
+                    ),
                   ),
                 ),
                 Expanded(
@@ -3041,53 +3374,68 @@ class _PresetCard extends StatelessWidget {
                         Row(
                           children: [
                             if (featured) ...[
-                              const Text('⭐',
-                                  style: TextStyle(fontSize: 14)),
+                              const Text('⭐', style: TextStyle(fontSize: 14)),
                               const SizedBox(width: 4),
                             ],
                             if (preset.emoji.isNotEmpty) ...[
-                              Text(preset.emoji,
-                                  style: const TextStyle(fontSize: 16)),
+                              Text(
+                                preset.emoji,
+                                style: const TextStyle(fontSize: 16),
+                              ),
                               const SizedBox(width: 8),
                             ],
                             Expanded(
-                              child: Text(preset.name,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      color: AppColors.textBright,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700)),
+                              child: Text(
+                                preset.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.textBright,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                             ),
                             if (selected)
-                              const Icon(Icons.check_circle,
-                                  color: AppColors.accent, size: 18),
+                              const Icon(
+                                Icons.check_circle,
+                                color: AppColors.accent,
+                                size: 18,
+                              ),
                           ],
                         ),
                         if (preset.description.isNotEmpty) ...[
                           const SizedBox(height: 6),
-                          Text(preset.description,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  color: AppColors.muted,
-                                  fontSize: 12,
-                                  height: 1.35)),
+                          Text(
+                            preset.description,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 12,
+                              height: 1.35,
+                            ),
+                          ),
                         ],
                         if (preset.category.isNotEmpty) ...[
                           const SizedBox(height: 8),
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
                             decoration: BoxDecoration(
                               color: c.withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: Text(preset.category,
-                                style: TextStyle(
-                                    color: c,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600)),
+                            child: Text(
+                              preset.category,
+                              style: TextStyle(
+                                color: c,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
                         ],
                       ],

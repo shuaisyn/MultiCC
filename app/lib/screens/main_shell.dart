@@ -548,90 +548,94 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
       );
     }
 
-    return FutureBuilder<List<String>?>(future: _loadDirOrder(), builder: (context, snapshot) {
-      final savedOrder = snapshot.data;
-      // 缓存到 _lastSavedOrder，供 _handleDragEnd → _buildVisualOrder 使用
-      _lastSavedOrder = savedOrder;
+    return FutureBuilder<List<String>?>(
+      future: _loadDirOrder(),
+      builder: (context, snapshot) {
+        final savedOrder = snapshot.data;
+        // 缓存到 _lastSavedOrder，供 _handleDragEnd → _buildVisualOrder 使用
+        _lastSavedOrder = savedOrder;
 
-      final orderedDirectories = <Directory>[];
+        final orderedDirectories = <Directory>[];
 
-      if (savedOrder != null && savedOrder.isNotEmpty) {
-        // 按保存的顺序排列，未保存的新目录追加到末尾
-        final dirMap = {for (var d in mgr.directories) d.id: d};
-        for (final id in savedOrder) {
-          if (dirMap.containsKey(id)) {
-            orderedDirectories.add(dirMap[id]!);
-            dirMap.remove(id);
+        if (savedOrder != null && savedOrder.isNotEmpty) {
+          // 按保存的顺序排列，未保存的新目录追加到末尾
+          final dirMap = {for (var d in mgr.directories) d.id: d};
+          for (final id in savedOrder) {
+            if (dirMap.containsKey(id)) {
+              orderedDirectories.add(dirMap[id]!);
+              dirMap.remove(id);
+            }
           }
+          // 添加新创建的目录
+          orderedDirectories.addAll(dirMap.values);
+        } else {
+          orderedDirectories.addAll(mgr.directories);
         }
-        // 添加新创建的目录
-        orderedDirectories.addAll(dirMap.values);
-      } else {
-        orderedDirectories.addAll(mgr.directories);
-      }
 
-      return Column(
-        children: [
-          // 首页全局任务滚动展示器（当天用过的会话，最近优先）
-          _HomeTaskScroller(
-            sessions: mgr.sessions,
-            directories: mgr.directories,
-            onSessionTap: (s) {
-              mgr.openSession(s);
-              mgr.switchToSession(s.id);
-            },
-          ),
-          Expanded(
-            child: RefreshIndicator(
-              onRefresh: mgr.loadDashboard,
-              color: const Color(0xFF6aa3ff),
-              backgroundColor: const Color(0xFF0f1115),
-              child: ListView.builder(
-                padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
-                itemCount: orderedDirectories.length,
-                itemBuilder: (_, i) {
-                  final dir = orderedDirectories[i];
-                  final showInsertIndicator = _dragHoverDirId == dir.id;
-                  return Column(
-                    key: ValueKey(dir.id),
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // 虚拟插入指示器：拖拽悬停时在目标卡片上方显示
-                      if (showInsertIndicator)
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 6),
-                          height: 4,
-                          decoration: BoxDecoration(
-                            color: AppColors.accent,
-                            borderRadius: BorderRadius.circular(2),
-                            boxShadow: [
-                              BoxShadow(
-                                color: AppColors.accent.withValues(alpha: 0.5),
-                                blurRadius: 8,
-                                spreadRadius: 1,
-                              ),
-                            ],
+        return Column(
+          children: [
+            // 首页全局任务滚动展示器（当天用过的会话，最近优先）
+            _HomeTaskScroller(
+              sessions: mgr.sessions,
+              directories: mgr.directories,
+              onSessionTap: (s) {
+                mgr.openSession(s);
+                mgr.switchToSession(s.id);
+              },
+            ),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: mgr.loadDashboard,
+                color: const Color(0xFF6aa3ff),
+                backgroundColor: const Color(0xFF0f1115),
+                child: ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
+                  itemCount: orderedDirectories.length,
+                  itemBuilder: (_, i) {
+                    final dir = orderedDirectories[i];
+                    final showInsertIndicator = _dragHoverDirId == dir.id;
+                    return Column(
+                      key: ValueKey(dir.id),
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // 虚拟插入指示器：拖拽悬停时在目标卡片上方显示
+                        if (showInsertIndicator)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: AppColors.accent,
+                              borderRadius: BorderRadius.circular(2),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.accent.withValues(
+                                    alpha: 0.5,
+                                  ),
+                                  blurRadius: 8,
+                                  spreadRadius: 1,
+                                ),
+                              ],
+                            ),
                           ),
+                        _DirectoryCard(
+                          directory: dir,
+                          settings: widget.settings,
+                          mgr: mgr,
+                          index: i,
+                          onDragHover: (dirId) {
+                            if (_dragHoverDirId != dirId) {
+                              setState(() => _dragHoverDirId = dirId);
+                            }
+                          },
                         ),
-                      _DirectoryCard(
-                        directory: dir,
-                        settings: widget.settings,
-                        mgr: mgr,
-                        index: i,
-                        onDragHover: (dirId) {
-                          if (_dragHoverDirId != dirId) {
-                            setState(() => _dragHoverDirId = dirId);
-                          }
-                        },
-                      ),
-                    ],
-                  );
-                },
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-        ],
-      );
+          ],
+        );
       },
     );
   }
@@ -789,8 +793,7 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
                     },
                   ),
                 ),
-              if (error != null)
-                const SizedBox(height: 10),
+              if (error != null) const SizedBox(height: 10),
             ],
           ),
           actions: [
@@ -978,7 +981,10 @@ void _showSessionSheet(
   /// mapping, aligned to web), falling back to the aggregate id sets / s.active.
   ({Color color, String text}) statusInfo(Session s, SessionStatus? live) {
     if (live != null) {
-      return (color: _wbStatusColor(live.status), text: _wbStatusLabel(live.status));
+      return (
+        color: _wbStatusColor(live.status),
+        text: _wbStatusLabel(live.status),
+      );
     }
     if (mgr.runningSessionIds.contains(s.id)) {
       return (color: const Color(0xFF7fd49a), text: t('running'));
@@ -1004,210 +1010,219 @@ void _showSessionSheet(
       child: StreamBuilder<int>(
         stream: Stream<int>.periodic(const Duration(seconds: 1), (i) => i),
         builder: (streamCtx, _) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
-            child: Row(
-              children: [
-                Text(
-                  '$prefix $title',
-                  style: const TextStyle(
-                    color: Color(0xFFe7eaee),
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF21262d),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '${sessions.length}',
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
+              child: Row(
+                children: [
+                  Text(
+                    '$prefix $title',
                     style: const TextStyle(
-                      color: Color(0xFF8a909b),
-                      fontSize: 13,
+                      color: Color(0xFFe7eaee),
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                const Text(
-                  '↕ 点击打开',
-                  style: TextStyle(color: Color(0xFF5b616c), fontSize: 11),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: Color(0xFF21262d)),
-          if (sessions.isEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
-              child: Text(
-                emptyText,
-                style: const TextStyle(color: Color(0xFF5b616c), fontSize: 13),
-              ),
-            )
-          else
-            Flexible(
-              child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: sessions.length,
-                itemBuilder: (_, i) {
-                  final s = sessions[i];
-                  final alias = (s.label?.isNotEmpty == true) ? s.label! : s.id;
-                  final dir = dirName(s.dirId);
-                  final live = mgr.liveStatus(s.id);
-                  final st = statusInfo(s, live);
-                  final cliColor = s.cli == SessionCli.codex
-                      ? _kCodexColor
-                      : _kClaudeColor;
-                  final lastInteraction = _sessionLastInteractionAt(s, live);
-                  final ago = timeago.format(lastInteraction, locale: 'en_short');
-                  final model = s.effectiveModel?.isNotEmpty == true
-                      ? claudeModelShortName(s.effectiveModel)
-                      : (s.model?.isNotEmpty == true
-                          ? claudeModelShortName(s.model)
-                          : '');
-                  final provider = s.provider?.isNotEmpty == true ? s.provider! : '';
-                  final summary = live?.summary ?? '';
-                  final runtime = _runTimeText(live);
-
-                  return InkWell(
-                    onTap: () {
-                      Navigator.of(sheetCtx).pop();
-                      mgr.openSession(s);
-                      mgr.switchToSession(s.id);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-                      decoration: const BoxDecoration(
-                        border: Border(
-                          bottom: BorderSide(color: Color(0xFF1c2128), width: 0.5),
-                        ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF21262d),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '${sessions.length}',
+                      style: const TextStyle(
+                        color: Color(0xFF8a909b),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Row 1: status dot + cli/kind badges + status label + time
-                          Row(
-                            children: [
-                              Container(
-                                width: 7,
-                                height: 7,
-                                decoration: BoxDecoration(
-                                  color: st.color,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              _MiniBadge(label: s.cli.name, color: cliColor),
-                              const SizedBox(width: 5),
-                              _MiniBadge(
-                                label: s.kind.name,
-                                color: const Color(0xFF8a909b),
-                                icon: s.isChat
-                                    ? Icons.chat_bubble_outline_rounded
-                                    : Icons.terminal_rounded,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                st.text,
-                                style: TextStyle(
-                                  color: st.color,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const Spacer(),
-                              if (runtime.isNotEmpty) ...[
-                                Text(
-                                  runtime,
-                                  style: const TextStyle(
-                                    color: Color(0xFF7a818c),
-                                    fontSize: 10,
-                                    fontFamily: 'monospace',
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                              ],
-                              Text(
-                                ago,
-                                style: const TextStyle(
-                                  color: Color(0xFF5b616c),
-                                  fontSize: 10,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              const Icon(
-                                Icons.arrow_forward_ios,
-                                size: 11,
-                                color: Color(0xFF5b616c),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 5),
-                          // Row 2: session name
-                          Text(
-                            dir.isNotEmpty ? '$dir / $alias' : alias,
-                            style: const TextStyle(
-                              color: Color(0xFFe7eaee),
-                              fontSize: 13,
-                              fontFamily: 'monospace',
-                              fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '↕ 点击打开',
+                    style: TextStyle(color: Color(0xFF5b616c), fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Color(0xFF21262d)),
+            if (sessions.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
+                child: Text(
+                  emptyText,
+                  style: const TextStyle(
+                    color: Color(0xFF5b616c),
+                    fontSize: 13,
+                  ),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: sessions.length,
+                  itemBuilder: (_, i) {
+                    final s = sessions[i];
+                    final alias = (s.label?.isNotEmpty == true)
+                        ? s.label!
+                        : s.id;
+                    final dir = dirName(s.dirId);
+                    final live = mgr.liveStatus(s.id);
+                    final st = statusInfo(s, live);
+                    final cliColor = s.cli == SessionCli.codex
+                        ? _kCodexColor
+                        : _kClaudeColor;
+                    final lastInteraction = _sessionLastInteractionAt(s, live);
+                    final ago = timeago.format(
+                      lastInteraction,
+                      locale: 'en_short',
+                    );
+                    final model = s.effectiveModel?.isNotEmpty == true
+                        ? modelShortNameForCli(s.cli, s.effectiveModel)
+                        : (s.model?.isNotEmpty == true
+                              ? modelShortNameForCli(s.cli, s.model)
+                              : '');
+                    final effort = effortShortNameForCli(
+                      s.cli,
+                      s.effectiveEffort ?? s.effort,
+                    );
+                    final provider = s.provider?.isNotEmpty == true
+                        ? s.provider!
+                        : '';
+                    final summary = live?.summary ?? '';
+                    final runtime = _runTimeText(live);
+
+                    return InkWell(
+                      onTap: () {
+                        Navigator.of(sheetCtx).pop();
+                        mgr.openSession(s);
+                        mgr.switchToSession(s.id);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+                        decoration: const BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(
+                              color: Color(0xFF1c2128),
+                              width: 0.5,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                           ),
-                          // Row 3: id + model + provider (muted line)
-                          if (s.label?.isNotEmpty == true || model.isNotEmpty || provider.isNotEmpty) ...[
-                            const SizedBox(height: 3),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Row 1: status dot + cli/kind badges + status label + time
                             Row(
                               children: [
-                                if (s.label?.isNotEmpty == true) ...[
+                                Container(
+                                  width: 7,
+                                  height: 7,
+                                  decoration: BoxDecoration(
+                                    color: st.color,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                _MiniBadge(label: s.cli.name, color: cliColor),
+                                const SizedBox(width: 5),
+                                _MiniBadge(
+                                  label: s.kind.name,
+                                  color: const Color(0xFF8a909b),
+                                  icon: s.isChat
+                                      ? Icons.chat_bubble_outline_rounded
+                                      : Icons.terminal_rounded,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  st.text,
+                                  style: TextStyle(
+                                    color: st.color,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const Spacer(),
+                                if (runtime.isNotEmpty) ...[
                                   Text(
-                                    s.id,
+                                    runtime,
                                     style: const TextStyle(
-                                      color: Color(0xFF5b616c),
+                                      color: Color(0xFF7a818c),
                                       fontSize: 10,
                                       fontFamily: 'monospace',
                                     ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
                                   ),
+                                  const SizedBox(width: 8),
                                 ],
-                                if (model.isNotEmpty) ...[
+                                Text(
+                                  ago,
+                                  style: const TextStyle(
+                                    color: Color(0xFF5b616c),
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                const Icon(
+                                  Icons.arrow_forward_ios,
+                                  size: 11,
+                                  color: Color(0xFF5b616c),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 5),
+                            // Row 2: session name
+                            Text(
+                              dir.isNotEmpty ? '$dir / $alias' : alias,
+                              style: const TextStyle(
+                                color: Color(0xFFe7eaee),
+                                fontSize: 13,
+                                fontFamily: 'monospace',
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            // Row 3: id + model + provider (muted line)
+                            if (s.label?.isNotEmpty == true ||
+                                model.isNotEmpty ||
+                                provider.isNotEmpty ||
+                                effort.isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Row(
+                                children: [
                                   if (s.label?.isNotEmpty == true) ...[
-                                    const SizedBox(width: 6),
                                     Text(
-                                      '·',
-                                      style: TextStyle(color: const Color(0xFF5b616c).withValues(alpha: 0.5)),
+                                      s.id,
+                                      style: const TextStyle(
+                                        color: Color(0xFF5b616c),
+                                        fontSize: 10,
+                                        fontFamily: 'monospace',
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                     ),
-                                    const SizedBox(width: 6),
                                   ],
-                                  Text(
-                                    model,
-                                    style: const TextStyle(
-                                      color: Color(0xFF5b616c),
-                                      fontSize: 10,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                                if (provider.isNotEmpty) ...[
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    '·',
-                                    style: TextStyle(color: const Color(0xFF5b616c).withValues(alpha: 0.5)),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(
-                                      provider,
+                                  if (model.isNotEmpty) ...[
+                                    if (s.label?.isNotEmpty == true) ...[
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        '·',
+                                        style: TextStyle(
+                                          color: const Color(
+                                            0xFF5b616c,
+                                          ).withValues(alpha: 0.5),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                    ],
+                                    Text(
+                                      model,
                                       style: const TextStyle(
                                         color: Color(0xFF5b616c),
                                         fontSize: 10,
@@ -1215,33 +1230,76 @@ void _showSessionSheet(
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
-                                  ),
+                                  ],
+                                  if (provider.isNotEmpty) ...[
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '·',
+                                      style: TextStyle(
+                                        color: const Color(
+                                          0xFF5b616c,
+                                        ).withValues(alpha: 0.5),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: Text(
+                                        provider,
+                                        style: const TextStyle(
+                                          color: Color(0xFF5b616c),
+                                          fontSize: 10,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                  if (effort.isNotEmpty) ...[
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '·',
+                                      style: TextStyle(
+                                        color: const Color(
+                                          0xFF5b616c,
+                                        ).withValues(alpha: 0.5),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      effort,
+                                      style: const TextStyle(
+                                        color: Color(0xFF5b616c),
+                                        fontSize: 10,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
                                 ],
-                              ],
-                            ),
-                          ],
-                          // Row 4: aux-AI 最近任务简介 (align to web popup)
-                          if (summary.isNotEmpty) ...[
-                            const SizedBox(height: 3),
-                            Text(
-                              '🗒 $summary',
-                              style: const TextStyle(
-                                color: Color(0xFF8a909b),
-                                fontSize: 10,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                            ],
+                            // Row 4: aux-AI 最近任务简介 (align to web popup)
+                            if (summary.isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                '🗒 $summary',
+                                style: const TextStyle(
+                                  color: Color(0xFF8a909b),
+                                  fontSize: 10,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
-            ),
-          const SizedBox(height: 8),
-        ],
+            const SizedBox(height: 8),
+          ],
         ),
       ),
     ),
@@ -1300,7 +1358,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
 
   Future<void> _loadProviders() async {
     try {
-      final data = await ManageService(settings: widget.settings).fetchProviders();
+      final data = await ManageService(
+        settings: widget.settings,
+      ).fetchProviders();
       if (!mounted) return;
       setState(() {
         _providers = (data['providers'] as List? ?? [])
@@ -1382,7 +1442,8 @@ class _DirectoryCardState extends State<_DirectoryCard> {
       data: widget.directory.id,
       onDragEnd: (_) {
         // 拖拽结束（无论是否成功 drop）都清除悬停指示器
-        final parent = context.findAncestorStateOfType<_DirectoryListBodyState>();
+        final parent = context
+            .findAncestorStateOfType<_DirectoryListBodyState>();
         if (parent != null && parent._dragHoverDirId != null) {
           parent.setState(() => parent._dragHoverDirId = null);
         }
@@ -1466,14 +1527,16 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         },
         onLeave: (_) {
           // 拖拽离开时清除悬停状态
-          final parent = context.findAncestorStateOfType<_DirectoryListBodyState>();
+          final parent = context
+              .findAncestorStateOfType<_DirectoryListBodyState>();
           if (parent != null && parent._dragHoverDirId == widget.directory.id) {
             parent.setState(() => parent._dragHoverDirId = null);
           }
         },
         onAcceptWithDetails: (details) {
           // 通知父组件处理拖拽结束
-          final parent = context.findAncestorStateOfType<_DirectoryListBodyState>();
+          final parent = context
+              .findAncestorStateOfType<_DirectoryListBodyState>();
           if (parent != null) {
             parent._handleDragEnd(details.data, widget.directory.id);
           }
@@ -1804,10 +1867,8 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                           onPressed: () {
                             Navigator.of(context).push(
                               MaterialPageRoute<void>(
-                                builder: (_) => MemoScreen(
-                                  directory: dir,
-                                  mgr: widget.mgr,
-                                ),
+                                builder: (_) =>
+                                    MemoScreen(directory: dir, mgr: widget.mgr),
                               ),
                             );
                           },
@@ -2042,6 +2103,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         label: result.label,
         model: result.model,
         provider: result.provider,
+        effort: result.effort,
         rolePrompt: result.rolePrompt,
       );
       if (!mounted) return;
@@ -2381,18 +2443,18 @@ class _HomeTaskScrollerState extends State<_HomeTaskScroller> {
     _pos += 1;
     _scrollController
         .animateTo(
-      _pos * _rowH,
-      duration: const Duration(milliseconds: 500),
-      curve: Curves.easeInOut,
-    )
+          _pos * _rowH,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+        )
         .then((_) {
-      // 滚到末尾（尾部副本=头部几行）后无缝跳回起点
-      if (!mounted || !_scrollController.hasClients) return;
-      if (_pos >= _count) {
-        _pos = 0;
-        _scrollController.jumpTo(0);
-      }
-    });
+          // 滚到末尾（尾部副本=头部几行）后无缝跳回起点
+          if (!mounted || !_scrollController.hasClients) return;
+          if (_pos >= _count) {
+            _pos = 0;
+            _scrollController.jumpTo(0);
+          }
+        });
   }
 
   bool _isToday(DateTime? ts) {
@@ -2409,13 +2471,15 @@ class _HomeTaskScrollerState extends State<_HomeTaskScroller> {
     for (final s in widget.sessions) {
       if (s.isAux) continue;
       if (!_isToday(s.lastActivity)) continue;
-      tasks.add(_ActiveTask(
-        session: s,
-        label: s.label?.isNotEmpty == true ? s.label! : s.id,
-        dirName: dirNames[s.dirId] ?? '',
-        active: s.active,
-        lastActivity: s.lastActivity,
-      ));
+      tasks.add(
+        _ActiveTask(
+          session: s,
+          label: s.label?.isNotEmpty == true ? s.label! : s.id,
+          dirName: dirNames[s.dirId] ?? '',
+          active: s.active,
+          lastActivity: s.lastActivity,
+        ),
+      );
     }
     tasks.sort((a, b) {
       final ta = a.lastActivity?.millisecondsSinceEpoch ?? 0;
@@ -2424,15 +2488,14 @@ class _HomeTaskScrollerState extends State<_HomeTaskScroller> {
     });
 
     _count = tasks.length;
-    _visible = _count == 0
-        ? 1
-        : (_count < _maxVisible ? _count : _maxVisible);
+    _visible = _count == 0 ? 1 : (_count < _maxVisible ? _count : _maxVisible);
     if (_pos >= _count) _pos = 0;
 
     // 装不下时尾部接上「头部 _visible 行」的副本，配合 jumpTo 实现无缝轮播
     final bool scrolling = _count > _visible;
-    final int itemCount =
-        tasks.isEmpty ? 0 : tasks.length + (scrolling ? _visible : 0);
+    final int itemCount = tasks.isEmpty
+        ? 0
+        : tasks.length + (scrolling ? _visible : 0);
 
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncTimer());
 
@@ -2496,10 +2559,7 @@ class _TaskProgressCard extends StatelessWidget {
   final _ActiveTask task;
   final VoidCallback? onTap;
 
-  const _TaskProgressCard({
-    required this.task,
-    this.onTap,
-  });
+  const _TaskProgressCard({required this.task, this.onTap});
 
   String _relativeTime(DateTime? ts) {
     if (ts == null) return '';
@@ -2512,11 +2572,13 @@ class _TaskProgressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color statusColor =
-        task.active ? const Color(0xFF6aa3ff) : const Color(0xFF5b616c);
+    final Color statusColor = task.active
+        ? const Color(0xFF6aa3ff)
+        : const Color(0xFF5b616c);
     final String statusLabel = task.active ? '运行中' : '空闲';
-    final String activityText =
-        task.active ? '⚙️ 正在运行' : '🕘 ${_relativeTime(task.lastActivity)}';
+    final String activityText = task.active
+        ? '⚙️ 正在运行'
+        : '🕘 ${_relativeTime(task.lastActivity)}';
 
     return InkWell(
       onTap: onTap,
@@ -2590,10 +2652,7 @@ class _TaskProgressCard extends StatelessWidget {
             // 当前活动 / 最近使用
             Text(
               activityText,
-              style: const TextStyle(
-                color: AppColors.muted,
-                fontSize: 11,
-              ),
+              style: const TextStyle(color: AppColors.muted, fontSize: 11),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -2961,10 +3020,14 @@ class SessionCard extends StatelessWidget {
         ? session.id
         : session.shortCwd;
     final model = session.effectiveModel?.isNotEmpty == true
-        ? claudeModelShortName(session.effectiveModel)
+        ? modelShortNameForCli(session.cli, session.effectiveModel)
         : (session.model?.isNotEmpty == true
-            ? claudeModelShortName(session.model)
-            : '');
+              ? modelShortNameForCli(session.cli, session.model)
+              : '');
+    final effort = effortShortNameForCli(
+      session.cli,
+      session.effectiveEffort ?? session.effort,
+    );
     // Resolve provider display name from the cached provider list.
     String? provName;
     if (session.provider != null && session.provider!.isNotEmpty) {
@@ -3022,269 +3085,282 @@ class SessionCard extends StatelessWidget {
                       color: const Color(0xFF8a909b),
                       icon: session.isChat
                           ? Icons.chat_bubble_outline_rounded
-                        : Icons.terminal_rounded,
-                  ),
-                  if (live != null && live.status != 'idle') ...[
-                    const SizedBox(width: 6),
-                    Text(
-                      _wbStatusLabel(live.status),
-                      style: TextStyle(
-                        color: statusColor,
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                      ),
+                          : Icons.terminal_rounded,
                     ),
-                  ],
-                  if (pendingNotes > 0) ...[
-                    const SizedBox(width: 6),
-                    Text(
-                      '📨$pendingNotes',
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Color(0xFFe3b341),
-                      ),
-                    ),
-                  ],
-                  const Spacer(),
-                  if (provName != null) ...[
-                    Flexible(
-                      child: Text(
-                        provName,
-                        style: const TextStyle(
-                          color: Color(0xFF7aa2f7),
+                    if (live != null && live.status != 'idle') ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        _wbStatusLabel(live.status),
+                        style: TextStyle(
+                          color: statusColor,
                           fontSize: 10,
+                          fontWeight: FontWeight.w700,
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-                  if (model.isNotEmpty) ...[
-                    Flexible(
-                      child: Text(
-                        model,
+                    ],
+                    if (pendingNotes > 0) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        '📨$pendingNotes',
                         style: const TextStyle(
-                          color: Color(0xFF22ab9c),
                           fontSize: 10,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-                  Text(
-                    ago,
-                    style: const TextStyle(
-                      color: Color(0xFF5b616c),
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 9),
-              Text(
-                title,
-                style: const TextStyle(
-                  color: Color(0xFFe7eaee),
-                  fontSize: 12,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.w600,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 3),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  color: Color(0xFF5b616c),
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (live?.currentFile != null) ...[
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.edit_outlined,
-                      size: 11,
-                      color: Color(0xFFe3b341),
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        live!.currentFile!.split('/').last,
-                        style: const TextStyle(
                           color: Color(0xFFe3b341),
-                          fontSize: 10,
-                          fontFamily: 'monospace',
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const Spacer(),
+                    if (provName != null) ...[
+                      Flexible(
+                        child: Text(
+                          provName,
+                          style: const TextStyle(
+                            color: Color(0xFF7aa2f7),
+                            fontSize: 10,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    if (model.isNotEmpty) ...[
+                      Flexible(
+                        child: Text(
+                          model,
+                          style: const TextStyle(
+                            color: Color(0xFF22ab9c),
+                            fontSize: 10,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    if (effort.isNotEmpty) ...[
+                      Flexible(
+                        child: Text(
+                          effort,
+                          style: const TextStyle(
+                            color: Color(0xFF8a909b),
+                            fontSize: 10,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    Text(
+                      ago,
+                      style: const TextStyle(
+                        color: Color(0xFF5b616c),
+                        fontSize: 10,
                       ),
                     ),
                   ],
                 ),
-              ],
-              if (live?.summary?.isNotEmpty == true) ...[
-                const SizedBox(height: 6),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0x243ad6c5),
-                    border: Border.all(color: const Color(0x663ad6c5)),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    '🗒 ${live!.summary}',
-                    style: const TextStyle(
-                      color: Color(0xFF7fe6da),
-                      fontSize: 10.5,
-                      height: 1.35,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-              if (_runTimeText(live).isNotEmpty) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 9),
                 Text(
-                  _runTimeText(live),
+                  title,
                   style: const TextStyle(
-                    color: Color(0xFF7a818c),
-                    fontSize: 10,
+                    color: Color(0xFFe7eaee),
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Color(0xFF5b616c),
+                    fontSize: 11,
                     fontFamily: 'monospace',
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              ],
-              if ((live?.behind ?? 0) > 0) ...[
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.history_rounded,
-                      size: 11,
-                      color: Color(0xFFf2cc60),
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '落后 ${live!.baseBranch ?? 'base'} ${live.behind} 个提交',
-                      style: const TextStyle(
-                        color: Color(0xFFf2cc60),
-                        fontSize: 10,
+                if (live?.currentFile != null) ...[
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.edit_outlined,
+                        size: 11,
+                        color: Color(0xFFe3b341),
                       ),
-                    ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 6),
-              // Lean action row: the actionable "merge" stays inline only when a
-              // merge is ready; everything else lives in a ⋯ menu so the card
-              // stays compact (was a row of 6 always-visible icon buttons).
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  if (mergeReady)
-                    TextButton.icon(
-                      icon: const Icon(
-                        Icons.merge_type_rounded,
-                        size: 15,
-                        color: Color(0xFF070809),
-                      ),
-                      label: Text(
-                        _mergeReadyLabel(live!),
-                        style: const TextStyle(
-                          color: Color(0xFF070809),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          live!.currentFile!.split('/').last,
+                          style: const TextStyle(
+                            color: Color(0xFFe3b341),
+                            fontSize: 10,
+                            fontFamily: 'monospace',
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      style: TextButton.styleFrom(
-                        backgroundColor: const Color(0xFFe3b341),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
-                        minimumSize: const Size(0, 28),
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      onPressed: () => _mergeSession(context),
-                    ),
-                  PopupMenuButton<String>(
-                    icon: const Icon(
-                      Icons.more_horiz_rounded,
-                      size: 18,
-                      color: Color(0xFF8a909b),
-                    ),
-                    tooltip: '更多操作',
-                    color: const Color(0xFF161b22),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 160),
-                    onSelected: (v) {
-                      switch (v) {
-                        case 'rename':
-                          _rename(context);
-                          break;
-                        case 'merge':
-                          _mergeSession(context);
-                          break;
-                        case 'diff':
-                          showSessionDiffDialog(
-                            context,
-                            settings: settings,
-                            sessionId: session.id,
-                          );
-                          break;
-                        case 'note':
-                          _leaveNote(context);
-                          break;
-                        case 'restart':
-                          _restart(context);
-                          break;
-                        case 'delete':
-                          _confirmDelete(context);
-                          break;
-                      }
-                    },
-                    itemBuilder: (_) => [
-                      _menuItem('rename', Icons.edit_outlined, '改名'),
-                      if (!mergeReady)
-                        _menuItem(
-                          'merge',
-                          Icons.merge_type_rounded,
-                          '合并 worktree',
-                        ),
-                      _menuItem('diff', Icons.difference_outlined, '查看 Diff'),
-                      _menuItem('note', Icons.mail_outline_rounded, '留言'),
-                      if (session.isTerminal)
-                        _menuItem(
-                          'restart',
-                          Icons.restart_alt_rounded,
-                          'Restart',
-                        ),
-                      const PopupMenuDivider(),
-                      _menuItem(
-                        'delete',
-                        Icons.delete_outline_rounded,
-                        '删除',
-                        danger: true,
                       ),
                     ],
                   ),
                 ],
-              ),
-            ],
+                if (live?.summary?.isNotEmpty == true) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0x243ad6c5),
+                      border: Border.all(color: const Color(0x663ad6c5)),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '🗒 ${live!.summary}',
+                      style: const TextStyle(
+                        color: Color(0xFF7fe6da),
+                        fontSize: 10.5,
+                        height: 1.35,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+                if (_runTimeText(live).isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    _runTimeText(live),
+                    style: const TextStyle(
+                      color: Color(0xFF7a818c),
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ],
+                if ((live?.behind ?? 0) > 0) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.history_rounded,
+                        size: 11,
+                        color: Color(0xFFf2cc60),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        '落后 ${live!.baseBranch ?? 'base'} ${live.behind} 个提交',
+                        style: const TextStyle(
+                          color: Color(0xFFf2cc60),
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 6),
+                // Lean action row: the actionable "merge" stays inline only when a
+                // merge is ready; everything else lives in a ⋯ menu so the card
+                // stays compact (was a row of 6 always-visible icon buttons).
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (mergeReady)
+                      TextButton.icon(
+                        icon: const Icon(
+                          Icons.merge_type_rounded,
+                          size: 15,
+                          color: Color(0xFF070809),
+                        ),
+                        label: Text(
+                          _mergeReadyLabel(live!),
+                          style: const TextStyle(
+                            color: Color(0xFF070809),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        style: TextButton.styleFrom(
+                          backgroundColor: const Color(0xFFe3b341),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          minimumSize: const Size(0, 28),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: () => _mergeSession(context),
+                      ),
+                    PopupMenuButton<String>(
+                      icon: const Icon(
+                        Icons.more_horiz_rounded,
+                        size: 18,
+                        color: Color(0xFF8a909b),
+                      ),
+                      tooltip: '更多操作',
+                      color: const Color(0xFF161b22),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 160),
+                      onSelected: (v) {
+                        switch (v) {
+                          case 'rename':
+                            _rename(context);
+                            break;
+                          case 'merge':
+                            _mergeSession(context);
+                            break;
+                          case 'diff':
+                            showSessionDiffDialog(
+                              context,
+                              settings: settings,
+                              sessionId: session.id,
+                            );
+                            break;
+                          case 'note':
+                            _leaveNote(context);
+                            break;
+                          case 'restart':
+                            _restart(context);
+                            break;
+                          case 'delete':
+                            _confirmDelete(context);
+                            break;
+                        }
+                      },
+                      itemBuilder: (_) => [
+                        _menuItem('rename', Icons.edit_outlined, '改名'),
+                        if (!mergeReady)
+                          _menuItem(
+                            'merge',
+                            Icons.merge_type_rounded,
+                            '合并 worktree',
+                          ),
+                        _menuItem('diff', Icons.difference_outlined, '查看 Diff'),
+                        _menuItem('note', Icons.mail_outline_rounded, '留言'),
+                        if (session.isTerminal)
+                          _menuItem(
+                            'restart',
+                            Icons.restart_alt_rounded,
+                            'Restart',
+                          ),
+                        const PopupMenuDivider(),
+                        _menuItem(
+                          'delete',
+                          Icons.delete_outline_rounded,
+                          '删除',
+                          danger: true,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -3699,7 +3775,14 @@ class _CreateSessionResult {
   final String? rolePrompt;
   final String? provider;
   final String? model;
-  _CreateSessionResult({this.label, this.rolePrompt, this.provider, this.model});
+  final String? effort;
+  _CreateSessionResult({
+    this.label,
+    this.rolePrompt,
+    this.provider,
+    this.model,
+    this.effort,
+  });
 }
 
 class _CreateSessionDialog extends StatefulWidget {
@@ -3728,6 +3811,7 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
 
   String? _pickedProvider; // null or '' = default; id = that provider
   String? _pickedModel;
+  String _pickedEffort = 'medium';
   bool _customModel = false;
   final _customModelCtrl = TextEditingController();
 
@@ -3770,7 +3854,10 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
   List<MapEntry<String, String>> get _currentModelOptions {
     Map<String, dynamic>? prov;
     for (final p in widget.providers) {
-      if (p['id'] == _pickedProvider) { prov = p; break; }
+      if (p['id'] == _pickedProvider) {
+        prov = p;
+        break;
+      }
     }
     final opts = prov?['modelOptions'];
     if (opts is List && opts.isNotEmpty) {
@@ -3790,7 +3877,8 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => AgentPresetPickerSheet(service: _presetSvc, index: _presetIndex),
+      builder: (_) =>
+          AgentPresetPickerSheet(service: _presetSvc, index: _presetIndex),
     );
     if (id == null || !mounted) return;
     try {
@@ -3801,11 +3889,29 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
           context: context,
           builder: (c) => AlertDialog(
             backgroundColor: const Color(0xFF14171c),
-            title: const Text('替换当前内容?', style: TextStyle(color: Color(0xFFe7eaee), fontSize: 15)),
-            content: const Text('角色框已有内容，使用模板会覆盖。', style: TextStyle(color: Color(0xFF8a909b), fontSize: 13)),
+            title: const Text(
+              '替换当前内容?',
+              style: TextStyle(color: Color(0xFFe7eaee), fontSize: 15),
+            ),
+            content: const Text(
+              '角色框已有内容，使用模板会覆盖。',
+              style: TextStyle(color: Color(0xFF8a909b), fontSize: 13),
+            ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b)))),
-              TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('替换', style: TextStyle(color: Color(0xFFff6b63)))),
+              TextButton(
+                onPressed: () => Navigator.pop(c, false),
+                child: const Text(
+                  '取消',
+                  style: TextStyle(color: Color(0xFF8a909b)),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text(
+                  '替换',
+                  style: TextStyle(color: Color(0xFFff6b63)),
+                ),
+              ),
             ],
           ),
         );
@@ -3814,7 +3920,9 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
       setState(() => _roleCtrl.text = prompt);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('模板加载失败：$e')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('模板加载失败：$e')));
     }
   }
 
@@ -3842,15 +3950,24 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
   void _submit() {
     String? model;
     if (_customModel) {
-      model = _customModelCtrl.text.trim().isNotEmpty ? _customModelCtrl.text.trim() : null;
+      model = _customModelCtrl.text.trim().isNotEmpty
+          ? _customModelCtrl.text.trim()
+          : null;
     } else {
-      model = (_pickedModel != null && _pickedModel!.isNotEmpty) ? _pickedModel : null;
+      model = (_pickedModel != null && _pickedModel!.isNotEmpty)
+          ? _pickedModel
+          : null;
     }
     final result = _CreateSessionResult(
       label: _nameCtrl.text.trim().isNotEmpty ? _nameCtrl.text.trim() : null,
-      rolePrompt: _roleCtrl.text.trim().isNotEmpty ? _roleCtrl.text.trim() : null,
-      provider: (_pickedProvider != null && _pickedProvider!.isNotEmpty) ? _pickedProvider : null,
+      rolePrompt: _roleCtrl.text.trim().isNotEmpty
+          ? _roleCtrl.text.trim()
+          : null,
+      provider: (_pickedProvider != null && _pickedProvider!.isNotEmpty)
+          ? _pickedProvider
+          : null,
       model: model,
+      effort: _pickedEffort,
     );
     Navigator.of(context).pop(result);
   }
@@ -3870,7 +3987,10 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // ── Name ──
-            const Text('会话名称', style: TextStyle(color: Color(0xFF8a909b), fontSize: 11)),
+            const Text(
+              '会话名称',
+              style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+            ),
             const SizedBox(height: 4),
             TextField(
               controller: _nameCtrl,
@@ -3881,7 +4001,10 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
             // ── Role prompt with preset picker ──
             Row(
               children: [
-                const Text('角色提示词', style: TextStyle(color: Color(0xFF8a909b), fontSize: 11)),
+                const Text(
+                  '角色提示词',
+                  style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+                ),
                 const Spacer(),
                 TextButton.icon(
                   icon: const Icon(Icons.auto_awesome, size: 14),
@@ -3908,7 +4031,10 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
             ),
             const SizedBox(height: 12),
             // ── Provider ──
-            const Text('Provider', style: TextStyle(color: Color(0xFF8a909b), fontSize: 11)),
+            const Text(
+              'Provider',
+              style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+            ),
             const SizedBox(height: 4),
             DropdownButtonFormField<String>(
               value: _pickedProvider ?? '',
@@ -3918,23 +4044,31 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
               items: [
                 const DropdownMenuItem(
                   value: '',
-                  child: Text('默认登录 / 订阅', style: TextStyle(color: Color(0xFFe7eaee))),
-                ),
-                ...widget.providers.map((p) => DropdownMenuItem(
-                  value: p['id'] as String,
                   child: Text(
-                    '${p['name']}'
-                    '${p['isOfficial'] == true ? ' · 订阅' : ''}'
-                    '${(p['model'] as String? ?? '').isNotEmpty ? ' · ${p['model']}' : ''}',
-                    style: const TextStyle(color: Color(0xFFe7eaee)),
+                    '默认登录 / 订阅',
+                    style: TextStyle(color: Color(0xFFe7eaee)),
                   ),
-                )),
+                ),
+                ...widget.providers.map(
+                  (p) => DropdownMenuItem(
+                    value: p['id'] as String,
+                    child: Text(
+                      '${p['name']}'
+                      '${p['isOfficial'] == true ? ' · 订阅' : ''}'
+                      '${(p['model'] as String? ?? '').isNotEmpty ? ' · ${p['model']}' : ''}',
+                      style: const TextStyle(color: Color(0xFFe7eaee)),
+                    ),
+                  ),
+                ),
               ],
               onChanged: _onProviderChanged,
             ),
             // ── Model (linked to provider) ──
             const SizedBox(height: 12),
-            const Text('模型', style: TextStyle(color: Color(0xFF8a909b), fontSize: 11)),
+            const Text(
+              '模型',
+              style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+            ),
             const SizedBox(height: 4),
             DropdownButtonFormField<String>(
               value: _customModel ? '__custom__' : _pickedModel,
@@ -3942,13 +4076,21 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
               style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 13),
               decoration: _inputDec(),
               items: [
-                ...modelOptions.map((e) => DropdownMenuItem(
-                  value: e.key,
-                  child: Text(e.value, style: const TextStyle(color: Color(0xFFe7eaee))),
-                )),
+                ...modelOptions.map(
+                  (e) => DropdownMenuItem(
+                    value: e.key,
+                    child: Text(
+                      e.value,
+                      style: const TextStyle(color: Color(0xFFe7eaee)),
+                    ),
+                  ),
+                ),
                 DropdownMenuItem(
                   value: '__custom__',
-                  child: const Text('自定义…', style: TextStyle(color: Color(0xFF8a909b))),
+                  child: const Text(
+                    '自定义…',
+                    style: TextStyle(color: Color(0xFF8a909b)),
+                  ),
                 ),
               ],
               onChanged: (v) {
@@ -3972,6 +4114,42 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
                 autofocus: true,
               ),
             ],
+            const SizedBox(height: 12),
+            Text(
+              _isClaude ? 'Effort' : 'Reasoning Level',
+              style: const TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+            ),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              value: _pickedEffort,
+              dropdownColor: const Color(0xFF0f1115),
+              style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 13),
+              decoration: _inputDec(),
+              items:
+                  (_isClaude
+                          ? const [
+                              'low',
+                              'medium',
+                              'high',
+                              'xhigh',
+                              'max',
+                              'ultracode',
+                            ]
+                          : const ['low', 'medium', 'high', 'xhigh'])
+                      .map(
+                        (e) => DropdownMenuItem(
+                          value: e,
+                          child: Text(
+                            _isClaude
+                                ? e
+                                : effortShortNameForCli(SessionCli.codex, e),
+                            style: const TextStyle(color: Color(0xFFe7eaee)),
+                          ),
+                        ),
+                      )
+                      .toList(),
+              onChanged: (v) => setState(() => _pickedEffort = v ?? 'medium'),
+            ),
           ],
         ),
       ),

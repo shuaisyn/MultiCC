@@ -692,6 +692,7 @@ function handleEvent(msg) {
         if (parts.length) addSystemMsg(parts.join(' | '));
         if (msg.effort !== undefined) {
           _sessionEffort = msg.effort || '';
+          _sessionEffectiveEffort = msg.effectiveEffort || _sessionEffort || 'medium';
           updateEffortBtn();
         }
         // Sync streaming state with server on (re)connect
@@ -2075,7 +2076,6 @@ let _sessionModel = '';        // raw per-session override (null/'' = follow def
 let _sessionEffectiveModel = ''; // model actually used at spawn time (for display)
 const effortBtn = document.getElementById('effort-btn');
 const EFFORT_OPTIONS = [
-  { value: '', label: '默认' },
   { value: 'low', label: 'low' },
   { value: 'medium', label: 'medium' },
   { value: 'high', label: 'high' },
@@ -2083,7 +2083,14 @@ const EFFORT_OPTIONS = [
   { value: 'max', label: 'max' },
   { value: 'ultracode', label: 'ultracode' },
 ];
+const CODEX_REASONING_OPTIONS = [
+  { value: 'low', label: 'Low', desc: 'Fast responses with lighter reasoning' },
+  { value: 'medium', label: 'Medium', desc: 'Balances speed and reasoning depth for everyday tasks' },
+  { value: 'high', label: 'High', desc: 'Greater reasoning depth for complex problems' },
+  { value: 'xhigh', label: 'Extra high', desc: 'Extra high reasoning depth for complex problems' },
+];
 let _sessionEffort = '';
+let _sessionEffectiveEffort = 'medium';
 
 function modelShortName(model) {
   const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
@@ -2095,13 +2102,19 @@ function updateModelBtn() {
   const shown = _sessionEffectiveModel || _sessionModel;
   const provider = providerShortName(_sessionProvider);
   const model = shown ? modelShortName(shown) : tt('default');
-  const effort = _sessionCli === 'claude' ? effortShortName(_sessionEffort) : '—';
+  const effort = effortShortName(_sessionEffectiveEffort || _sessionEffort);
   modelBtn.textContent = `🧠 ${provider} | ${model} | ${effort}`;
   modelBtn.style.display = '';
 }
 
 function effortShortName(effort) {
-  return effort || '默认';
+  if (_sessionCli === 'codex') {
+    if (effort === 'xhigh') return 'Extra high';
+    if (effort === 'low') return 'Low';
+    if (effort === 'medium') return 'Medium';
+    if (effort === 'high') return 'High';
+  }
+  return effort || 'medium';
 }
 
 function updateEffortBtn() {
@@ -2129,7 +2142,7 @@ function showEffortPicker(current) {
     overlay.appendChild(box);
     document.body.appendChild(overlay);
     const select = box.querySelector('#effort-select');
-    select.value = EFFORT_OPTIONS.some(o => o.value === current) ? current : '';
+    select.value = EFFORT_OPTIONS.some(o => o.value === current) ? current : 'medium';
     const close = (r) => { overlay.remove(); resolve(r); };
     box.querySelector('#effort-ok').onclick = () => close(select.value);
     box.querySelector('#effort-cancel').onclick = () => close(null);
@@ -2224,13 +2237,13 @@ function showAIConfigPicker({ provider, model, effort }) {
     box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:480px;max-width:94vw;color:#c9d1d9;';
     box.innerHTML = `
       <div style="font-size:15px;font-weight:600;margin-bottom:8px;">AI 配置（下一轮生效）</div>
-      <div style="font-size:12px;color:#8b949e;line-height:1.5;margin-bottom:12px;">Provider、Model、Effort 会一起保存。切换 Provider 后，Model 选项会按该 Provider 的可用模型联动更新。</div>
+      <div style="font-size:12px;color:#8b949e;line-height:1.5;margin-bottom:12px;">Provider、Model、${_sessionCli === 'codex' ? 'Reasoning Level' : 'Effort'} 会一起保存。切换 Provider 后，Model 选项会按该 Provider 的可用模型联动更新。</div>
       <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Provider</label>
       <select id="ai-provider" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;"></select>
       <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Model</label>
       <select id="ai-model" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:8px;"></select>
       <input id="ai-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;">
-      <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Effort</label>
+      <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">${_sessionCli === 'codex' ? 'Reasoning Level' : 'Effort'}</label>
       <select id="ai-effort" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;"></select>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button id="ai-cancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;">取消</button>
@@ -2257,17 +2270,14 @@ function showAIConfigPicker({ provider, model, effort }) {
     }
     providerSel.value = provider || '';
 
-    for (const o of EFFORT_OPTIONS) {
+    const effortOptions = _sessionCli === 'codex' ? CODEX_REASONING_OPTIONS : EFFORT_OPTIONS;
+    for (const o of effortOptions) {
       const opt = document.createElement('option');
       opt.value = o.value;
-      opt.textContent = o.label;
+      opt.textContent = o.desc ? `${o.label} — ${o.desc}` : o.label;
       effortSel.appendChild(opt);
     }
-    effortSel.value = EFFORT_OPTIONS.some(o => o.value === effort) ? effort : '';
-    if (_sessionCli !== 'claude') {
-      effortSel.style.display = 'none';
-      effortLabel.style.display = 'none';
-    }
+    effortSel.value = effortOptions.some(o => o.value === effort) ? effort : 'medium';
 
     function rebuildModels(nextProvider, preferredModel) {
       const choices = buildModelChoices(nextProvider);
@@ -2298,7 +2308,7 @@ function showAIConfigPicker({ provider, model, effort }) {
       close({
         provider: providerSel.value,
         model: pickedModel,
-        effort: _sessionCli === 'claude' ? effortSel.value : '',
+        effort: effortSel.value,
       });
     };
     box.querySelector('#ai-cancel').onclick = () => close(null);
@@ -2324,8 +2334,9 @@ async function loadSessionModel() {
     updateProviderBtn();
     _sessionModel = info.model || '';
     _sessionEffectiveModel = info.effectiveModel || info.model || '';
-    updateModelBtn();
     _sessionEffort = info.effort || '';
+    _sessionEffectiveEffort = info.effectiveEffort || _sessionEffort || 'medium';
+    updateModelBtn();
     updateEffortBtn();
     if ((info.cli || 'claude') !== 'claude') {
       updateAutoCommitBtn();
@@ -2344,16 +2355,14 @@ modelBtn?.addEventListener('click', async () => {
   const picked = await showAIConfigPicker({
     provider: _sessionProvider,
     model: _sessionModel,
-    effort: _sessionEffort,
+    effort: _sessionEffectiveEffort || _sessionEffort || 'medium',
   });
   if (picked === null) return;
   try {
     const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(_sessionCli === 'claude'
-        ? { provider: picked.provider, model: picked.model, effort: picked.effort }
-        : { provider: picked.provider, model: picked.model }),
+      body: JSON.stringify({ provider: picked.provider, model: picked.model, effort: picked.effort }),
     });
     const data = await res.json();
     if (!res.ok) { addSystemMsg('AI 配置保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
@@ -2361,15 +2370,16 @@ modelBtn?.addEventListener('click', async () => {
     _sessionModel = data.model || '';
     _sessionEffectiveModel = data.effectiveModel || data.model || '';
     _sessionEffort = data.effort || '';
+    _sessionEffectiveEffort = data.effectiveEffort || _sessionEffort || 'medium';
     updateModelBtn();
-    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${_sessionCli === 'claude' ? effortShortName(_sessionEffort) : '—'}，下一轮对话生效`);
+    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${effortShortName(_sessionEffectiveEffort)}，下一轮对话生效`);
   } catch (e) {
     addSystemMsg('AI 配置保存失败：' + e.message);
   }
 });
 
 effortBtn?.addEventListener('click', async () => {
-  const picked = await showEffortPicker(_sessionEffort);
+  const picked = await showEffortPicker(_sessionEffectiveEffort || _sessionEffort || 'medium');
   if (picked === null) return;
   try {
     const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
@@ -2380,8 +2390,9 @@ effortBtn?.addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) { addSystemMsg('努力程度切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionEffort = data.effort || '';
+    _sessionEffectiveEffort = data.effectiveEffort || _sessionEffort || 'medium';
     updateEffortBtn();
-    addSystemMsg(`✓ 努力程度已切换为 ${effortShortName(_sessionEffort)}，下一轮对话生效`);
+    addSystemMsg(`✓ 努力程度已切换为 ${effortShortName(_sessionEffectiveEffort)}，下一轮对话生效`);
   } catch (e) {
     addSystemMsg('努力程度切换失败：' + e.message);
   }

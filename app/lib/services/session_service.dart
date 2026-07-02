@@ -162,6 +162,30 @@ class SessionService {
     }
   }
 
+  /// Switch provider, model and effort/reasoning level together.
+  Future<void> updateSessionAIConfig(
+    String id, {
+    required String provider,
+    required String model,
+    required String effort,
+  }) async {
+    final res = await http
+        .patch(
+          Uri.parse(_url('/api/sessions/$id')),
+          headers: _headers,
+          body: jsonEncode({
+            'provider': provider,
+            'model': model,
+            'effort': effort,
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   /// Switch the per-session provider (cc-switch). Empty string clears the
   /// override → the session falls back to the default login / subscription.
   /// Applies on the next chat turn. Returns the updated model that the server
@@ -261,6 +285,7 @@ class SessionService {
       throw Exception(err ?? '${res.statusCode}');
     }
   }
+
   Future<Map<String, dynamic>> createShare(
     String id, {
     required String access,
@@ -377,7 +402,9 @@ class SessionService {
     try {
       final res = await http
           .get(
-            Uri.parse(_url('/api/fs/list?path=${Uri.encodeQueryComponent(path)}')),
+            Uri.parse(
+              _url('/api/fs/list?path=${Uri.encodeQueryComponent(path)}'),
+            ),
             headers: _headers,
           )
           .timeout(const Duration(seconds: 10));
@@ -487,13 +514,17 @@ class SessionService {
     String? label,
     String? model,
     String? provider,
+    String? effort,
     String? rolePrompt,
   }) async {
     final body = <String, dynamic>{'cli': cli.name, 'kind': kind.name};
     if (label != null && label.isNotEmpty) body['label'] = label;
     if (model != null && model.isNotEmpty) body['model'] = model;
     if (provider != null) body['provider'] = provider;
-    if (rolePrompt != null && rolePrompt.isNotEmpty) body['rolePrompt'] = rolePrompt;
+    if (effort != null && effort.isNotEmpty) body['effort'] = effort;
+    if (rolePrompt != null && rolePrompt.isNotEmpty) {
+      body['rolePrompt'] = rolePrompt;
+    }
     final res = await http
         .post(
           Uri.parse(_url('/api/directories/$dirId/sessions')),
