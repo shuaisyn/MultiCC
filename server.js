@@ -1102,6 +1102,40 @@ function cwdForSession(session) {
   return session.cwd || os.homedir();
 }
 
+function dispatchableSessionsFor(sessionId) {
+  const from = persistedSessions.get(sessionId);
+  if (!from || !from.dirId) return [];
+  return [...persistedSessions.values()]
+    .filter(s => s.id !== sessionId)
+    .filter(s => s.type !== 'aux' && s.type !== 'gateway')
+    .filter(s => s.dirId === from.dirId)
+    .slice(0, 30)
+    .map(s => {
+      const activeChat = chatSessions.get(s.id);
+      return {
+        id: s.id,
+        label: s.label || '',
+        cli: s.cli || 'claude',
+        kind: s.kind || 'terminal',
+        active: !!activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming),
+      };
+    });
+}
+
+function buildDispatchContextPrompt(sessionId) {
+  const targets = dispatchableSessionsFor(sessionId);
+  if (!targets.length) return '';
+  return [
+    '[MultiCC cross-session dispatch]',
+    '你可以把自包含子任务分发给同目录的其它 session。只有确实需要其它 session 干活时才输出标记，普通回答不要输出。',
+    '格式：<<dispatch target="真实 session id">完整、自包含的任务说明</dispatch>>',
+    'target 必须逐字使用下面列表中的某个 id；不要使用 SID、SESSION_ID、<目标会话id> 等占位符。',
+    `可用目标 sessions: ${JSON.stringify(targets)}`,
+    '[MultiCC cross-session dispatch end]',
+    '',
+  ].join('\n');
+}
+
 function buildGatewayPrompt(userText) {
   const sessionsForPrompt = [...persistedSessions.values()]
     .filter(s => s.type !== 'aux' && s.type !== 'gateway')
@@ -1123,8 +1157,8 @@ function buildGatewayPrompt(userText) {
     '你是 MultiCC 的微信 Gateway 会话。所有微信消息都统一进入这个会话。',
     '你负责基于用户消息和可用 session 上下文判断如何回应：可以直接回答、追问澄清，或把任务分发给某个具体 session。',
     '当你判断需要某个 session 来处理任务时，在回复的最后单独输出一行分发标记：',
-    '<<dispatch target="SESSION_ID">要交给该 session 执行的完整、自包含指令</dispatch>>',
-    '其中 SESSION_ID 必须是上面可见 sessions 列表里的 id；dispatch 内的指令要完整到该 session 无需追问即可执行。',
+    '<<dispatch target="真实 session id">要交给该 session 执行的完整、自包含指令</dispatch>>',
+    '其中 target 必须逐字使用上面可见 sessions 列表里的某个 id；不要使用 SID、SESSION_ID、<目标会话id> 等占位符。dispatch 内的指令要完整到该 session 无需追问即可执行。',
     '分发不会立即生效——系统会先向用户复述并等待用户回复「确认」后才真正投递，所以你可以在标记前用自然语言说明你打算交给谁、做什么。',
     '只有真的需要某个 session 干活时才输出该标记；纯聊天、答疑、澄清类回复不要输出标记。每条回复最多一个 dispatch 标记。',
     '当用户问 Gateway/Router/会话管理相关问题时，直接以 Gateway 身份回答，不要输出标记。',
@@ -1171,6 +1205,9 @@ function pushToGateway(text, { persist = true } = {}) {
 
 // A dispatch target must be a real, non-system session.
 function validateDispatchTarget(targetId) {
+  if (/^(sid|session_id|target|目标会话id|<目标会话id>|<session_id>)$/i.test(String(targetId || '').trim())) {
+    return { ok: false, error: `「${targetId}」是占位符，不是真实 session id；请从本轮提示里的可用目标 sessions 中选择一个真实 id` };
+  }
   const rec = persistedSessions.get(targetId);
   if (!rec) return { ok: false, error: `目标 session「${targetId}」不存在` };
   if (rec.type === 'aux' || rec.type === 'gateway') return { ok: false, error: `不能把任务分发给系统会话「${targetId}」` };
@@ -5414,6 +5451,9 @@ function runChatTurn(sessionName, text, opts = {}) {
   }
   if (persisted.type === 'gateway') {
     promptText = buildGatewayPrompt(promptText);
+  } else if (persisted.type !== 'aux') {
+    const dispatchContext = buildDispatchContextPrompt(sessionName);
+    if (dispatchContext) promptText = dispatchContext + promptText;
   }
 
   // Goal mode: prepend the configured limit constraints (round/budget) so the
