@@ -1030,15 +1030,15 @@
       max-width: 1200px;
       min-width: 600px;
       max-height: 95vh;
+      min-height: 60vh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
       flex-shrink: 0;
       box-shadow: 0 16px 48px #00000099;
     }
-    /* Fallback for Android WebViews that don't support min() — clamp on small screens */
     @media (max-width: 660px) {
-      #memo-modal-inner { min-width: 94vw; max-width: 98vw; width: 94vw; }
+      #memo-modal-inner { min-width: 94vw; max-width: 98vw; width: 94vw; min-height: 80vh; }
     }
     #memo-modal-head {
       display: flex;
