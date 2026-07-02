@@ -2319,7 +2319,9 @@ app.patch('/api/sessions/:id', (req, res) => {
     // so the card always shows a concrete, correct model name instead of a
     // stale "默认" placeholder. The user can still re-set via /model afterwards.
     const appType = (s.cli === 'codex') ? 'codex' : 'claude';
-    s.model = providerDefaultModel(appType, v.value) || null;
+    if (req.body.model === undefined) {
+      s.model = providerDefaultModel(appType, v.value) || null;
+    }
     // Chat sessions pick it up on the next per-turn spawn; a warm streaming
     // process must be torn down so it relaunches with the new env.
     if (s.streaming) chatStream.close(s.id);
