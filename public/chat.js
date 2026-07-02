@@ -214,7 +214,7 @@ const mergeHintBtn = document.getElementById('merge-hint-btn');
 const headerMoreBtn = document.getElementById('header-more-btn');
 const headerMoreMenu = document.getElementById('header-more-menu');
 const headerMoreWrap = document.getElementById('header-more-wrap');
-const HEADER_MORE_IDS = ['model-btn', 'effort-btn', 'provider-btn', 'role-btn', 'memory-btn', 'stream-btn', 'auto-commit-btn', 'share-btn'];
+const HEADER_MORE_IDS = ['model-btn', 'role-btn', 'memory-btn', 'stream-btn', 'auto-commit-btn', 'share-btn'];
 
 function syncHeaderMoreMenu() {
   if (!headerMoreMenu || !headerMoreWrap) return;
@@ -2093,7 +2093,10 @@ function modelShortName(model) {
 function updateModelBtn() {
   if (!modelBtn) return;
   const shown = _sessionEffectiveModel || _sessionModel;
-  modelBtn.textContent = `🧠 ${shown ? modelShortName(shown) : tt('default')}`;
+  const provider = providerShortName(_sessionProvider);
+  const model = shown ? modelShortName(shown) : tt('default');
+  const effort = _sessionCli === 'claude' ? effortShortName(_sessionEffort) : '—';
+  modelBtn.textContent = `🧠 ${provider} | ${model} | ${effort}`;
   modelBtn.style.display = '';
 }
 
@@ -2103,12 +2106,8 @@ function effortShortName(effort) {
 
 function updateEffortBtn() {
   if (!effortBtn) return;
-  if (_sessionCli !== 'claude') {
-    effortBtn.style.display = 'none';
-    return;
-  }
-  effortBtn.textContent = `⏱ ${effortShortName(_sessionEffort)}`;
-  effortBtn.style.display = '';
+  effortBtn.style.display = 'none';
+  updateModelBtn();
 }
 
 function showEffortPicker(current) {
@@ -2196,6 +2195,117 @@ for (const v of allowed) {
   });
 }
 
+function providerModelOptions(providerId) {
+  if (!providerId) return [];
+  const p = _providerList.find(o => o.id === providerId);
+  return (p && Array.isArray(p.modelOptions)) ? p.modelOptions.filter(Boolean) : [];
+}
+
+function buildModelChoices(providerId) {
+  const opts = providerModelOptions(providerId);
+  if (opts.length) return ['', ...opts, '__custom__'];
+  if (_sessionCli === 'claude') return CLAUDE_MODEL_OPTIONS.map(o => o.value);
+  return ['', '__custom__'];
+}
+
+function modelChoiceLabel(v) {
+  const named = CLAUDE_MODEL_OPTIONS.find(o => o.value === v);
+  if (named) return named.labelKey ? tt(named.labelKey) : named.label;
+  if (v === '') return tt('default');
+  if (v === '__custom__') return tt('custom');
+  return v;
+}
+
+function showAIConfigPicker({ provider, model, effort }) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:480px;max-width:94vw;color:#c9d1d9;';
+    box.innerHTML = `
+      <div style="font-size:15px;font-weight:600;margin-bottom:8px;">AI 配置（下一轮生效）</div>
+      <div style="font-size:12px;color:#8b949e;line-height:1.5;margin-bottom:12px;">Provider、Model、Effort 会一起保存。切换 Provider 后，Model 选项会按该 Provider 的可用模型联动更新。</div>
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Provider</label>
+      <select id="ai-provider" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;"></select>
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Model</label>
+      <select id="ai-model" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:8px;"></select>
+      <input id="ai-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;">
+      <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Effort</label>
+      <select id="ai-effort" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;"></select>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="ai-cancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;">取消</button>
+        <button id="ai-ok" style="background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;">保存</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const providerSel = box.querySelector('#ai-provider');
+    const modelSel = box.querySelector('#ai-model');
+    const custom = box.querySelector('#ai-model-custom');
+    const effortSel = box.querySelector('#ai-effort');
+    const effortLabel = box.querySelector('#ai-effort-label');
+
+    const providerDefault = document.createElement('option');
+    providerDefault.value = '';
+    providerDefault.textContent = tt('providerDefault');
+    providerSel.appendChild(providerDefault);
+    for (const p of _providerList) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + (p.isOfficial ? ' · 订阅' : (p.baseUrl ? ' · ' + p.baseUrl.replace(/^https?:\/\//, '') : '')) + (p.model ? ' · ' + p.model : '');
+      providerSel.appendChild(opt);
+    }
+    providerSel.value = provider || '';
+
+    for (const o of EFFORT_OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.value;
+      opt.textContent = o.label;
+      effortSel.appendChild(opt);
+    }
+    effortSel.value = EFFORT_OPTIONS.some(o => o.value === effort) ? effort : '';
+    if (_sessionCli !== 'claude') {
+      effortSel.style.display = 'none';
+      effortLabel.style.display = 'none';
+    }
+
+    function rebuildModels(nextProvider, preferredModel) {
+      const choices = buildModelChoices(nextProvider);
+      const keep = choices.includes(preferredModel || '') ? (preferredModel || '') : '';
+      modelSel.innerHTML = '';
+      for (const v of choices) {
+        const opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = modelChoiceLabel(v);
+        modelSel.appendChild(opt);
+      }
+      const isKnown = choices.includes(preferredModel || '');
+      modelSel.value = isKnown ? (preferredModel || '') : '__custom__';
+      custom.value = isKnown ? '' : (preferredModel || '');
+      syncCustom();
+    }
+    function syncCustom() {
+      custom.style.display = modelSel.value === '__custom__' ? '' : 'none';
+    }
+
+    rebuildModels(providerSel.value, model || '');
+    providerSel.onchange = () => rebuildModels(providerSel.value, '');
+    modelSel.onchange = () => { syncCustom(); if (modelSel.value === '__custom__') custom.focus(); };
+
+    const close = (r) => { overlay.remove(); resolve(r); };
+    box.querySelector('#ai-ok').onclick = () => {
+      const pickedModel = modelSel.value === '__custom__' ? custom.value.trim() : modelSel.value;
+      close({
+        provider: providerSel.value,
+        model: pickedModel,
+        effort: _sessionCli === 'claude' ? effortSel.value : '',
+      });
+    };
+    box.querySelector('#ai-cancel').onclick = () => close(null);
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+  });
+}
+
 async function loadSessionModel() {
   if (!_sessionName) return;
   try {
@@ -2230,23 +2340,31 @@ async function loadSessionModel() {
 }
 
 modelBtn?.addEventListener('click', async () => {
-  const provOpts = _sessionProvider ? _providerList.find(p => p.id === _sessionProvider)?.modelOptions : null;
-  const picked = await showModelPicker(_sessionModel, provOpts);
+  await ensureProviderList(_sessionCli === 'codex' ? 'codex' : 'claude');
+  const picked = await showAIConfigPicker({
+    provider: _sessionProvider,
+    model: _sessionModel,
+    effort: _sessionEffort,
+  });
   if (picked === null) return;
   try {
     const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: picked }),
+      body: JSON.stringify(_sessionCli === 'claude'
+        ? { provider: picked.provider, model: picked.model, effort: picked.effort }
+        : { provider: picked.provider, model: picked.model }),
     });
     const data = await res.json();
-    if (!res.ok) { addSystemMsg('模型切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    if (!res.ok) { addSystemMsg('AI 配置保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    _sessionProvider = data.provider || '';
     _sessionModel = data.model || '';
     _sessionEffectiveModel = data.effectiveModel || data.model || '';
+    _sessionEffort = data.effort || '';
     updateModelBtn();
-    addSystemMsg(`✓ 模型已切换为 ${_sessionModel ? modelShortName(_sessionModel) : tt('defaultClaudeSetting')}，下一轮对话生效`);
+    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${_sessionCli === 'claude' ? effortShortName(_sessionEffort) : '—'}，下一轮对话生效`);
   } catch (e) {
-    addSystemMsg('模型切换失败：' + e.message);
+    addSystemMsg('AI 配置保存失败：' + e.message);
   }
 });
 
@@ -2283,8 +2401,8 @@ function providerShortName(id) {
 
 function updateProviderBtn() {
   if (!providerBtn) return;
-  providerBtn.textContent = `⇄ ${providerShortName(_sessionProvider)}`;
-  providerBtn.style.display = '';
+  providerBtn.style.display = 'none';
+  updateModelBtn();
 }
 
 async function ensureProviderList(appType) {
