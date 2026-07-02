@@ -505,6 +505,11 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     await loadDashboard();
   }
 
+  Future<void> updateSessionEffort(String id, String effort) async {
+    await _sessionService.updateSessionEffort(id, effort);
+    await loadDashboard();
+  }
+
   Future<void> updateSessionProvider(String id, String provider) async {
     await _sessionService.updateSessionProvider(id, provider);
     // Server auto-fills the session model from the new provider's model list.

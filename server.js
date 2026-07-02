@@ -605,6 +605,21 @@ const CODEX_ARGS = process.env.CODEX_ARGS ? process.env.CODEX_ARGS.split(' ') : 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 console.log(`[multicc] Using codex: ${CODEX_CMD}`);
 
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']);
+function normalizeEffort(v) {
+  const s = (v == null ? '' : String(v)).trim().toLowerCase();
+  if (!s) return null;
+  return EFFORT_LEVELS.has(s) ? s : undefined;
+}
+function cliEffortLevel(session) {
+  const e = normalizeEffort(session?.effort);
+  if (!e) return null;
+  return e === 'ultracode' ? 'xhigh' : e;
+}
+function effortLabel(e) {
+  return e || '默认';
+}
+
 // ── CLI provider abstraction ──
 // Each provider knows how to (1) build the interactive terminal command line for tmux,
 // (2) build chat-mode spawn args, (3) parse one line of streamed JSON output.
@@ -663,6 +678,8 @@ const cliProviders = {
     buildTerminalCmd(session) {
       let cmd = `${CLAUDE_CMD}${CLAUDE_ARGS.length ? ' ' + CLAUDE_ARGS.join(' ') : ''}`;
       if (session.model) cmd += ` --model ${session.model}`;
+      const effort = cliEffortLevel(session);
+      if (effort) cmd += ` --effort ${effort}`;
       if (session.cliSessionId) cmd += ` --session-id ${session.cliSessionId}`;
       return cmd;
     },
@@ -685,6 +702,8 @@ const cliProviders = {
       // default so the provider's own ANTHROPIC_MODEL env decides the model.
       const model = session.model || (opts.skipDefaultModel ? null : claudeDefaultModel());
       if (model) args.push('--model', model);
+      const effort = cliEffortLevel(session);
+      if (effort) args.push('--effort', effort);
       if (CLAUDE_CHAT_DISALLOWED_TOOLS.length) {
         args.push('--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(','));
       }
@@ -1125,15 +1144,63 @@ function dispatchableSessionsFor(sessionId) {
 function buildDispatchContextPrompt(sessionId) {
   const targets = dispatchableSessionsFor(sessionId);
   if (!targets.length) return '';
+  const current = persistedSessions.get(sessionId);
+  const ultra = normalizeEffort(current?.effort) === 'ultracode';
+  const intro = ultra
+    ? [
+        '[MultiCC Ultracode workflow]',
+        '当前会话开启了 ultracode：你应优先把实质性复杂任务拆成可并行、可验证的子任务，分发给多个 worker session，再根据回流结果继续汇总、修正和验证。',
+        '保持每个 dispatch 指令完整自包含：目标、约束、要读/改/验证的范围、最终需要回报的内容。需要改代码时，要求 worker 先 sync，完成后 commit + merge，并报告结果。',
+      ]
+    : [
+        '[MultiCC cross-session dispatch]',
+        '你可以把自包含子任务分发给同目录的其它 session。只有确实需要其它 session 干活时才输出标记，普通回答不要输出。',
+      ];
   return [
-    '[MultiCC cross-session dispatch]',
-    '你可以把自包含子任务分发给同目录的其它 session。只有确实需要其它 session 干活时才输出标记，普通回答不要输出。',
+    ...intro,
     '格式：<<dispatch target="真实 session id">完整、自包含的任务说明</dispatch>>',
     'target 必须逐字使用下面列表中的某个 id；不要使用 SID、SESSION_ID、<目标会话id> 等占位符。',
+    '如果要并行执行多个子任务，可以在同一回复中输出多个 dispatch 标记；系统会把结果自动回流给你。',
     `可用目标 sessions: ${JSON.stringify(targets)}`,
-    '[MultiCC cross-session dispatch end]',
+    ultra ? '[MultiCC Ultracode workflow end]' : '[MultiCC cross-session dispatch end]',
     '',
   ].join('\n');
+}
+
+function ultracodeWorkerId(parentId, n) {
+  const stem = String(parentId || 'session')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 44)
+    .replace(/-+$/g, '') || 'session';
+  return `${stem}-ultra-${String(n).padStart(2, '0')}`;
+}
+
+function ensureUltracodeWorkers(parentId) {
+  const parent = persistedSessions.get(parentId);
+  if (!parent || !parent.dirId || parent.kind !== 'chat') return;
+  if (normalizeEffort(parent.effort) !== 'ultracode') return;
+  const dir = directories.get(parent.dirId);
+  if (!dir) return;
+  for (let i = 1; i <= 3; i++) {
+    const id = ultracodeWorkerId(parentId, i);
+    if (persistedSessions.has(id)) continue;
+    const r = createSessionRecord({
+      dir,
+      cli: parent.cli || 'claude',
+      kind: 'chat',
+      label: `⚡ Ultra Worker ${i}`,
+      id,
+      ephemeral: true,
+      model: parent.model || null,
+      provider: parent.provider || '',
+      effort: 'xhigh',
+      rolePrompt: '你是 MultiCC Ultracode worker。只执行派给你的自包含子任务；先同步 worktree，完成后验证、提交并尽量合并回基分支，最后用精简结构汇报改动、验证结果和风险。',
+    });
+    if (!r.ok) console.warn(`[multicc/ultracode] failed to create worker ${id}: ${r.error}`);
+  }
 }
 
 function buildGatewayPrompt(userText) {
@@ -1655,6 +1722,7 @@ app.get('/api/sessions', (req, res) => {
         label: p.label || null,
         model: p.model || null,
         effectiveModel: effectiveSessionModel(p),
+        effort: p.effort || null,
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
         autoCommit: !!p.autoCommit,
@@ -2066,7 +2134,7 @@ app.get('/api/directories/:id/sessions', (req, res) => {
       return {
         id: s.id, dirId: s.dirId, cli: s.cli, kind: s.kind,
         cliSessionId: s.cliSessionId || null, label: s.label || null,
-        model: s.model || null, rolePrompt: s.rolePrompt || null,
+        model: s.model || null, effort: s.effort || null, rolePrompt: s.rolePrompt || null,
         provider: s.provider || null,  // cc-switch provider id; null = default login
         createdAt: s.createdAt,
         branch: s.branch || null,
@@ -2092,7 +2160,7 @@ app.get('/api/directories/:id/workspace', (req, res) => {
 // Shared by the REST endpoint and the gateway dispatch path. Pass an explicit `id`
 // to create/reuse a named session (e.g. ephemeral gateway chats). Returns
 // { ok:true, id, session, reused? } or { ok:false, error }.
-function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemeral = false, model = null, provider = undefined }) {
+function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemeral = false, model = null, provider = undefined, effort = null, rolePrompt = null }) {
   if (!dir) return { ok: false, error: 'directory not found' };
   if (!['claude', 'codex'].includes(cli)) return { ok: false, error: 'cli must be claude or codex' };
   if (!['terminal', 'chat'].includes(kind)) return { ok: false, error: 'kind must be terminal or chat' };
@@ -2102,6 +2170,11 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
   if (model && !/^[A-Za-z0-9._:\/\[\]-]{1,100}$/.test(model)) {
     return { ok: false, error: 'invalid model' };
   }
+  const effortLevel = normalizeEffort(effort);
+  if (effortLevel === undefined) return { ok: false, error: 'invalid effort' };
+  if (effortLevel && cli !== 'claude') return { ok: false, error: 'effort is claude-only' };
+  const rp = rolePrompt == null ? null : String(rolePrompt).trim();
+  if (rp && rp.length > 40000) return { ok: false, error: 'rolePrompt too long (max 40000)' };
   // Provider override (cc-switch). An explicit value is validated; when omitted
   // the session inherits the global default for this CLI. null = use the default
   // login / OAuth subscription.
@@ -2134,12 +2207,14 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
     cliSessionId: null,   // claude gets one allocated on spawn; codex captures from first event
     label,
     model: model || null, // null = follow default/provider model
+    effort: effortLevel || null, // null = follow Claude Code/provider default
     provider: providerId,  // cc-switch provider id; null = default login/subscription
     autoCommit: true,      // default: auto-commit & merge after task completion
     createdAt: new Date().toISOString(),
     worktreePath,
     branch,
   };
+  if (rp) session.rolePrompt = rp;
   if (ephemeral) session.ephemeral = true;
   persistedSessions.set(sid, session);
   savePersistedSessions();
@@ -2154,16 +2229,12 @@ app.post('/api/directories/:id/sessions', (req, res) => {
   const kind = (req.body.kind || '').trim();
   const label = (req.body.label || '').trim() || null;
   const model = (req.body.model || '').trim() || null;
+  const effort = req.body.effort === undefined ? null : req.body.effort;
   // provider: omit → inherit global default; '' → explicit no-override; id → that provider.
   const provider = req.body.provider === undefined ? undefined : ((req.body.provider || '').trim() || '');
   const rolePrompt = (req.body.rolePrompt || '').trim() || null;
-  const r = createSessionRecord({ dir: d, cli, kind, label, model, provider });
+  const r = createSessionRecord({ dir: d, cli, kind, label, model, provider, effort, rolePrompt });
   if (!r.ok) return res.status(400).json({ error: r.error });
-  // Apply rolePrompt after session is created
-  if (rolePrompt) {
-    r.session.rolePrompt = rolePrompt;
-    savePersistedSessions();
-  }
   res.json(r.session);
 });
 
@@ -2190,6 +2261,16 @@ app.patch('/api/sessions/:id', (req, res) => {
     // Chat sessions pick this up on the next turn (fresh spawn per turn);
     // terminal sessions need a session restart to relaunch their CLI with it.
     appendEvent(s.dirId, 'session_model_changed', `${s.label || s.id} → ${s.model || '默认'}`, s.id);
+  }
+  if (req.body.effort !== undefined) {
+    const effort = normalizeEffort(req.body.effort);
+    if (effort === undefined) return res.status(400).json({ error: 'invalid effort' });
+    if (effort && (s.cli || 'claude') !== 'claude') {
+      return res.status(400).json({ error: 'effort is claude-only' });
+    }
+    s.effort = effort || null;
+    if (s.streaming) chatStream.close(s.id);
+    appendEvent(s.dirId, 'session_effort_changed', `${s.label || s.id} → ${effortLabel(s.effort)}`, s.id);
   }
   if (req.body.rolePrompt !== undefined) {
     const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
@@ -2414,6 +2495,7 @@ app.get('/api/sessions/:id', (req, res) => {
   const cli = persisted?.cli || 'claude';
   const model = persisted?.model || null;
   const effectiveModel = effectiveSessionModel(persisted);
+  const effort = persisted?.effort || null;
   // The session's own role override (null = inherits the directory default).
   const rolePrompt = persisted?.rolePrompt || null;
   const memory = persisted?.memory || null;  // distilled session memory
@@ -2424,11 +2506,11 @@ app.get('/api/sessions/:id', (req, res) => {
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
   }
 });
 
@@ -5452,6 +5534,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   if (persisted.type === 'gateway') {
     promptText = buildGatewayPrompt(promptText);
   } else if (persisted.type !== 'aux') {
+    ensureUltracodeWorkers(sessionName);
     const dispatchContext = buildDispatchContextPrompt(sessionName);
     if (dispatchContext) promptText = dispatchContext + promptText;
   }
@@ -5956,8 +6039,12 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
     MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
   });
   const model = persisted.model || (skipDefaultModel ? null : claudeDefaultModel());
-  const extraArgs = CLAUDE_CHAT_DISALLOWED_TOOLS.length
-    ? ['--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(',')] : [];
+  const extraArgs = [];
+  const effort = cliEffortLevel(persisted);
+  if (effort) extraArgs.push('--effort', effort);
+  if (CLAUDE_CHAT_DISALLOWED_TOOLS.length) {
+    extraArgs.push('--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(','));
+  }
 
   chatStream.ensure(sessionName, {
     cmd: cliProviders.claude.cmd,
@@ -6149,6 +6236,7 @@ function handleChatWs(ws, req, urlObj) {
     cwd: cs.cwd, session: sessionName, session_id: sessionName,
     cli: cs.cli,
     is_streaming: cs.isStreaming,
+    effort: persisted.effort || null,
     providerId: provId,
     providerName: provName,
     providerTokenWindows: provWindows,

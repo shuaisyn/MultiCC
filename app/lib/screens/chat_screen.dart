@@ -326,6 +326,11 @@ class _Header extends StatelessWidget {
                   settings: settings,
                   compact: narrow),
               const SizedBox(width: 4),
+              _EffortChip(
+                  sessionId: provider.sessionName,
+                  cli: provider.cli,
+                  compact: narrow),
+              const SizedBox(width: 4),
               _ProviderChip(
                 sessionId: provider.sessionName,
                 cli: provider.cli,
@@ -633,6 +638,120 @@ class _ModelChipState extends State<_ModelChip> {
     } catch (e) {
       messenger.showSnackBar(
           SnackBar(content: Text(t('modelSwitchFailed', {'error': '$e'}))));
+    }
+  }
+}
+
+class _EffortChip extends StatelessWidget {
+  final String sessionId;
+  final SessionCli cli;
+  final bool compact;
+  const _EffortChip({required this.sessionId, required this.cli, this.compact = false});
+
+  static const _options = <MapEntry<String, String>>[
+    MapEntry('', '默认'),
+    MapEntry('low', 'low'),
+    MapEntry('medium', 'medium'),
+    MapEntry('high', 'high'),
+    MapEntry('xhigh', 'xhigh'),
+    MapEntry('max', 'max'),
+    MapEntry('ultracode', 'ultracode'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    if (cli != SessionCli.claude) return const SizedBox.shrink();
+    final mgr = context.watch<SessionManager>();
+    Session? s;
+    for (final x in mgr.sessions) {
+      if (x.id == sessionId) { s = x; break; }
+    }
+    final current = s?.effort ?? '';
+    final label = current.isEmpty ? '默认' : current;
+    return Tooltip(
+      message: '切换努力程度（下一轮生效）',
+      child: GestureDetector(
+        onTap: s == null ? null : () => _pick(context, mgr, s!, current),
+        child: Container(
+          padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 8, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFF14171c),
+            border: Border.all(color: const Color(0xFF20242b)),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.speed_rounded, size: 15, color: Color(0xFFe7eaee)),
+              if (!compact) ...[
+                const SizedBox(width: 4),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 72),
+                  child: Text(
+                    label,
+                    style: const TextStyle(
+                      color: Color(0xFFe7eaee),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pick(BuildContext context, SessionManager mgr, Session s, String current) async {
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF0f1115),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 16, 18, 4),
+              child: Text('选择努力程度',
+                  style: TextStyle(color: Color(0xFFf2f4f7), fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: Text('ultracode 会使用 xhigh，并启用 MultiCC 跨会话 workflow 编排。',
+                  style: TextStyle(color: Color(0xFF8a909b), fontSize: 12)),
+            ),
+            for (final e in _options)
+              ListTile(
+                dense: true,
+                title: Text(e.value.isEmpty ? '默认' : e.value,
+                    style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 14)),
+                trailing: e.key == current
+                    ? const Icon(Icons.check_rounded, size: 18, color: Color(0xFF7fd49a))
+                    : null,
+                onTap: () => Navigator.pop(ctx, e.key),
+              ),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+    if (picked == null) return;
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await mgr.updateSessionEffort(s.id, picked);
+      messenger.showSnackBar(SnackBar(
+        content: Text('✓ 努力程度已切换为 ${picked.isEmpty ? '默认' : picked}，下一轮对话生效'),
+      ));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('努力程度切换失败：$e')));
     }
   }
 }

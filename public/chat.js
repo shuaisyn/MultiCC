@@ -214,7 +214,7 @@ const mergeHintBtn = document.getElementById('merge-hint-btn');
 const headerMoreBtn = document.getElementById('header-more-btn');
 const headerMoreMenu = document.getElementById('header-more-menu');
 const headerMoreWrap = document.getElementById('header-more-wrap');
-const HEADER_MORE_IDS = ['model-btn', 'provider-btn', 'role-btn', 'memory-btn', 'stream-btn', 'auto-commit-btn', 'share-btn'];
+const HEADER_MORE_IDS = ['model-btn', 'effort-btn', 'provider-btn', 'role-btn', 'memory-btn', 'stream-btn', 'auto-commit-btn', 'share-btn'];
 
 function syncHeaderMoreMenu() {
   if (!headerMoreMenu || !headerMoreWrap) return;
@@ -690,6 +690,10 @@ function handleEvent(msg) {
         if (msg.cli) parts.push(msg.cli);
         if (msg.model) parts.push(msg.model);
         if (parts.length) addSystemMsg(parts.join(' | '));
+        if (msg.effort !== undefined) {
+          _sessionEffort = msg.effort || '';
+          updateEffortBtn();
+        }
         // Sync streaming state with server on (re)connect
         if (msg.is_streaming && _pendingCancel) {
           // User cancelled while disconnected — now that we're back, send it
@@ -2069,6 +2073,17 @@ const CLAUDE_MODEL_OPTIONS = [
 ];
 let _sessionModel = '';        // raw per-session override (null/'' = follow default)
 let _sessionEffectiveModel = ''; // model actually used at spawn time (for display)
+const effortBtn = document.getElementById('effort-btn');
+const EFFORT_OPTIONS = [
+  { value: '', label: '默认' },
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max' },
+  { value: 'ultracode', label: 'ultracode' },
+];
+let _sessionEffort = '';
 
 function modelShortName(model) {
   const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
@@ -2080,6 +2095,47 @@ function updateModelBtn() {
   const shown = _sessionEffectiveModel || _sessionModel;
   modelBtn.textContent = `🧠 ${shown ? modelShortName(shown) : tt('default')}`;
   modelBtn.style.display = '';
+}
+
+function effortShortName(effort) {
+  return effort || '默认';
+}
+
+function updateEffortBtn() {
+  if (!effortBtn) return;
+  if (_sessionCli !== 'claude') {
+    effortBtn.style.display = 'none';
+    return;
+  }
+  effortBtn.textContent = `⏱ ${effortShortName(_sessionEffort)}`;
+  effortBtn.style.display = '';
+}
+
+function showEffortPicker(current) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;color:#c9d1d9;';
+    box.innerHTML = `
+      <div style="font-size:15px;font-weight:600;margin-bottom:8px;">选择努力程度（下一轮生效）</div>
+      <div style="font-size:12px;color:#8b949e;line-height:1.5;margin-bottom:12px;">Claude 支持 low / medium / high / xhigh / max。ultracode 会向 Claude 传 xhigh，并启用 MultiCC 跨会话 workflow 编排。</div>
+      <select id="effort-select" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;">
+        ${EFFORT_OPTIONS.map(o => `<option value="${o.value}">${o.label}</option>`).join('')}
+      </select>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="effort-cancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;">取消</button>
+        <button id="effort-ok" style="background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;">保存</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    const select = box.querySelector('#effort-select');
+    select.value = EFFORT_OPTIONS.some(o => o.value === current) ? current : '';
+    const close = (r) => { overlay.remove(); resolve(r); };
+    box.querySelector('#effort-ok').onclick = () => close(select.value);
+    box.querySelector('#effort-cancel').onclick = () => close(null);
+    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+  });
 }
 
 // WebView-safe picker (native select/confirm are unreliable in Android WebViews).
@@ -2159,6 +2215,8 @@ async function loadSessionModel() {
     _sessionModel = info.model || '';
     _sessionEffectiveModel = info.effectiveModel || info.model || '';
     updateModelBtn();
+    _sessionEffort = info.effort || '';
+    updateEffortBtn();
     if ((info.cli || 'claude') !== 'claude') {
       updateAutoCommitBtn();
       return; // streaming is claude-only
@@ -2189,6 +2247,25 @@ modelBtn?.addEventListener('click', async () => {
     addSystemMsg(`✓ 模型已切换为 ${_sessionModel ? modelShortName(_sessionModel) : tt('defaultClaudeSetting')}，下一轮对话生效`);
   } catch (e) {
     addSystemMsg('模型切换失败：' + e.message);
+  }
+});
+
+effortBtn?.addEventListener('click', async () => {
+  const picked = await showEffortPicker(_sessionEffort);
+  if (picked === null) return;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ effort: picked }),
+    });
+    const data = await res.json();
+    if (!res.ok) { addSystemMsg('努力程度切换失败：' + (data.error || `HTTP ${res.status}`)); return; }
+    _sessionEffort = data.effort || '';
+    updateEffortBtn();
+    addSystemMsg(`✓ 努力程度已切换为 ${effortShortName(_sessionEffort)}，下一轮对话生效`);
+  } catch (e) {
+    addSystemMsg('努力程度切换失败：' + e.message);
   }
 });
 

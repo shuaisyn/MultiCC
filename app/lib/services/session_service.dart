@@ -146,6 +146,22 @@ class SessionService {
     }
   }
 
+  /// Switch Claude Code effort for a session. Empty string = follow default.
+  /// Supported values: low, medium, high, xhigh, max, ultracode.
+  Future<void> updateSessionEffort(String id, String effort) async {
+    final res = await http
+        .patch(
+          Uri.parse(_url('/api/sessions/$id')),
+          headers: _headers,
+          body: jsonEncode({'effort': effort}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   /// Switch the per-session provider (cc-switch). Empty string clears the
   /// override → the session falls back to the default login / subscription.
   /// Applies on the next chat turn. Returns the updated model that the server
