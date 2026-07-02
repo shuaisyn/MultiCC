@@ -660,6 +660,27 @@ function codexDefaultReasoningLevel() {
   }
   return 'medium';
 }
+function claudeDefaultEffort() {
+  const files = [
+    path.join(CLAUDE_HOME, 'settings.local.json'),
+    path.join(CLAUDE_HOME, 'settings.json'),
+  ];
+  for (const fp of files) {
+    try {
+      if (!fs.existsSync(fp)) continue;
+      const settings = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      const effort = normalizeEffort(settings.effort || settings.thinkingEffort);
+      if (effort) return effort === 'ultracode' ? 'xhigh' : effort;
+    } catch (_) {}
+  }
+  return 'medium';
+}
+function effectiveSessionEffort(session) {
+  if (!session || (session.cli || 'claude') !== 'claude') return null;
+  const effort = normalizeEffort(session.effort);
+  if (effort) return effort;
+  return claudeDefaultEffort();
+}
 
 // ── CLI provider abstraction ──
 // Each provider knows how to (1) build the interactive terminal command line for tmux,
