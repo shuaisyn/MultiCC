@@ -10,6 +10,8 @@ sessions.json
 directories.json
 scheduled_tasks.json
 shares.json
+aux-config.json
+notes.json
 chat_history/
 events/
 logs/
@@ -69,6 +71,7 @@ goal-config.json
 
 # Provider store (contains API keys — keep local)
 providers.json
+providers.json.bak-*
 provider-defaults.json
 
 # Local-only scripts (not for git)
