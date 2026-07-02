@@ -172,6 +172,7 @@ class Session {
   final String? label;
   final String? model;
   final String? effectiveModel; // model actually used at spawn time (override > provider > /model default)
+  final String? effort; // Claude Code effort: low/medium/high/xhigh/max/ultracode
   final String? rolePrompt;
   final String? provider; // cc-switch provider id; null = default login
   final String cwd;
@@ -191,6 +192,7 @@ class Session {
     this.label,
     this.model,
     this.effectiveModel,
+    this.effort,
     this.rolePrompt,
     this.provider,
     this.cwd = '',
@@ -212,6 +214,7 @@ class Session {
       label: json['label']?.toString(),
       model: json['model']?.toString(),
       effectiveModel: json['effectiveModel']?.toString(),
+      effort: json['effort']?.toString(),
       rolePrompt: json['rolePrompt']?.toString(),
       provider: json['provider']?.toString(),
       cwd: (json['cwd'] ?? '').toString(),
