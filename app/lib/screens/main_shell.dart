@@ -1437,8 +1437,15 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         .where((s) => s.active)
         .length;
     final latestTask = _latestTask(groups);
+    // Rainbow border when any session in this directory is running.
+    const busy = {'running', 'thinking', 'editing'};
+    final dirRunning = _workspace.statuses.values
+        .any((st) => busy.contains(st.status));
 
-    return LongPressDraggable<String>(
+    return RainbowBorder(
+      running: dirRunning,
+      borderRadius: BorderRadius.circular(8),
+      child: LongPressDraggable<String>(
       data: widget.directory.id,
       onDragEnd: (_) {
         // 拖拽结束（无论是否成功 drop）都清除悬停指示器
@@ -1742,6 +1749,7 @@ class _DirectoryCardState extends State<_DirectoryCard> {
             ),
           );
         },
+      ),
       ),
     );
   }
