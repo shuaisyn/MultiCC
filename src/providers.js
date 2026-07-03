@@ -502,7 +502,13 @@ function importFromCcSwitch() {
 // "default login" or "Claude Official" would have no effect.  We strip all of
 // these from the inherited env first, then re-apply only what the chosen
 // provider supplies.
-const CLAUDE_ROUTING_KEYS = [
+// ANTHROPIC_* env keys that route claude to a specific provider/model. If one
+// of these leaks into this server's own env (e.g. from the shell that ran
+// `pm2 start` after a cc-switch), every spawned child inherits it and routes
+// / bills against the wrong provider, so they are stripped both at server
+// startup AND here in buildChildEnv. Single source of truth — server.js imports
+// this list instead of re-inline-ing it.
+const ANTHROPIC_ROUTING_KEYS = [
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_API_KEY',
@@ -511,15 +517,15 @@ const CLAUDE_ROUTING_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  // CLAUDE_CODE_SIMPLE is deliberately NOT set by multicc — leaving it unset
-  // preserves the full tool set (Agent, TaskCreate, Workflow, ultracode).
-  // But it MUST still be stripped here: the pm2/launchd parent often carries
-  // CLAUDE_CODE_SIMPLE=1 left over from an earlier setup, and without stripping
-  // it leaks into every spawned claude child via {…base}, overriding the
-  // per-session provider/model routing (observed: domestic providers return
-  // "model not found" / 1211). Strip-without-set => clean child env.
-  'CLAUDE_CODE_SIMPLE',
 ];
+// Full set stripped from a child env before re-applying the per-session
+// provider. Includes CLAUDE_CODE_SIMPLE: multicc never SETS it (leaving it
+// unset preserves the full tool set — Agent, TaskCreate, Workflow, ultracode),
+// but the pm2/launchd parent often carries CLAUDE_CODE_SIMPLE=1 left over from
+// an earlier setup, and without stripping it the child enters SDK/simple mode
+// and its tool set collapses + per-session routing is overridden (domestic
+// providers return "model not found" / 1211). Strip-without-set => clean child.
+const CLAUDE_ROUTING_KEYS = [...ANTHROPIC_ROUTING_KEYS, 'CLAUDE_CODE_SIMPLE'];
 
 // Build the full child environment for spawning a session's CLI.
 //   base   — the inherited env to start from (normally process.env)
@@ -832,6 +838,7 @@ module.exports = {
   getProviderUsageStats,
   readDailyWindows,
   CLAUDE_ROUTING_KEYS,
+  ANTHROPIC_ROUTING_KEYS,
   CODEX_HOMES_DIR,
   WIRE_DEFAULT_MODEL,
   probeRelayModels,

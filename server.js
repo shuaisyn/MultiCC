@@ -16,15 +16,12 @@ try {
 // bills against — or worse, routes the `haiku`/`opus`/`sonnet` aliases to — that
 // provider's model instead of the subscription. We don't use them anywhere in
 // this server (per-session providers re-apply their own via buildChildEnv), so
-// strip the full routing-key set here so every child inherits a clean env. This
-// MUST stay in sync with CLAUDE_ROUTING_KEYS in src/providers.js — in particular
-// the ANTHROPIC_*_MODEL aliases, whose omission previously redirected the aux
-// helper's `--model haiku` to a leaked DeepSeek model and broke every aux task.
-for (const k of [
-  'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-]) {
+// strip the ANTHROPIC_* routing-key set here so every child inherits a clean
+// env. The list is owned by src/providers.js (ANTHROPIC_ROUTING_KEYS) — import
+// it rather than re-inline, so the two can't drift (CLAUDE_CODE_SIMPLE and the
+// other CLAUDE_CODE_* markers are stripped separately below).
+const { ANTHROPIC_ROUTING_KEYS } = require('./src/providers');
+for (const k of ANTHROPIC_ROUTING_KEYS) {
   if (process.env[k]) { console.log(`[multicc] stripping inherited ${k} so claude uses the OAuth subscription`); delete process.env[k]; }
 }
 
