@@ -1635,11 +1635,7 @@ function createSession(id) {
     session.buffer.push(str);
     if (session.buffer.length > 500) session.buffer.shift();
     session.lastActivity = new Date();
-    for (const client of session.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'output', data: str }));
-      }
-    }
+    broadcastTo(session.clients, { type: 'output', data: str });
     // Server-side push notification detection
     pushOnOutput(id, str);
     // Coarse status for the workspace board: output → running, 2s of silence → idle.
@@ -1663,11 +1659,7 @@ function createSession(id) {
         if (session.captureTimer) { clearInterval(session.captureTimer); session.captureTimer = null; }
         const cliLabel = session.cli === 'codex' ? 'Codex' : 'Claude Code';
         const exitMsg = `\r\n\x1b[33m[${cliLabel} process exited]\x1b[0m\r\n`;
-        for (const client of session.clients) {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'exit', data: exitMsg }));
-          }
-        }
+        broadcastTo(session.clients, { type: 'exit', data: exitMsg });
         stopOutputCapture(session);
         sessions.delete(id);
       } else {
@@ -1685,11 +1677,7 @@ function createSession(id) {
             session.buffer.push(str);
             if (session.buffer.length > 500) session.buffer.shift();
             session.lastActivity = new Date();
-            for (const client of session.clients) {
-              if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify({ type: 'output', data: str }));
-              }
-            }
+            broadcastTo(session.clients, { type: 'output', data: str });
             pushOnOutput(id, str);
           });
           newStream.on('end', onStreamEnd);
@@ -2739,11 +2727,7 @@ app.post('/api/sessions/:id/relocate', (req, res) => {
 
   const oldSession = sessions.get(id);
   if (oldSession) {
-    for (const client of oldSession.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'relocate', cwd: targetDir.path }));
-      }
-    }
+    broadcastTo(oldSession.clients, { type: 'relocate', cwd: targetDir.path });
     sessions.delete(id);
     tmuxKillSession(oldSession.id);
   }
@@ -2822,11 +2806,7 @@ app.post('/api/sessions/:id/restart', (req, res) => {
   try {
     createSession(id);
     console.log(`[multicc] Session ${id} restarted in ${cwd}`);
-    for (const client of oldClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'restart' }));
-      }
-    }
+    broadcastTo(oldClients, { type: 'restart' });
     res.json({ ok: true, cwd });
   } catch (err) {
     console.error('[multicc] Restart failed:', err);
@@ -3850,16 +3830,25 @@ function hasNotifyConsumer(sessionId) {
   return false;
 }
 
-// Push a server-originated message to a terminal session's live WS clients.
-function terminalBroadcast(sessionId, payload) {
-  const session = sessions.get(sessionId);
-  if (!session) return;
+// Stringify once and send to every OPEN client in an iterable. Swallows per-
+// client send errors so one dead socket doesn't abort the loop. Shared by
+// terminalBroadcast / chatBroadcast / workspaceBroadcast / the aux hub's
+// broadcast() — previously this "iterate clients + JSON send" body was copy-
+// pasted at ~9 sites.
+function broadcastTo(clients, payload) {
   const json = JSON.stringify(payload);
-  for (const client of session.clients) {
+  for (const client of clients) {
     if (client.readyState === WebSocket.OPEN) {
       try { client.send(json); } catch (_) {}
     }
   }
+}
+
+// Push a server-originated message to a terminal session's live WS clients.
+function terminalBroadcast(sessionId, payload) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  broadcastTo(session.clients, payload);
 }
 
 // Output went idle on a terminal session — the terminal equivalent of an SSE
@@ -4220,12 +4209,7 @@ const auxQueue = {
   },
 
   broadcast(payload) {
-    const json = JSON.stringify(payload);
-    for (const client of this.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try { client.send(json); } catch (_) {}
-      }
-    }
+    broadcastTo(this.clients, payload);
   },
 
   getStatus() {
@@ -4891,12 +4875,7 @@ const chatSessions = new Map();
 function chatBroadcast(sessionName, payload) {
   const cs = chatSessions.get(sessionName);
   if (!cs) return;
-  const json = JSON.stringify(payload);
-  for (const client of cs.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      try { client.send(json); } catch (_) {}
-    }
-  }
+  broadcastTo(cs.clients, payload);
 }
 
 // Push updated provider time-window stats to the chat frontend after a turn.
@@ -5168,10 +5147,7 @@ ${text.slice(0, 12000)}
 function workspaceBroadcast(dirId, payload) {
   const set = workspaceClients.get(dirId);
   if (!set) return;
-  const json = JSON.stringify(payload);
-  for (const wsc of set) {
-    if (wsc.readyState === WebSocket.OPEN) { try { wsc.send(json); } catch (_) {} }
-  }
+  broadcastTo(set, payload);
 }
 
 // Statuses where the agent is actively working a turn (the run-time clock ticks).
