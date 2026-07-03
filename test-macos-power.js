@@ -6,7 +6,7 @@ const {
   isAvailable,
   parseLidSleepPrevention,
   setLidSleepPrevention,
-} = require('./macos-power');
+} = require('./plugins/utils/macos-power');
 
 assert.strictEqual(isAvailable('darwin'), true);
 assert.strictEqual(isAvailable('linux'), false);
