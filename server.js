@@ -767,22 +767,18 @@ const cliProviders = {
         '--include-partial-messages', '--dangerously-skip-permissions',
         '--append-system-prompt', sysPrompt,
       ];
-      // Per-session model wins; otherwise follow the user's current /model default
-      // (passed explicitly because `--resume` would keep the session's original model).
-      // When a provider override routes to a non-Anthropic base URL, skip the global
-      // default so the provider's own ANTHROPIC_MODEL env decides the model.
-      //
-      // Alias-only relay guard: a provider with a base URL but no canonical
-      // ANTHROPIC_MODEL (e.g. iFlytek) only declares alias targets, and its relay
-      // rejects those targets (e.g. "astron-code-latest") as literal --model values
-      // → 400 [1211]. If session.model holds such a literal (e.g. stamped by an
-      // older build before this guard), substitute the safe wire default. Aliases
-      // (opus/sonnet/haiku/fable/default) and providers WITH ANTHROPIC_MODEL are
-      // passed through unchanged.
+      // Resolve the wire model. An explicit per-session model is honored ONLY when
+      // it's an alias (opus/sonnet/haiku/fable/default) or a model the provider
+      // actually serves — otherwise a stale value is used (e.g. "astron-code-latest"
+      // left on a session after its iFlytek provider was import-corrected), which
+      // the relay rejects → 400 [1211]. Fall back to the provider's canonical model,
+      // or the global /model default for the default login.
       const isAlias = /^(opus|sonnet|haiku|fable|default)$/i.test(session.model || '');
-      const model = (opts.aliasOnly && session.model && !isAlias)
-        ? providers.WIRE_DEFAULT_MODEL
-        : (session.model || (opts.skipDefaultModel ? null : claudeDefaultModel()));
+      const served = opts.providerModels || [];
+      const hasProvider = opts.providerModel !== undefined && opts.providerModel !== null;
+      const model = !hasProvider
+        ? (session.model || (opts.skipDefaultModel ? null : claudeDefaultModel()))
+        : ((session.model && (isAlias || served.includes(session.model))) ? session.model : opts.providerModel);
       if (model) args.push('--model', model);
       const effort = cliEffortLevel(session);
       if (effort) args.push('--effort', effort);
@@ -4681,20 +4677,6 @@ app.post('/api/providers/:appType/:id/probe', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// Explicit admin action: rewrite ONE cc-switch provider's settings_config so its
-// model literals are valid wire names (for alias-only relays whose configured
-// alias targets are rejected, e.g. iFlytek "astron-code-latest"). Backs up the DB
-// first, then UPDATEs a single row. Never runs automatically. Body: { tierMap?: {} }.
-// After fixing, call POST /api/providers/import to pull the corrected config in.
-app.post('/api/providers/:appType/:id/fix-source', (req, res) => {
-  try {
-    const tierMap = (req.body && req.body.tierMap && typeof req.body.tierMap === 'object') ? req.body.tierMap : {};
-    const dryRun = !!(req.body && req.body.dryRun);
-    const result = providers.fixProviderModels(req.params.appType, req.params.id, tierMap, dryRun);
-    res.status(result.ok ? 200 : 400).json(result);
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
 // Get / set the global default provider per CLI.
 app.get('/api/provider-defaults', (req, res) => res.json(providerDefaults));
 app.put('/api/provider-defaults', (req, res) => {
@@ -6054,7 +6036,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // Per-session provider (cc-switch): env injected into THIS child only, so
   // sibling sessions routing to other providers stay fully independent.
   const provEnv = providers.resolveSpawnEnv(persisted);
-  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn, rolePrompt, maxTurns: goalMaxTurns, skipDefaultModel: provEnv.skipDefaultModel, aliasOnly: provEnv.aliasOnly });
+  const args = provider.buildChatSpawnArgs(persisted, promptText, { isFirstTurn, rolePrompt, maxTurns: goalMaxTurns, skipDefaultModel: provEnv.skipDefaultModel, providerModel: provEnv.providerModel, providerModels: provEnv.providerModels });
   console.log(`[multicc/chat] Spawning ${cs.cli} (turn ${cs.chatTurnCount}, first=${isFirstTurn}${provEnv.providerName ? `, provider=${provEnv.providerName}` : ''}): ${provider.cmd} ${args.join(' ').slice(0, 200)}...`);
 
   // Sanitize empty thinking blocks from the Claude CLI JSONL session file.
@@ -6524,18 +6506,20 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
   // vars before applying the provider env, so the provider choice is always
   // authoritative — see providers.CLAUDE_ROUTING_KEYS. The full computed env is
   // passed through; chat-stream uses it verbatim (no second process.env merge).
-  const { env: childEnv, skipDefaultModel, aliasOnly } = providers.buildChildEnv(process.env, persisted, {
+  const { env: childEnv, skipDefaultModel, providerModel, providerModels } = providers.buildChildEnv(process.env, persisted, {
     TERM: 'dumb', NO_COLOR: '1',
     MULTICC_SESSION_ID: sessionName,
     MULTICC_DIR_ID: persisted.dirId || '',
     MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
   });
-  // Mirror the per-turn path's alias-only guard (see buildChatSpawnArgs): never
-  // send an alias-target literal to an alias-only relay — substitute the wire default.
+  // Same wire-model resolution as buildChatSpawnArgs: honor the per-session model
+  // only if it's an alias or a served model; else the provider's canonical model.
   const _isAlias = /^(opus|sonnet|haiku|fable|default)$/i.test(persisted.model || '');
-  const model = (aliasOnly && persisted.model && !_isAlias)
-    ? providers.WIRE_DEFAULT_MODEL
-    : (persisted.model || (skipDefaultModel ? null : claudeDefaultModel()));
+  const _served = providerModels || [];
+  const _hasProvider = providerModel !== undefined && providerModel !== null;
+  const model = !_hasProvider
+    ? (persisted.model || (skipDefaultModel ? null : claudeDefaultModel()))
+    : ((persisted.model && (_isAlias || _served.includes(persisted.model))) ? persisted.model : providerModel);
   const extraArgs = [];
   const effort = cliEffortLevel(persisted);
   if (effort) extraArgs.push('--effort', effort);

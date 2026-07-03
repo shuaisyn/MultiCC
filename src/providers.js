@@ -4,12 +4,11 @@
 //
 // multicc keeps its OWN provider store (providers.json). cc-switch
 // (~/.cc-switch/cc-switch.db) is an import SOURCE: the user can pull its provider
-// list into multicc's store, then add / edit / delete freely here. multicc does
-// NOT write to cc-switch during normal operation. The ONE deliberate exception
-// is `fixProviderModels()` — an explicit admin action (POST .../fix-source) that
-// corrects a provider's settings_config in place (e.g. rewrite an alias-only
-// relay's rejected model literals to valid wire names). It backs up first and
-// touches a single row by composite PK; it is never invoked automatically.
+// list into multicc's store, then add / edit / delete freely here. multicc never
+// writes to cc-switch — not even at import. Alias-only relays whose cc-switch
+// configs declare rejected model literals (e.g. iFlytek's "astron-code-latest")
+// are auto-corrected in multicc's OWN store at import time (see applyWireDefaults
+// in importFromCcSwitch), so the source stays untouched and the provider works.
 //
 // A provider's `settingsConfig` mirrors cc-switch's shape so the spawn-env logic
 // is uniform: claude → { env: { ANTHROPIC_* } }, codex → { auth, config(toml) }.
@@ -66,6 +65,30 @@ const APP_TYPES = ['claude', 'codex'];
 // relays accept claude-* wire names, so this is the safe substitution. Override
 // via env if a particular relay prefers a different canonical id.
 const WIRE_DEFAULT_MODEL = process.env.CLAUDE_WIRE_DEFAULT_MODEL || 'claude-sonnet-4-5';
+
+// Tier → safe wire model applied to alias-only relays (has base URL, no canonical
+// ANTHROPIC_MODEL) whose configured alias targets the relay rejects as literals
+// (e.g. iFlytek's "astron-code-latest"). All Anthropic-compatible relays accept
+// claude-* names. claude-fable-5 is untested on these relays → sonnet default.
+const DEFAULT_TIER_MAP = {
+  ANTHROPIC_MODEL: WIRE_DEFAULT_MODEL,
+  ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: WIRE_DEFAULT_MODEL,
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+  ANTHROPIC_DEFAULT_FABLE_MODEL: WIRE_DEFAULT_MODEL,
+  ANTHROPIC_SMALL_FAST_MODEL: 'claude-haiku-4-5',
+};
+// Overwrite every model-selecting env key with a safe claude-* wire name. Used
+// both at spawn (resolveSpawnEnv) and at import (so the stored config is valid).
+function applyWireDefaults(env) {
+  for (const [k, v] of Object.entries(DEFAULT_TIER_MAP)) env[k] = v;
+}
+// True for claude configs that need the wire-default remap: a relay base URL is
+// set but no canonical ANTHROPIC_MODEL is declared (only alias targets).
+function isAliasOnlyClaude(cfg) {
+  const env = cfg && cfg.env;
+  return !!(env && env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL);
+}
 
 // ── multicc store (providers.json) ───────────────────────────────────────────
 
@@ -405,12 +428,23 @@ function importFromCcSwitch() {
   let imported = 0, updated = 0;
   for (const r of rows) {
     if (!APP_TYPES.includes(r.app_type)) continue;
+    const cfg = parseConfig(r.settings_config);
+    // Auto-correct alias-only relays at import: cc-switch configs for relays
+    // like iFlytek declare only alias targets the relay rejects (e.g.
+    // astron-code-latest) and no canonical ANTHROPIC_MODEL. Remap the stored
+    // env to safe claude-* wire names here so the provider is valid in
+    // multicc's own store — no cc-switch modification needed. Preserves auth,
+    // base URL, and the *_MODEL_NAME display labels. Idempotent on re-import.
+    if (r.app_type === 'claude' && isAliasOnlyClaude(cfg)) {
+      cfg.env = { ...cfg.env };
+      applyWireDefaults(cfg.env);
+    }
     const entry = {
       id: r.id,
       appType: r.app_type,
       name: r.name,
       source: 'ccswitch',
-      settingsConfig: parseConfig(r.settings_config),
+      settingsConfig: cfg,
       importedAt: Date.now(),
     };
     const key = `${r.app_type}:${r.id}`;
@@ -485,6 +519,8 @@ function buildChildEnv(base, session, extra = {}) {
     env,
     skipDefaultModel: spawn.skipDefaultModel,
     aliasOnly: spawn.aliasOnly,
+    providerModel: spawn.providerModel,
+    providerModels: spawn.providerModels,
     providerName: spawn.providerName,
     codexHome: spawn.codexHome,
     tools: spawn.tools,
@@ -496,10 +532,10 @@ function buildChildEnv(base, session, extra = {}) {
 //   - skipDefaultModel: claude routes elsewhere → don't force the global --model.
 function resolveSpawnEnv(session) {
   const providerId = session && session.provider;
-  if (!providerId) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: null };
+  if (!providerId) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerModel: null, providerModels: [], providerName: null };
   const appType = (session.cli === 'codex') ? 'codex' : 'claude';
   const p = getProvider(appType, providerId);
-  if (!p) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: null };
+  if (!p) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerModel: null, providerModels: [], providerName: null };
   const cfg = parseConfig(p.settingsConfig);
 
   if (appType === 'claude') {
@@ -528,15 +564,17 @@ function resolveSpawnEnv(session) {
     // at a safe claude-* wire name so any resolution path the CLI takes lands
     // on a model the relay accepts. (buildChatSpawnArgs still substitutes the
     // main --model; this covers the tier-based sub-calls.)
-    if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) {
-      env.ANTHROPIC_MODEL = WIRE_DEFAULT_MODEL;
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-4-8';
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL = WIRE_DEFAULT_MODEL;
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-4-5';
-      env.ANTHROPIC_DEFAULT_FABLE_MODEL = WIRE_DEFAULT_MODEL; // claude-fable-5 untested on these relays → safe default
-      env.ANTHROPIC_SMALL_FAST_MODEL = 'claude-haiku-4-5';
-    }
-    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, aliasOnly: !!env.ANTHROPIC_BASE_URL && !src.ANTHROPIC_MODEL, providerName: p.name, tools: src.MULTICC_TOOLS };
+    if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) applyWireDefaults(env);
+    // Canonical wire model + the set of models this provider actually serves
+    // (post-remap), so the spawn path can reject stale per-session model values
+    // that are no longer valid (e.g. "astron-code-latest" after import-correction).
+    const providerModel = env.ANTHROPIC_MODEL || null;
+    const providerModels = uniqueModels([
+      env.ANTHROPIC_MODEL,
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL,
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL,
+    ]).filter(Boolean);
+    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, aliasOnly: !!env.ANTHROPIC_BASE_URL && !src.ANTHROPIC_MODEL, providerModel, providerModels, providerName: p.name, tools: src.MULTICC_TOOLS };
   }
 
   try {
@@ -553,9 +591,9 @@ function resolveSpawnEnv(session) {
       toml = withTomlModel(toml, session.model);
       fs.writeFileSync(path.join(home, 'config.toml'), toml);
     }
-    return { env: { CODEX_HOME: home }, skipDefaultModel: false, aliasOnly: false, providerName: p.name, codexHome: home };
+    return { env: { CODEX_HOME: home }, skipDefaultModel: false, aliasOnly: false, providerModel: null, providerModels: [], providerName: p.name, codexHome: home };
   } catch (_) {
-    return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: p.name };
+    return { env: {}, skipDefaultModel: false, aliasOnly: false, providerModel: null, providerModels: [], providerName: p.name };
   }
 }
 
@@ -740,59 +778,6 @@ async function probeRelayModels(baseEnv, candidates, cliCmd) {
   return { tested, accepted: tested.filter(o => o.ok).map(o => o.model) };
 }
 
-// Default tier → wire-model map applied when correcting an alias-only relay.
-const DEFAULT_TIER_MAP = {
-  ANTHROPIC_MODEL: WIRE_DEFAULT_MODEL,
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: WIRE_DEFAULT_MODEL,
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-  ANTHROPIC_DEFAULT_FABLE_MODEL: WIRE_DEFAULT_MODEL, // claude-fable-5 untested on these relays
-  ANTHROPIC_SMALL_FAST_MODEL: 'claude-haiku-4-5',
-};
-
-// Rewrite ONE cc-switch provider's settings_config in place so its model literals
-// are valid wire names (targets alias-only relays whose configured alias targets
-// are rejected, e.g. iFlytek's "astron-code-latest"). Backs up the DB first, then
-// UPDATEs the single row identified by the composite PK (id, app_type). Never
-// invoked automatically — only via the explicit POST .../fix-source endpoint.
-// `tierMap` overrides DEFAULT_TIER_MAP. Returns { ok, backup?, before?, after?, error? }.
-// `tierMap` overrides DEFAULT_TIER_MAP. `dryRun` reads the row and reports the
-// before/after WITHOUT backing up or writing. Returns { ok, dryRun, backup?, before?, after?, error? }.
-function fixProviderModels(appType, id, tierMap = {}, dryRun = false) {
-  if (appType !== 'claude') return { ok: false, error: 'only claude providers are supported' };
-  if (!ensureDatabase()) return { ok: false, error: 'better-sqlite3 unavailable' };
-  const overrides = { ...DEFAULT_TIER_MAP, ...tierMap };
-  let db;
-  try {
-    db = new Database(CC_DB, { readonly: dryRun, timeout: 15000 });
-    const row = db.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(id, appType);
-    if (!row) return { ok: false, error: 'provider row not found' };
-    const cfg = parseConfig(row.settings_config);
-    const env = { ...(cfg.env || {}) };
-    const before = {};
-    for (const k of Object.keys(overrides)) if (env[k] !== undefined) before[k] = env[k];
-    for (const [k, v] of Object.entries(overrides)) env[k] = v;
-    if (dryRun) return { ok: true, dryRun: true, before, after: overrides };
-
-    // Real write: back up first, then UPDATE the single row.
-    const bkDir = path.join(path.dirname(CC_DB), 'backups');
-    try { fs.mkdirSync(bkDir, { recursive: true }); } catch (_) {}
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const bkPath = path.join(bkDir, `cc-switch.db.${ts}`);
-    try { fs.copyFileSync(CC_DB, bkPath); } catch (e) { return { ok: false, error: `backup failed: ${e.message}` }; }
-    cfg.env = env;
-    const update = db.transaction(() =>
-      db.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?')
-        .run(JSON.stringify(cfg), id, appType));
-    update();
-    return { ok: true, backup: bkPath, before, after: overrides };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  } finally {
-    try { if (db) db.close(); } catch (_) {}
-  }
-}
-
 module.exports = {
   available,
   ccSwitchAvailable,
@@ -812,5 +797,4 @@ module.exports = {
   CODEX_HOMES_DIR,
   WIRE_DEFAULT_MODEL,
   probeRelayModels,
-  fixProviderModels,
 };
