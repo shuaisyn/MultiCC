@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { directoryPushState, pushDirectory } = require('./plugins/utils/git-push');
+const { directoryPushState, pushDirectory } = require('../plugins/utils/git-push');
 
 function git(cwd, args) {
   return execFileSync('git', args, {
