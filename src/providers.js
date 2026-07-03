@@ -7,8 +7,8 @@
 // list into multicc's store, then add / edit / delete freely here. multicc never
 // writes to cc-switch — not even at import. Alias-only relays (base URL but no
 // canonical ANTHROPIC_MODEL) get their alias target promoted to ANTHROPIC_MODEL
-// at spawn time (see applyWireDefaults in resolveSpawnEnv), so the source stays
-// untouched and the provider works.
+// at spawn time (see resolveSpawnEnv), so the source stays untouched and the
+// provider works.
 //
 // A provider's `settingsConfig` mirrors cc-switch's shape so the spawn-env logic
 // is uniform: claude → { env: { ANTHROPIC_* } }, codex → { auth, config(toml) }.
@@ -70,27 +70,6 @@ const APP_TYPES = ['claude', 'codex'];
 // to this claude-* wire name. Override via env if a relay prefers otherwise.
 const WIRE_DEFAULT_MODEL = process.env.CLAUDE_WIRE_DEFAULT_MODEL || 'claude-sonnet-4-5';
 
-// Promote the relay's own alias target (declared via ANTHROPIC_DEFAULT_*_MODEL)
-// to the canonical ANTHROPIC_MODEL. Do NOT clobber the tier vars with claude-*
-// names — alias-only relays reject those (iFlytek 10404). Used at spawn
-// (resolveSpawnEnv) so every model-resolution path the CLI takes lands on the
-// relay's real, accepted model id.
-function applyWireDefaults(env) {
-  if (env.ANTHROPIC_MODEL) return;
-  const tierTarget =
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL ||
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
-    env.ANTHROPIC_DEFAULT_FABLE_MODEL;
-  env.ANTHROPIC_MODEL = tierTarget || WIRE_DEFAULT_MODEL;
-}
-// True for claude configs that need the wire-default remap: a relay base URL is
-// set but no canonical ANTHROPIC_MODEL is declared (only alias targets).
-function isAliasOnlyClaude(cfg) {
-  const env = cfg && cfg.env;
-  return !!(env && env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL);
-}
-
 // ── multicc store (providers.json) ───────────────────────────────────────────
 
 function loadStore() {
@@ -107,8 +86,6 @@ function saveStore(list) {
   catch (e) { console.error('[multicc] save providers.json failed:', e.message); }
 }
 
-// The store is always usable (it's a local file). Distinct from cc-switch.
-function available() { return true; }
 function ccSwitchAvailable() { return fs.existsSync(CC_DB); }
 
 function parseConfig(s) {
@@ -383,9 +360,6 @@ function getProviderSummary(appType, id) {
   return p ? summarize(p) : null;
 }
 
-// Back-compat alias (server.js used getProviderRow previously).
-const getProviderRow = getProvider;
-
 function createProvider({ appType, name, baseUrl, authToken, model, models, useChatResponsesProxy, settingsConfig, aliasMap }) {
   if (!APP_TYPES.includes(appType)) throw new Error('appType must be claude or codex');
   if (!name || !String(name).trim()) throw new Error('name required');
@@ -611,9 +585,9 @@ function resolveSpawnEnv(session) {
     // (background/haiku tasks, ultracode subagents) all send a model the relay
     // accepts. The tier vars are left as-is (already the real model id).
     if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) {
-      // Find the real model id from tier vars (e.g. "astron-code-latest") —
-      // do NOT use applyWireDefaults which would inject claude-* names that
-      // relays like iFlytek reject with 10404 PathDomainError.
+      // Promote the relay's own real model id from a tier var (e.g.
+      // "astron-code-latest"). Never inject claude-* wire names — relays like
+      // iFlytek reject those with 10404 PathDomainError.
       const realModel = env.ANTHROPIC_DEFAULT_SONNET_MODEL
         || env.ANTHROPIC_DEFAULT_OPUS_MODEL
         || env.ANTHROPIC_DEFAULT_HAIKU_MODEL
@@ -844,11 +818,9 @@ async function probeRelayModels(baseEnv, candidates, cliCmd) {
 }
 
 module.exports = {
-  available,
   ccSwitchAvailable,
   listProviders,
   getProvider,
-  getProviderRow,
   getProviderSummary,
   createProvider,
   updateProvider,
