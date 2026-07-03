@@ -1202,6 +1202,7 @@ function buildDispatchContextPrompt(sessionId) {
   const targets = dispatchableSessionsFor(sessionId);
   if (!targets.length) return '';
   const current = persistedSessions.get(sessionId);
+  if (!current?.autoDispatch) return '';
   const ultra = normalizeEffort(current?.effort) === 'ultracode';
   const intro = ultra
     ? [
@@ -1811,6 +1812,7 @@ app.get('/api/sessions', (req, res) => {
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
         autoCommit: !!p.autoCommit,
+        autoDispatch: !!p.autoDispatch,
         cwd,
         createdAt: p.createdAt,
         mergeState: p.dirId ? mergeStateCached(directories.get(p.dirId), p) : null,
@@ -2366,6 +2368,7 @@ function createSessionRecord({ dir, cli, kind, label = null, id = null, ephemera
     effort: effortLevel || null, // null = follow Claude Code/provider default
     provider: providerId,  // cc-switch provider id; null = default login/subscription
     autoCommit: true,      // default: auto-commit & merge after task completion
+    autoDispatch: false,   // default: do NOT inject dispatch context prompt unless user opts in
     createdAt: new Date().toISOString(),
     worktreePath,
     branch,
@@ -2474,6 +2477,11 @@ app.patch('/api/sessions/:id', (req, res) => {
     // Auto-commit and merge worktree back to base branch after task completion.
     s.autoCommit = !!req.body.autoCommit;
     appendEvent(s.dirId, 'session_autocommit_changed', `${s.label || s.id} → ${s.autoCommit ? '自动提交合并' : '关闭'}`, s.id);
+  }
+  if (req.body.autoDispatch !== undefined) {
+    // Per-session toggle: inject dispatch context prompt only when explicitly enabled.
+    s.autoDispatch = !!req.body.autoDispatch;
+    appendEvent(s.dirId, 'session_autodispatch_changed', `${s.label || s.id} → ${s.autoDispatch ? '允许派发' : '禁止派发'}`, s.id);
   }
   if (req.body.provider !== undefined) {
     // Per-session cc-switch provider. '' / null clears the override → default login.
@@ -2674,15 +2682,16 @@ app.get('/api/sessions/:id', (req, res) => {
   const streaming = !!persisted?.streaming;
   const autoContinue = !!persisted?.autoContinue;
   const autoCommit = !!persisted?.autoCommit;
+  const autoDispatch = !!persisted?.autoDispatch;
   const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
   }
 });
 
