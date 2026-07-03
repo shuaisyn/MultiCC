@@ -721,6 +721,10 @@ const cliProviders = {
       if (session.model) cmd += ` --model ${session.model}`;
       const effort = cliEffortLevel(session);
       if (effort) cmd += ` --effort ${effort}`;
+      // Enable official ultracode (dynamic workflow orchestration) alongside --effort xhigh
+      if (normalizeEffort(session?.effort) === 'ultracode') {
+        cmd += ` --settings '{"ultracode":true}'`;
+      }
       if (session.cliSessionId) cmd += ` --session-id ${session.cliSessionId}`;
       return cmd;
     },
@@ -745,6 +749,10 @@ const cliProviders = {
       if (model) args.push('--model', model);
       const effort = cliEffortLevel(session);
       if (effort) args.push('--effort', effort);
+      // Enable official ultracode (dynamic workflow orchestration) alongside --effort xhigh
+      if (normalizeEffort(session?.effort) === 'ultracode') {
+        args.push('--settings', '{"ultracode":true}');
+      }
       if (CLAUDE_CHAT_DISALLOWED_TOOLS.length) {
         args.push('--disallowedTools', CLAUDE_CHAT_DISALLOWED_TOOLS.join(','));
       }
