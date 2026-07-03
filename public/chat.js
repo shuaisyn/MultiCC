@@ -2101,7 +2101,7 @@ function updateModelBtn() {
   if (!modelBtn) return;
   const shown = _sessionEffectiveModel || _sessionModel;
   const provider = providerShortName(_sessionProvider);
-  const model = shown ? modelShortName(shown) : tt('default');
+  const model = shown ? modelDisplayName(shown, _sessionProvider) : tt('default');
   const effort = effortShortName(_sessionEffectiveEffort || _sessionEffort);
   modelBtn.textContent = `🧠 ${provider} | ${model} | ${effort}`;
   modelBtn.style.display = '';
@@ -2225,19 +2225,67 @@ function providerAliasMap(providerId) {
   return entries.length ? Object.fromEntries(entries) : null;
 }
 
+// Ordered alias tiers [tier, {model,name}] for an alias-mapped relay, or [].
+// Each tier is a real, selectable wire model on these relays (the server honors
+// session.model === opus/sonnet/haiku/fable directly).
+function providerAliasTiers(providerId) {
+  const map = providerAliasMap(providerId);
+  if (!map) return [];
+  return ['opus', 'sonnet', 'haiku', 'fable']
+    .filter(t => map[t] && map[t].model)
+    .map(t => [t, map[t]]);
+}
+
+// Map a stored wire model id (e.g. claude-opus-4-8) back to its alias tier so the
+// tier dropdown pre-selects instead of dropping into the custom-id field.
+function normalizeModelForProvider(providerId, model) {
+  if (!model) return model;
+  for (const [t, m] of providerAliasTiers(providerId)) {
+    if (t === model) return model;
+    if (m.model === model) return t;
+  }
+  return model;
+}
+
 function buildModelChoices(providerId) {
+  // Alias-mapped relays: offer the tiers directly so each option can read
+  // "opus → claude-opus-4-8 (GLM5.2)".
+  const tiers = providerAliasTiers(providerId);
+  if (tiers.length) return ['', ...tiers.map(([t]) => t), '__custom__'];
   const opts = providerModelOptions(providerId);
   if (opts.length) return ['', ...opts, '__custom__'];
   if (_sessionCli === 'claude') return CLAUDE_MODEL_OPTIONS.map(o => o.value);
   return ['', '__custom__'];
 }
 
-function modelChoiceLabel(v) {
+function modelChoiceLabel(v, providerId) {
+  // Alias tier option: "opus → claude-opus-4-8 (GLM5.2)".
+  if (providerId) {
+    const map = providerAliasMap(providerId);
+    if (map && map[v] && map[v].model) {
+      const m = map[v];
+      return `${v} → ${m.model}${m.name ? ` (${m.name})` : ''}`;
+    }
+  }
   const named = CLAUDE_MODEL_OPTIONS.find(o => o.value === v);
   if (named) return named.labelKey ? tt(named.labelKey) : named.label;
   if (v === '') return tt('default');
   if (v === '__custom__') return tt('custom');
   return v;
+}
+
+// Display name for the model chip: prefer an alias-mapped relay's real model
+// name (e.g. GLM5.2), given either a tier key or a wire id it maps to.
+function modelDisplayName(model, providerId) {
+  if (!model) return model;
+  const map = providerAliasMap(providerId);
+  if (map) {
+    if (map[model] && map[model].name) return map[model].name;
+    for (const v of Object.values(map)) {
+      if (v && v.model === model && v.name) return v.name;
+    }
+  }
+  return modelShortName(model);
 }
 
 function showAIConfigPicker({ provider, model, effort }) {
@@ -2254,7 +2302,6 @@ function showAIConfigPicker({ provider, model, effort }) {
       <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Model</label>
       <select id="ai-model" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:8px;"></select>
       <input id="ai-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;">
-      <div id="ai-aliasmap" style="font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.7;display:none;"></div>
       <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">${_sessionCli === 'codex' ? 'Reasoning Level' : 'Effort'}</label>
       <select id="ai-effort" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;"></select>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -2267,7 +2314,6 @@ function showAIConfigPicker({ provider, model, effort }) {
     const providerSel = box.querySelector('#ai-provider');
     const modelSel = box.querySelector('#ai-model');
     const custom = box.querySelector('#ai-model-custom');
-    const aliasBox = box.querySelector('#ai-aliasmap');
     const effortSel = box.querySelector('#ai-effort');
     const effortLabel = box.querySelector('#ai-effort-label');
 
@@ -2293,35 +2339,21 @@ function showAIConfigPicker({ provider, model, effort }) {
     effortSel.value = effortOptions.some(o => o.value === effort) ? effort : 'medium';
 
     function rebuildModels(nextProvider, preferredModel) {
+      // For alias-mapped relays a stored wire id (claude-opus-4-8) maps back to
+      // its tier so the tier option pre-selects.
+      preferredModel = normalizeModelForProvider(nextProvider, preferredModel || '');
       const choices = buildModelChoices(nextProvider);
-      const keep = choices.includes(preferredModel || '') ? (preferredModel || '') : '';
       modelSel.innerHTML = '';
       for (const v of choices) {
         const opt = document.createElement('option');
         opt.value = v;
-        opt.textContent = modelChoiceLabel(v);
+        opt.textContent = modelChoiceLabel(v, nextProvider);
         modelSel.appendChild(opt);
       }
-      const isKnown = choices.includes(preferredModel || '');
-      modelSel.value = isKnown ? (preferredModel || '') : '__custom__';
-      custom.value = isKnown ? '' : (preferredModel || '');
+      const isKnown = choices.includes(preferredModel);
+      modelSel.value = isKnown ? preferredModel : '__custom__';
+      custom.value = isKnown ? '' : preferredModel;
       syncCustom();
-      renderAliasMap(nextProvider);
-    }
-    // Show the provider's alias→model correspondence (only for alias-only relays
-    // that declare one). These relays reject the alias targets as literal model
-    // ids, so multicc sends a safe claude-* wire name at spawn time — the mapping
-    // below is the configured backend model per tier, for reference.
-    function renderAliasMap(providerId) {
-      const map = providerAliasMap(providerId);
-      if (!map) { aliasBox.style.display = 'none'; aliasBox.innerHTML = ''; return; }
-      const order = ['opus', 'sonnet', 'haiku', 'fable'].filter(t => map[t]);
-      const lines = order.map(t => {
-        const m = map[t];
-        return `<div><b style="color:#c9d1d9;">${t}</b> → ${escapeHtml(m.model)}${m.name ? ` <span style="color:#6e7681;">(${escapeHtml(m.name)})</span>` : ''}</div>`;
-      });
-      aliasBox.innerHTML = `<div style="margin-bottom:4px;color:#6e7681;">别名 → 模型（实际发送 claude-* 线上名）</div>${lines.join('')}`;
-      aliasBox.style.display = '';
     }
     function syncCustom() {
       custom.style.display = modelSel.value === '__custom__' ? '' : 'none';

@@ -411,6 +411,9 @@ class _ProviderEditor extends StatefulWidget {
   State<_ProviderEditor> createState() => _ProviderEditorState();
 }
 
+const _aliasTiers = ['opus', 'sonnet', 'haiku', 'fable'];
+const _aliasTierLabels = {'opus': 'Opus', 'sonnet': 'Sonnet', 'haiku': 'Haiku', 'fable': 'Fable'};
+
 class _ProviderEditorState extends State<_ProviderEditor> {
   late final TextEditingController _name;
   late final TextEditingController _baseUrl;
@@ -419,6 +422,9 @@ class _ProviderEditorState extends State<_ProviderEditor> {
   late final TextEditingController _models;
   late String _appType;
   late bool _useChatResponsesProxy;
+  // 模型映射（分级覆盖，仅 claude）：tier → 模型 id / 显示名 输入框。
+  late final Map<String, TextEditingController> _aliasModel;
+  late final Map<String, TextEditingController> _aliasName;
   bool _obscureKey = true;
   bool _saving = false;
   String? _err;
@@ -440,6 +446,17 @@ class _ProviderEditorState extends State<_ProviderEditor> {
         .toList();
     _models = TextEditingController(text: modelOptions.join('\n'));
     _useChatResponsesProxy = p?['useChatResponsesProxy'] == true;
+    final aliasMap = (p?['aliasMap'] as Map?)?.cast<String, dynamic>() ?? {};
+    _aliasModel = {
+      for (final t in _aliasTiers)
+        t: TextEditingController(
+            text: (aliasMap[t] as Map?)?['model'] as String? ?? ''),
+    };
+    _aliasName = {
+      for (final t in _aliasTiers)
+        t: TextEditingController(
+            text: (aliasMap[t] as Map?)?['name'] as String? ?? ''),
+    };
   }
 
   @override
@@ -449,7 +466,23 @@ class _ProviderEditorState extends State<_ProviderEditor> {
     _token.dispose();
     _model.dispose();
     _models.dispose();
+    for (final c in _aliasModel.values) {
+      c.dispose();
+    }
+    for (final c in _aliasName.values) {
+      c.dispose();
+    }
     super.dispose();
+  }
+
+  Map<String, dynamic> _aliasMapPayload() {
+    final map = <String, dynamic>{};
+    for (final t in _aliasTiers) {
+      final model = _aliasModel[t]!.text.trim();
+      if (model.isEmpty) continue;
+      map[t] = {'model': model, 'name': _aliasName[t]!.text.trim()};
+    }
+    return map;
   }
 
   List<String> _modelList() {
@@ -477,6 +510,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
           model: _model.text.trim(),
           models: _modelList(),
           useChatResponsesProxy: _useChatResponsesProxy,
+          aliasMap: _appType == 'claude' ? _aliasMapPayload() : null,
         );
       } else {
         await widget.manage.createProvider(
@@ -487,6 +521,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
           model: _model.text.trim(),
           models: _modelList(),
           useChatResponsesProxy: _useChatResponsesProxy,
+          aliasMap: _appType == 'claude' ? _aliasMapPayload() : null,
         );
       }
       if (mounted) Navigator.pop(context, true);
@@ -555,6 +590,17 @@ class _ProviderEditorState extends State<_ProviderEditor> {
             const SizedBox(height: 14),
             const _FieldLabel('可用模型列表（每行一个，可选）'),
             _input(_models, hint: 'deepseek-chat\ndeepseek-reasoner', mono: true, maxLines: 3),
+            if (_appType == 'claude') ...[
+              const SizedBox(height: 14),
+              const _FieldLabel('模型映射（分级覆盖，可选）'),
+              const Text('让 Claude Code 内部 opus/sonnet/haiku/fable 分级请求路由到该 provider 的指定模型；留空则不覆盖该级别。',
+                  style: TextStyle(color: AppColors.faint, fontSize: 11.5, height: 1.4)),
+              const SizedBox(height: 8),
+              for (final t in _aliasTiers) ...[
+                _aliasTierRow(t),
+                const SizedBox(height: 8),
+              ],
+            ],
             if (_appType == 'codex') ...[
               const SizedBox(height: 10),
               SwitchListTile(
@@ -586,6 +632,26 @@ class _ProviderEditorState extends State<_ProviderEditor> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _aliasTierRow(String tier) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 52,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(_aliasTierLabels[tier]!,
+                style: const TextStyle(color: AppColors.muted, fontSize: 12.5)),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: _input(_aliasModel[tier]!, hint: '模型 id（可选）', mono: true)),
+        const SizedBox(width: 8),
+        Expanded(child: _input(_aliasName[tier]!, hint: '显示名（可选）')),
+      ],
     );
   }
 

@@ -180,6 +180,7 @@ class ManageService {
     String model = '',
     List<String> models = const [],
     bool useChatResponsesProxy = false,
+    Map<String, dynamic>? aliasMap,
   }) async {
     final res = await http
         .post(Uri.parse(_url('/api/providers')),
@@ -192,6 +193,7 @@ class ManageService {
               'model': model,
               'models': models,
               'useChatResponsesProxy': useChatResponsesProxy,
+              if (aliasMap != null) 'aliasMap': aliasMap,
             }))
         .timeout(const Duration(seconds: 15));
     if (res.statusCode >= 400) _throw(res);
@@ -206,6 +208,7 @@ class ManageService {
     String? model,
     List<String>? models,
     bool? useChatResponsesProxy,
+    Map<String, dynamic>? aliasMap,
   }) async {
     final body = <String, dynamic>{};
     if (name != null) body['name'] = name;
@@ -216,6 +219,7 @@ class ManageService {
     if (useChatResponsesProxy != null) {
       body['useChatResponsesProxy'] = useChatResponsesProxy;
     }
+    if (aliasMap != null) body['aliasMap'] = aliasMap;
     final res = await http
         .patch(Uri.parse(_url('/api/providers/$appType/$id')),
             headers: _headers, body: jsonEncode(body))

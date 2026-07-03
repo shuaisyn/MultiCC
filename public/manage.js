@@ -865,7 +865,7 @@ function showSessionMenu(ev, sessionId) {
     { label: 'Diff', onclick: () => showDiff(sessionId) },
   ];
   if ((s?.cli || 'claude') === 'claude') {
-    items.push({ label: tt('changeModel', { model: modelShortName(s?.model || '') }), onclick: () => changeSessionModel(sessionId) });
+    items.push({ label: tt('changeModel', { model: modelDisplayName(s?.model || '', s?.provider) }), onclick: () => changeSessionModel(sessionId) });
   }
   items.push({ label: s?.rolePrompt ? tt('rolePromptSet') : tt('rolePrompt'), onclick: () => changeSessionRole(sessionId) });
   items.push({ sep: true });
@@ -1089,7 +1089,7 @@ function renderDirPreview(dirId, dirSessions) {
   const sessionSummary = latestSession ? _workspaceSummaries.get(latestSession.id) : null;
   const sessionActive = sessionInfo && sessionInfo.active;
   const sessionLabel = sessionInfo ? (sessionInfo.label || sessionInfo.id) : null;
-  const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelShortName(sessionInfo.effectiveModel || sessionInfo.model) : '';
+  const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelDisplayName(sessionInfo.effectiveModel || sessionInfo.model, sessionInfo.provider) : '';
 
   // 活动块内容
   let activityContent = '';
@@ -1494,7 +1494,7 @@ function renderSessionRow(s) {
     ? tt('mergeReadyTitle', { detail: mergeDetail })
     : tt('mergeWorktreeTitle');
   const displayName = s.label || s.id;
-  const model = s.effectiveModel ? modelShortName(s.effectiveModel) : '';
+  const model = s.effectiveModel ? modelDisplayName(s.effectiveModel, s.provider) : '';
   // Resolve provider display name from cached provider list (may be async-loaded;
   // falls back to the raw id or nothing).
   const provInfo = s.provider ? (_providerData.providers || []).find(p => p.id === s.provider) : null;
@@ -1843,9 +1843,51 @@ function modelShortName(model) {
   return opt ? (opt.labelKey ? tt(opt.labelKey) : opt.label) : model;
 }
 
+// aliasMap (tier→{model,name}) for a provider id from the cached provider list,
+// or null. Alias-mapped relays declare one wire model per Claude tier.
+function providerAliasMap(providerId) {
+  if (!providerId) return null;
+  const p = (_providerData.providers || []).find(o => o.id === providerId);
+  return p && p.aliasMap && Object.keys(p.aliasMap).length ? p.aliasMap : null;
+}
+
+// Ordered alias tiers [tier,{model,name}] for an alias-mapped relay, or [].
+function providerAliasTiers(providerId) {
+  const map = providerAliasMap(providerId);
+  if (!map) return [];
+  return ['opus', 'sonnet', 'haiku', 'fable']
+    .filter(t => map[t] && map[t].model)
+    .map(t => [t, map[t]]);
+}
+
+// Map a stored wire model id (e.g. claude-opus-4-8) back to its alias tier so
+// the tier dropdown pre-selects instead of dropping into the custom-id field.
+function normalizeModelForProvider(providerId, model) {
+  if (!model) return model;
+  for (const [t, m] of providerAliasTiers(providerId)) {
+    if (t === model) return model;
+    if (m.model === model) return t;
+  }
+  return model;
+}
+
+// Display name preferring an alias-mapped relay's real model name (e.g. GLM5.2),
+// given either a tier key or a wire model id it maps to.
+function modelDisplayName(model, providerId) {
+  if (!model) return model;
+  const map = providerAliasMap(providerId);
+  if (map) {
+    if (map[model] && map[model].name) return map[model].name;
+    for (const v of Object.values(map)) {
+      if (v && v.model === model && v.name) return v.name;
+    }
+  }
+  return modelShortName(model);
+}
+
 // WebView-safe model picker (same pattern as _dialog). Resolves to '' (default),
 // a model string, or null (cancelled).
-function showModelPicker({ title = tt('modelTitle'), okText = tt('create'), current = '' } = {}) {
+function showModelPicker({ title = tt('modelTitle'), okText = tt('create'), current = '', providerId = '' } = {}) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -1856,21 +1898,34 @@ function showModelPicker({ title = tt('modelTitle'), okText = tt('create'), curr
     msg.textContent = title;
     box.appendChild(msg);
 
-    const isKnown = CLAUDE_MODEL_OPTIONS.some(o => o.value === current);
+    // Alias-mapped relays: list the tiers directly, each reading
+    // "opus → claude-opus-4-8 (GLM5.2)"; map a stored wire id back to its tier.
+    const tiers = providerAliasTiers(providerId);
+    const optionList = tiers.length
+      ? [
+          ...tiers.map(([t, m]) => ({
+            value: t,
+            label: `${t} → ${m.model}${m.name ? ` (${m.name})` : ''}`,
+          })),
+          { value: '__custom__', labelKey: 'custom' },
+        ]
+      : CLAUDE_MODEL_OPTIONS;
+    const cur = tiers.length ? normalizeModelForProvider(providerId, current) : current;
+    const isKnown = optionList.some(o => o.value === cur);
     const select = document.createElement('select');
     select.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
-    for (const o of CLAUDE_MODEL_OPTIONS) {
+    for (const o of optionList) {
       const opt = document.createElement('option');
       opt.value = o.value; opt.textContent = o.labelKey ? tt(o.labelKey) : o.label;
       select.appendChild(opt);
     }
-    select.value = isKnown ? current : '__custom__';
+    select.value = isKnown ? cur : '__custom__';
     box.appendChild(select);
 
     const custom = document.createElement('input');
     custom.type = 'text';
     custom.placeholder = '模型 ID，如 claude-opus-4-8';
-    custom.value = isKnown ? '' : current;
+    custom.value = isKnown ? '' : cur;
     custom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;';
     box.appendChild(custom);
     const syncCustom = () => {
@@ -1980,13 +2035,28 @@ async function fetchAgentPresetPrompt(id) {
 // Build the <select> options for a model dropdown based on the selected
 // provider's modelOptions. Falls back to CLAUDE_MODEL_OPTIONS when no
 // provider or a provider without modelOptions is chosen.
-function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProviderId, isClaude, aliasBox) {
+function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProviderId, isClaude) {
   const prev = modelSelect.value;
   modelSelect.innerHTML = '';
   const prov = providers.find(p => p.id === selectedProviderId);
-  const opts = (prov && prov.modelOptions && prov.modelOptions.length)
-    ? prov.modelOptions.map(m => ({ value: m, label: m }))
-    : (isClaude ? CLAUDE_MODEL_OPTIONS : []);
+  // Alias-mapped relays: offer the tiers directly, each option reading
+  // "opus → claude-opus-4-8 (GLM5.2)". The tier key is the value — the server
+  // honors session.model === opus/sonnet/haiku/fable as a wire model.
+  const aliasMap = prov && prov.aliasMap ? prov.aliasMap : null;
+  const tiers = aliasMap
+    ? ['opus', 'sonnet', 'haiku', 'fable'].filter(t => aliasMap[t] && aliasMap[t].model)
+    : [];
+  let opts;
+  if (tiers.length) {
+    opts = tiers.map(t => {
+      const m = aliasMap[t];
+      return { value: t, label: `${t} → ${m.model}${m.name ? ` (${m.name})` : ''}` };
+    });
+  } else if (prov && prov.modelOptions && prov.modelOptions.length) {
+    opts = prov.modelOptions.map(m => ({ value: m, label: m }));
+  } else {
+    opts = isClaude ? CLAUDE_MODEL_OPTIONS : [];
+  }
   for (const o of opts) {
     const opt = document.createElement('option');
     opt.value = o.value; opt.textContent = o.labelKey ? tt(o.labelKey) : o.label;
@@ -2002,22 +2072,6 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   const syncCustom = () => { modelCustom.style.display = modelSelect.value === '__custom__' ? '' : 'none'; };
   syncCustom();
   modelSelect.onchange = () => { syncCustom(); if (modelSelect.value === '__custom__') modelCustom.focus(); };
-  // Alias↔model mapping (alias-only relays only). These relays reject the alias
-  // targets as literal ids, so multicc sends a claude-* wire name; this shows the
-  // configured backend model per tier for reference.
-  if (aliasBox) {
-    const map = prov && prov.aliasMap ? Object.entries(prov.aliasMap).filter(([, v]) => v && v.model) : [];
-    if (map.length) {
-      const order = ['opus', 'sonnet', 'haiku', 'fable'];
-      map.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
-      aliasBox.innerHTML = '<div style="margin-bottom:4px;color:#6e7681;">别名 → 模型（实际发送 claude-* 线上名）</div>' +
-        map.map(([t, m]) => `<div><b style="color:#c9d1d9;">${t}</b> → ${escapeHtml(m.model)}${m.name ? ` <span style="color:#6e7681;">(${escapeHtml(m.name)})</span>` : ''}</div>`).join('');
-      aliasBox.style.display = '';
-    } else {
-      aliasBox.style.display = 'none';
-      aliasBox.innerHTML = '';
-    }
-  }
 }
 
 // Single unified creation dialog (name + role + provider + model)
@@ -2142,16 +2196,12 @@ function showCreateSessionDialog({ cli, kind, providers = [], isClaude = true })
     modelCustom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:6px;display:none;box-sizing:border-box;';
     box.appendChild(modelCustom);
 
-    const aliasBox = document.createElement('div');
-    aliasBox.style.cssText = 'font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.7;display:none;box-sizing:border-box;';
-    box.appendChild(aliasBox);
-
     // Initial model options (no provider selected → Claude defaults or empty for Codex)
-    rebuildModelOptions(modelSelect, modelCustom, providers, '', isClaude, aliasBox);
+    rebuildModelOptions(modelSelect, modelCustom, providers, '', isClaude);
 
     // Provider → Model linkage: when provider changes, rebuild model list
     provSelect.addEventListener('change', () => {
-      rebuildModelOptions(modelSelect, modelCustom, providers, provSelect.value, isClaude, aliasBox);
+      rebuildModelOptions(modelSelect, modelCustom, providers, provSelect.value, isClaude);
     });
 
     // ── Buttons ──
@@ -2204,6 +2254,7 @@ async function changeSessionModel(id) {
     title: tt('modelTitle'),
     okText: tt('save'),
     current: sess.model || '',
+    providerId: sess.provider || '',
   });
   if (picked === null) return; // cancelled
   try {
@@ -2218,7 +2269,7 @@ async function changeSessionModel(id) {
       return;
     }
     const hint = sess.kind === 'terminal' ? '（重启会话后生效）' : '（下一轮对话生效）';
-    showToast(`模型已切换为 ${modelShortName(picked)} ${hint}`);
+    showToast(`模型已切换为 ${modelDisplayName(picked, sess.provider)} ${hint}`);
     loadDashboard();
   } catch (err) {
     showToast(`Error: ${err.message}`, true);
@@ -3424,7 +3475,7 @@ async function loadCronTasks() {
       const sessionSummary = _getCronSessionSummary(t.lastSessionId);
       const sessionActive = sessionInfo && sessionInfo.active;
       const sessionLabel = sessionInfo ? (sessionInfo.label || sessionInfo.id) : null;
-      const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelShortName(sessionInfo.effectiveModel || sessionInfo.model) : '';
+      const sessionModel = sessionInfo && (sessionInfo.effectiveModel || sessionInfo.model) ? modelDisplayName(sessionInfo.effectiveModel || sessionInfo.model, sessionInfo.provider) : '';
 
       // 活动状态
       const statusColor = t.lastStatus === 'ok' ? 'var(--accent)' : (t.lastStatus ? 'var(--danger)' : 'var(--faint)');
@@ -5211,8 +5262,37 @@ function syncNewProviderProxyVisibility() {
   const appType = document.getElementById('prov-new-apptype');
   const row = document.getElementById('prov-new-proxy-row');
   if (row && appType) row.style.display = appType.value === 'codex' ? '' : 'none';
+  const aliasRow = document.getElementById('prov-new-alias-row');
+  if (aliasRow && appType) aliasRow.style.display = appType.value === 'claude' ? '' : 'none';
 }
 document.getElementById('prov-new-apptype')?.addEventListener('change', syncNewProviderProxyVisibility);
+
+// Reads the 4 tier rows (opus/sonnet/haiku/fable) of a model-mapping editor and
+// returns { opus: {model, name}, ... } with only non-empty tiers included.
+// `prefix` is the DOM id prefix shared by all tier inputs, e.g. 'prov-new-alias'
+// for ids like 'prov-new-alias-opus-model' / 'prov-new-alias-opus-name'.
+function readAliasMapFields(prefix, root) {
+  const scope = root || document;
+  const map = {};
+  for (const tier of ['opus', 'sonnet', 'haiku', 'fable']) {
+    const model = (scope.querySelector(`#${prefix}-${tier}-model`)?.value || '').trim();
+    const name = (scope.querySelector(`#${prefix}-${tier}-name`)?.value || '').trim();
+    if (model) map[tier] = { model, name };
+  }
+  return map;
+}
+
+// Sets the 4 tier rows' input values from an aliasMap ({tier: {model, name}}).
+function fillAliasMapFields(prefix, root, aliasMap) {
+  const scope = root || document;
+  for (const tier of ['opus', 'sonnet', 'haiku', 'fable']) {
+    const entry = (aliasMap && aliasMap[tier]) || {};
+    const modelEl = scope.querySelector(`#${prefix}-${tier}-model`);
+    const nameEl = scope.querySelector(`#${prefix}-${tier}-name`);
+    if (modelEl) modelEl.value = entry.model || '';
+    if (nameEl) nameEl.value = entry.name || '';
+  }
+}
 
 function applyProviderPreset() {
   const presetSel = document.getElementById('prov-new-preset');
@@ -5475,6 +5555,7 @@ async function createProvider() {
   };
   body.models = providerModelList(body.model, document.getElementById('prov-new-models')?.value || '');
   body.useChatResponsesProxy = document.getElementById('prov-new-chat-proxy')?.checked === true;
+  if (body.appType === 'claude') body.aliasMap = readAliasMapFields('prov-new-alias');
   if (!body.name) { if (status) { status.textContent = '名称必填'; status.className = 'status-text err'; } return; }
   try {
     const res = await fetch('/api/providers' + tokenQS('?'), {
@@ -5490,6 +5571,7 @@ async function createProvider() {
     document.getElementById('prov-new-model').value = '';
     document.getElementById('prov-new-models').value = '';
     document.getElementById('prov-new-chat-proxy').checked = false;
+    fillAliasMapFields('prov-new-alias', document, null);
     const presetSel = document.getElementById('prov-new-preset');
     if (presetSel) presetSel.value = '';
     loadProviders();
@@ -5519,6 +5601,23 @@ function editProvider(appType, id) {
          style="flex:1;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;box-sizing:border-box">
        <button type="button" class="btn eye-toggle" style="padding:4px 8px;font-size:12px;flex-shrink:0" title="显示/隐藏 Key">👁</button>
      </div></label>`;
+  // Model-mapping section (claude only): opus/sonnet/haiku/fable → wire model + optional display name.
+  const aliasSection = appType !== 'claude' ? '' : (() => {
+    const tierLabel = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' };
+    const rows = ['opus', 'sonnet', 'haiku', 'fable'].map(t => {
+      const entry = (p.aliasMap && p.aliasMap[t]) || {};
+      const inputCss = 'flex:1;min-width:0;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12.5px;padding:7px 9px;outline:none;box-sizing:border-box';
+      return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+        <span style="width:48px;flex-shrink:0;font-size:12px;color:var(--faint)">${tierLabel[t]}</span>
+        <input id="ep-alias-${t}-model" type="text" value="${escapeHtml(entry.model || '')}" placeholder="模型 id（可选）" autocomplete="off" style="${inputCss}">
+        <input id="ep-alias-${t}-name" type="text" value="${escapeHtml(entry.name || '')}" placeholder="显示名（可选）" autocomplete="off" style="${inputCss}">
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:10px">
+      <div style="font-size:12px;color:var(--faint);margin-bottom:6px">模型映射（分级覆盖，可选）</div>
+      ${rows}
+    </div>`;
+  })();
   overlay.innerHTML = `
     <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:440px;max-width:92vw;">
       <div style="font-size:14px;color:#c9d1d9;font-weight:600;margin-bottom:14px">编辑 Provider · ${escapeHtml(p.appType)}</div>
@@ -5526,6 +5625,7 @@ function editProvider(appType, id) {
       ${field('Base URL', p.baseUrl, 'https://…（留空=官方/订阅）')}
       ${field('Model', p.model, '可选')}
       ${textarea('模型列表', (p.modelOptions || []).join('\n'), '每行一个模型；留空则只使用 Model')}
+      ${aliasSection}
       ${appType === 'codex' ? `<label style="display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin-bottom:10px">
         <input id="ep-chat-proxy" type="checkbox" ${p.useChatResponsesProxy ? 'checked' : ''}> OpenAI chat 协议转 response 协议
       </label>` : ''}
@@ -5549,6 +5649,7 @@ function editProvider(appType, id) {
       models: providerModelList(val('Model'), val('模型列表')),
     };
     if (appType === 'codex') body.useChatResponsesProxy = overlay.querySelector('#ep-chat-proxy')?.checked === true;
+    if (appType === 'claude') body.aliasMap = readAliasMapFields('ep-alias', overlay);
     const tok = val('API Key');
     if (tok) body.authToken = tok;  // blank = keep existing
     const st = overlay.querySelector('#ep-status');

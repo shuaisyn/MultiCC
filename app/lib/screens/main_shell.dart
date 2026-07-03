@@ -390,6 +390,10 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
   // 从SharedPreferences加载目录顺序
   static const String _dirOrderKey = 'directory_order';
 
+  // Cached provider list (with aliasMap) so session model labels in the KPI
+  // sheet can show an alias-mapped relay's real name (e.g. GLM5.2).
+  List<Map<String, dynamic>> _providers = [];
+
   Future<List<String>?> _loadDirOrder() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getStringList(_dirOrderKey);
@@ -400,9 +404,22 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
     await prefs.setStringList(_dirOrderKey, order);
   }
 
+  Future<void> _loadProviders() async {
+    try {
+      final d = await ManageService(settings: widget.settings).fetchProviders();
+      if (!mounted) return;
+      setState(() {
+        _providers = (d['providers'] as List? ?? [])
+            .map((e) => (e as Map).cast<String, dynamic>())
+            .toList();
+      });
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
+    _loadProviders();
   }
 
   @override
@@ -474,7 +491,7 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
           preferredSize: const Size.fromHeight(57),
           child: Column(
             children: [
-              _KpiRow(settings: widget.settings),
+              _KpiRow(settings: widget.settings, providers: _providers),
               const Divider(height: 1, color: Color(0xFF20242b)),
             ],
           ),
@@ -840,7 +857,8 @@ class _DirectoryListBodyState extends State<_DirectoryListBody> {
 
 class _KpiRow extends StatelessWidget {
   final SettingsService settings;
-  const _KpiRow({required this.settings});
+  final List<Map<String, dynamic>> providers;
+  const _KpiRow({required this.settings, this.providers = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -863,6 +881,7 @@ class _KpiRow extends StatelessWidget {
               mgr.activeSessions,
               '🟢',
               emptyText: '最近 12 小时没有使用过的会话',
+              providers: providers,
             ),
           ),
           const SizedBox(width: 8),
@@ -877,6 +896,7 @@ class _KpiRow extends StatelessWidget {
               mgr.waitingSessions,
               '⏳',
               emptyText: '没有等待输入的会话',
+              providers: providers,
             ),
           ),
           const SizedBox(width: 8),
@@ -969,6 +989,7 @@ void _showSessionSheet(
   List<Session> sessions,
   String prefix, {
   String emptyText = '没有符合的会话',
+  List<Map<String, dynamic>> providers = const [],
 }) {
   String dirName(String? dirId) {
     for (final d in mgr.directories) {
@@ -1084,11 +1105,24 @@ void _showSessionSheet(
                       lastInteraction,
                       locale: 'en_short',
                     );
-                    final model = s.effectiveModel?.isNotEmpty == true
-                        ? modelShortNameForCli(s.cli, s.effectiveModel)
-                        : (s.model?.isNotEmpty == true
-                              ? modelShortNameForCli(s.cli, s.model)
-                              : '');
+                    final modelRaw = s.effectiveModel?.isNotEmpty == true
+                        ? s.effectiveModel
+                        : (s.model?.isNotEmpty == true ? s.model : null);
+                    Map? modelAlias;
+                    if (modelRaw != null && s.provider?.isNotEmpty == true) {
+                      final m = providers.firstWhere(
+                        (p) => p['id'] == s.provider,
+                        orElse: () => {},
+                      )['aliasMap'];
+                      if (m is Map) modelAlias = m;
+                    }
+                    final model = modelRaw == null
+                        ? ''
+                        : modelDisplayName(
+                            s.cli,
+                            modelRaw,
+                            aliasMap: modelAlias,
+                          );
                     final effort = effortShortNameForCli(
                       s.cli,
                       s.effectiveEffort ?? s.effort,
@@ -3027,11 +3061,20 @@ class SessionCard extends StatelessWidget {
     final subtitle = session.label?.isNotEmpty == true
         ? session.id
         : session.shortCwd;
-    final model = session.effectiveModel?.isNotEmpty == true
-        ? modelShortNameForCli(session.cli, session.effectiveModel)
-        : (session.model?.isNotEmpty == true
-              ? modelShortNameForCli(session.cli, session.model)
-              : '');
+    final modelRaw = session.effectiveModel?.isNotEmpty == true
+        ? session.effectiveModel
+        : (session.model?.isNotEmpty == true ? session.model : null);
+    Map? modelAlias;
+    if (modelRaw != null && session.provider?.isNotEmpty == true) {
+      final m = providers.firstWhere(
+        (p) => p['id'] == session.provider,
+        orElse: () => {},
+      )['aliasMap'];
+      if (m is Map) modelAlias = m;
+    }
+    final model = modelRaw == null
+        ? ''
+        : modelDisplayName(session.cli, modelRaw, aliasMap: modelAlias);
     final effort = effortShortNameForCli(
       session.cli,
       session.effectiveEffort ?? session.effort,
@@ -3867,6 +3910,28 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
         break;
       }
     }
+    // Alias-mapped relays (e.g. iFlytek): expose the tiers directly, each option
+    // reading "opus → claude-opus-4-8 (GLM5.2)". The tier key is the value — the
+    // server honors session.model === opus/sonnet/haiku/fable as a wire model.
+    final map = prov?['aliasMap'];
+    if (map is Map) {
+      const order = ['opus', 'sonnet', 'haiku', 'fable'];
+      final tiers = <MapEntry<String, String>>[];
+      for (final t in order) {
+        final v = map[t];
+        if (v is Map && v['model'] != null) {
+          final m = v['model'].toString();
+          final name = v['name']?.toString();
+          tiers.add(
+            MapEntry(
+              t,
+              '$t → $m${(name != null && name.isNotEmpty) ? ' ($name)' : ''}',
+            ),
+          );
+        }
+      }
+      if (tiers.isNotEmpty) return tiers;
+    }
     final opts = prov?['modelOptions'];
     if (opts is List && opts.isNotEmpty) {
       return opts
@@ -3878,71 +3943,6 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
     //  - Claude: fall back to standard model list
     //  - Codex: empty list (custom model entry only), matching web behavior
     return _isClaude ? kClaudeModelOptions : const [];
-  }
-
-  /// Alias↔model mapping for the picked provider (alias-only relays only, e.g.
-  /// iFlytek). Same logic as chat_screen.dart _aliasMapWidget. Null when absent.
-  Widget? get _aliasMapWidget {
-    final id = _pickedProvider;
-    if (id == null || id.isEmpty) return null;
-    Map<String, dynamic>? prov;
-    for (final p in widget.providers) {
-      if (p['id'] == id) {
-        prov = p;
-        break;
-      }
-    }
-    final map = prov?['aliasMap'];
-    if (map is! Map) return null;
-    const order = ['opus', 'sonnet', 'haiku', 'fable'];
-    final tiers = <MapEntry<String, Map>>[];
-    for (final t in order) {
-      final v = map[t];
-      if (v is Map && v['model'] != null) tiers.add(MapEntry(t, v));
-    }
-    if (tiers.isEmpty) return null;
-    return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.panel,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.line),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '别名 → 模型（实际发送 claude-* 线上名）',
-            style: TextStyle(color: AppColors.faint, fontSize: 11),
-          ),
-          const SizedBox(height: 4),
-          ...tiers.map((e) {
-            final name = e.value['name']?.toString();
-            return Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text.rich(
-                TextSpan(
-                  style: const TextStyle(color: AppColors.muted, fontSize: 11),
-                  children: [
-                    TextSpan(
-                      text: '${e.key} → ',
-                      style: const TextStyle(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    TextSpan(text: '${e.value['model']}'),
-                    if (name != null && name.isNotEmpty)
-                      TextSpan(text: ' ($name)'),
-                  ],
-                ),
-              ),
-            );
-          }),
-        ],
-      ),
-    );
   }
 
   Future<void> _pickPreset() async {
@@ -4048,7 +4048,6 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
   @override
   Widget build(BuildContext context) {
     final modelOptions = _currentModelOptions;
-    final aliasWidget = _aliasMapWidget;
     return AlertDialog(
       backgroundColor: const Color(0xFF0f1115),
       title: Text(
@@ -4188,7 +4187,6 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
                 autofocus: true,
               ),
             ],
-            if (aliasWidget != null) aliasWidget,
             const SizedBox(height: 12),
             Text(
               _isClaude ? 'Effort' : 'Reasoning Level',

@@ -170,6 +170,29 @@ String modelShortNameForCli(SessionCli cli, String? model) {
   return cli == SessionCli.claude ? claudeModelShortName(model) : (model ?? '');
 }
 
+/// Display name for a session's model. For an alias-mapped relay, prefer the
+/// provider's real model name (e.g. GLM5.2) over the claude-* alias: [aliasMap]
+/// is the picked provider's `aliasMap` (tier → {model, name}); [model] may be a
+/// tier key ('opus') or a wire model id a tier maps to ('claude-opus-4-8').
+/// Falls back to [modelShortNameForCli] when no alias name applies.
+String modelDisplayName(SessionCli cli, String? model, {Map? aliasMap}) {
+  if (model == null || model.isEmpty) return modelShortNameForCli(cli, model);
+  if (aliasMap != null) {
+    final direct = aliasMap[model];
+    if (direct is Map) {
+      final n = direct['name']?.toString();
+      if (n != null && n.isNotEmpty) return n;
+    }
+    for (final v in aliasMap.values) {
+      if (v is Map && v['model']?.toString() == model) {
+        final n = v['name']?.toString();
+        if (n != null && n.isNotEmpty) return n;
+      }
+    }
+  }
+  return modelShortNameForCli(cli, model);
+}
+
 String effortShortNameForCli(SessionCli cli, String? effort) {
   final v = (effort == null || effort.isEmpty) ? 'medium' : effort;
   if (cli == SessionCli.codex) {

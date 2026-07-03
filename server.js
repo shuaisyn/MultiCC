@@ -4631,6 +4631,7 @@ app.post('/api/providers', (req, res) => {
       models: req.body.models,
       useChatResponsesProxy: req.body.useChatResponsesProxy,
       settingsConfig: req.body.settingsConfig,
+      aliasMap: req.body.aliasMap,
     });
     res.json({ ok: true, ...r });
   } catch (e) { res.status(400).json({ error: e.message }); }
@@ -4646,6 +4647,7 @@ app.patch('/api/providers/:appType/:id', (req, res) => {
       models: req.body.models,
       useChatResponsesProxy: req.body.useChatResponsesProxy,
       settingsConfig: req.body.settingsConfig,
+      aliasMap: req.body.aliasMap,
     });
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }

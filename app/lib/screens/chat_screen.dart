@@ -518,25 +518,42 @@ class _ModelChipState extends State<_ModelChip> {
     return id.length > 8 ? id.substring(0, 8) : id;
   }
 
-  /// Effective model label: prefer the server-resolved effectiveModel.
+  /// The picked provider's aliasMap (tier → {model, name}), or null when absent.
+  Map? _aliasMapFor(String? providerId) {
+    if (providerId == null || providerId.isEmpty) return null;
+    for (final p in _providers) {
+      if (p['id'] == providerId) {
+        final map = p['aliasMap'];
+        return map is Map ? map : null;
+      }
+    }
+    return null;
+  }
+
+  /// Effective model label: prefer the server-resolved effectiveModel, and for
+  /// alias-mapped relays show the provider's real model name (e.g. GLM5.2)
+  /// instead of the claude-* alias.
   String _modelLabel(Session? s) {
     if (s == null) return '默认';
+    String? model;
     if (s.effectiveModel != null && s.effectiveModel!.isNotEmpty) {
-      return modelShortNameForCli(s.cli, s.effectiveModel);
-    }
-    if (s.model != null && s.model!.isNotEmpty) {
-      return modelShortNameForCli(s.cli, s.model);
-    }
-    final pid = s.provider;
-    if (pid != null && pid.isNotEmpty) {
-      for (final p in _providers) {
-        if (p['id'] == pid) {
-          final m = p['model'] as String?;
-          if (m != null && m.isNotEmpty) return m;
+      model = s.effectiveModel;
+    } else if (s.model != null && s.model!.isNotEmpty) {
+      model = s.model;
+    } else {
+      final pid = s.provider;
+      if (pid != null && pid.isNotEmpty) {
+        for (final p in _providers) {
+          if (p['id'] == pid) {
+            final m = p['model'] as String?;
+            if (m != null && m.isNotEmpty) model = m;
+            break;
+          }
         }
       }
     }
-    return '默认';
+    if (model == null || model.isEmpty) return '默认';
+    return modelDisplayName(s.cli, model, aliasMap: _aliasMapFor(s.provider));
   }
 
   String _effortLabel(Session? s) {
@@ -712,7 +729,7 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
   void initState() {
     super.initState();
     _provider = widget.provider;
-    _model = widget.model;
+    _model = _normalizeModel(widget.provider, widget.model);
     _effort = _validEfforts.contains(widget.effort) ? widget.effort : 'medium';
     final known = _modelChoices(_provider).contains(_model);
     _customModel = _model.isNotEmpty && !known;
@@ -740,7 +757,27 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     return p?['name']?.toString() ?? id;
   }
 
+  // Ordered alias tiers (opus/sonnet/haiku/fable) with their {model, name} for an
+  // alias-mapped relay, or empty when the provider declares no aliasMap. Each tier
+  // is a real, selectable wire model on these relays (the server honors
+  // session.model === 'opus' | 'sonnet' | 'haiku' | 'fable' directly).
+  List<MapEntry<String, Map>> _aliasTiers(String provider) {
+    final map = _providerMap(provider)?['aliasMap'];
+    if (map is! Map) return const [];
+    const order = ['opus', 'sonnet', 'haiku', 'fable'];
+    final tiers = <MapEntry<String, Map>>[];
+    for (final t in order) {
+      final v = map[t];
+      if (v is Map && v['model'] != null) tiers.add(MapEntry(t, v));
+    }
+    return tiers;
+  }
+
   List<String> _modelChoices(String provider) {
+    // Alias-mapped relays: offer the tiers directly (opus/sonnet/haiku/fable) so
+    // each option can read "alias → wire model (display name)".
+    final tiers = _aliasTiers(provider);
+    if (tiers.isNotEmpty) return ['', ...tiers.map((e) => e.key)];
     final opts = _providerMap(provider)?['modelOptions'];
     if (opts is List && opts.isNotEmpty) {
       return [
@@ -751,9 +788,45 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     return _isClaude ? kClaudeModelOptions.map((e) => e.key).toList() : [''];
   }
 
+  // Map a stored wire model id (e.g. claude-opus-4-8) back to its alias tier so
+  // the tier dropdown pre-selects instead of dropping into the custom-id field.
+  String _normalizeModel(String provider, String model) {
+    if (model.isEmpty) return model;
+    for (final e in _aliasTiers(provider)) {
+      if (e.key == model) return model;
+      if (e.value['model']?.toString() == model) return e.key;
+    }
+    return model;
+  }
+
   String _modelLabel(String model) {
     if (model.isEmpty) return '默认 / 跟随 Provider';
     return modelShortNameForCli(widget.cli, model);
+  }
+
+  // Rich dropdown option label. For alias tiers: "opus → claude-opus-4-8 (GLM5.2)".
+  String _modelOptionLabel(String provider, String value) {
+    if (value.isEmpty) return _modelLabel('');
+    for (final e in _aliasTiers(provider)) {
+      if (e.key != value) continue;
+      final m = e.value['model']?.toString() ?? '';
+      final name = e.value['name']?.toString();
+      return '${e.key} → $m${(name != null && name.isNotEmpty) ? ' ($name)' : ''}';
+    }
+    return _modelLabel(value);
+  }
+
+  // Compact label for the saved config (chip / SnackBar): the provider's real
+  // model name (e.g. GLM5.2) for an alias tier, otherwise the plain model label.
+  String _modelResultLabel(String provider, String model) {
+    if (model.isEmpty) return '默认';
+    for (final e in _aliasTiers(provider)) {
+      if (e.key != model) continue;
+      final name = e.value['name']?.toString();
+      if (name != null && name.isNotEmpty) return name;
+      return e.value['model']?.toString() ?? model;
+    }
+    return _modelLabel(model);
   }
 
   String _effortDescription(String value) {
@@ -770,65 +843,6 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
       }
     }
     return value;
-  }
-
-  // Alias↔model mapping for the selected provider (alias-only relays only, e.g.
-  // iFlytek opus/sonnet/haiku/fable → astron-code-latest). These relays reject the
-  // alias targets as literal ids, so multicc sends a claude-* wire name at spawn;
-  // this shows the configured backend model per tier for reference. Null when the
-  // provider has no aliasMap.
-  Widget? _aliasMapWidget(String provider) {
-    final map = _providerMap(provider)?['aliasMap'];
-    if (map is! Map) return null;
-    const order = ['opus', 'sonnet', 'haiku', 'fable'];
-    final tiers = <MapEntry<String, Map>>[];
-    for (final t in order) {
-      final v = map[t];
-      if (v is Map && v['model'] != null) tiers.add(MapEntry(t, v));
-    }
-    if (tiers.isEmpty) return null;
-    return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.panel,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.line),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '别名 → 模型（实际发送 claude-* 线上名）',
-            style: TextStyle(color: AppColors.faint, fontSize: 11),
-          ),
-          const SizedBox(height: 4),
-          ...tiers.map((e) {
-            final name = e.value['name']?.toString();
-            return Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text.rich(
-                TextSpan(
-                  style: const TextStyle(color: AppColors.muted, fontSize: 11),
-                  children: [
-                    TextSpan(
-                      text: '${e.key} → ',
-                      style: const TextStyle(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    TextSpan(text: '${e.value['model']}'),
-                    if (name != null && name.isNotEmpty)
-                      TextSpan(text: ' ($name)'),
-                  ],
-                ),
-              ),
-            );
-          }),
-        ],
-      ),
-    );
   }
 
   void _onProviderChanged(String? value) {
@@ -853,7 +867,7 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
         model: model,
         effort: _effort,
         providerLabel: _providerName(_provider),
-        modelLabel: model.isEmpty ? '默认' : _modelLabel(model),
+        modelLabel: _modelResultLabel(_provider, model),
         effortLabel: effortShortNameForCli(widget.cli, _effort),
       ),
     );
@@ -862,7 +876,6 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
   @override
   Widget build(BuildContext context) {
     final modelChoices = _modelChoices(_provider);
-    final aliasWidget = _aliasMapWidget(_provider);
     final providerIds = widget.providers
         .map((p) => p['id']?.toString() ?? '')
         .toSet();
@@ -932,8 +945,10 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
               style: const TextStyle(color: AppColors.text, fontSize: 13),
               items: [
                 ...modelChoices.map(
-                  (m) =>
-                      DropdownMenuItem(value: m, child: Text(_modelLabel(m))),
+                  (m) => DropdownMenuItem(
+                    value: m,
+                    child: Text(_modelOptionLabel(_provider, m)),
+                  ),
                 ),
                 const DropdownMenuItem(
                   value: '__custom__',
@@ -962,7 +977,6 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
                 ),
               ),
             ],
-            if (aliasWidget != null) aliasWidget,
             const SizedBox(height: 12),
             Text(
               _isClaude ? 'Effort' : 'Reasoning Level',

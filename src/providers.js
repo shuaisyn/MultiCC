@@ -186,6 +186,36 @@ function chatCompletionsTarget(baseUrl) {
   }
 }
 
+// Tier → env key for the per-tier model-mapping UI (settings screen). Lets a
+// user point Claude Code's internal opus/sonnet/haiku/fable resolution at
+// specific wire models for a relay, instead of only the single ANTHROPIC_MODEL.
+const ALIAS_TIER_KEYS = {
+  opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  fable: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
+};
+
+// Apply a { opus: {model, name}, sonnet: {...}, ... } map onto a claude env
+// object (in place), writing/clearing ANTHROPIC_DEFAULT_*_MODEL[_NAME]. Blank
+// model for a tier clears that tier's mapping.
+function applyAliasMapToEnv(env, aliasMap) {
+  if (!aliasMap || typeof aliasMap !== 'object') return;
+  for (const [tier, key] of Object.entries(ALIAS_TIER_KEYS)) {
+    const entry = aliasMap[tier];
+    const model = (entry && typeof entry === 'object' ? entry.model : entry) || '';
+    const name = (entry && typeof entry === 'object' ? entry.name : '') || '';
+    if (String(model).trim()) {
+      env[key] = String(model).trim();
+      if (String(name).trim()) env[key + '_NAME'] = String(name).trim();
+      else delete env[key + '_NAME'];
+    } else {
+      delete env[key];
+      delete env[key + '_NAME'];
+    }
+  }
+}
+
 function withTomlModel(toml, model) {
   if (!model) return toml || '';
   if (/(^|\n)\s*model\s*=/.test(toml || '')) {
@@ -195,13 +225,14 @@ function withTomlModel(toml, model) {
 }
 
 // Build a cc-switch-shaped settingsConfig from simple fields.
-function buildSettingsConfig(appType, { baseUrl, authToken, model, models, providerId, useChatResponsesProxy }) {
+function buildSettingsConfig(appType, { baseUrl, authToken, model, models, providerId, useChatResponsesProxy, aliasMap }) {
   const modelOptions = parseModelList(models, model);
   if (appType === 'claude') {
     const env = {};
     if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
     if (authToken) env.ANTHROPIC_AUTH_TOKEN = authToken;
     if (model) env.ANTHROPIC_MODEL = model;
+    applyAliasMapToEnv(env, aliasMap);
     return { env, modelCatalog: { models: modelOptions.map(m => ({ model: m })) } };
   }
   const provName = 'custom';
@@ -332,14 +363,14 @@ function getProviderSummary(appType, id) {
 // Back-compat alias (server.js used getProviderRow previously).
 const getProviderRow = getProvider;
 
-function createProvider({ appType, name, baseUrl, authToken, model, models, useChatResponsesProxy, settingsConfig }) {
+function createProvider({ appType, name, baseUrl, authToken, model, models, useChatResponsesProxy, settingsConfig, aliasMap }) {
   if (!APP_TYPES.includes(appType)) throw new Error('appType must be claude or codex');
   if (!name || !String(name).trim()) throw new Error('name required');
   // Generate id first so buildSettingsConfig can embed it in the proxy base_url.
   const id = crypto.randomUUID();
   const cfg = (settingsConfig && typeof settingsConfig === 'object')
     ? settingsConfig
-    : buildSettingsConfig(appType, { baseUrl, authToken, model, models, useChatResponsesProxy, providerId: id });
+    : buildSettingsConfig(appType, { baseUrl, authToken, model, models, useChatResponsesProxy, providerId: id, aliasMap });
   const p = {
     id,
     appType,
@@ -354,7 +385,7 @@ function createProvider({ appType, name, baseUrl, authToken, model, models, useC
   return { id: p.id, appType, name: p.name };
 }
 
-function updateProvider(appType, id, { name, baseUrl, authToken, model, models, useChatResponsesProxy, settingsConfig }) {
+function updateProvider(appType, id, { name, baseUrl, authToken, model, models, useChatResponsesProxy, settingsConfig, aliasMap }) {
   const list = loadStore();
   const p = list.find(x => x.appType === appType && x.id === id);
   if (!p) throw new Error('provider not found');
@@ -369,6 +400,7 @@ function updateProvider(appType, id, { name, baseUrl, authToken, model, models, 
     if (models !== undefined || model !== undefined) {
       cfg.modelCatalog = { models: parseModelList(models, model !== undefined ? model : cfg.env.ANTHROPIC_MODEL).map(m => ({ model: m })) };
     }
+    if (aliasMap !== undefined) applyAliasMapToEnv(cfg.env, aliasMap);
   } else {
     const currentBaseUrl = (cfg.proxyTarget && cfg.proxyTarget.originalBaseUrl) || tomlValue(cfg.config, 'base_url');
     const nextProxy = useChatResponsesProxy !== undefined
