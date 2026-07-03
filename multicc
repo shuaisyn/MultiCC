@@ -144,14 +144,47 @@ do_update() {
   fi
 
   echo "Updating MultiCC (branch: $branch)..."
-  if ! git pull --ff-only origin "$branch"; then
-    echo "git pull failed (not a fast-forward, or network issue) — resolve manually and retry."
+
+  # Fetch latest from remote.
+  git fetch origin "$branch" 2>/dev/null
+
+  # Check if a fast-forward is possible. If the local branch has diverged
+  # from origin (e.g. after a server-side history rewrite / force-push),
+  # fall back to a hard reset to origin's tip. This ensures existing users
+  # can always update even when the commit history was rewritten.
+  local local_tip origin_tip merge_base
+  local_tip="$(git rev-parse HEAD 2>/dev/null)"
+  origin_tip="$(git rev-parse "origin/$branch" 2>/dev/null)"
+  merge_base="$(git merge-base "$local_tip" "$origin_tip" 2>/dev/null)"
+
+  if [ "$merge_base" = "$local_tip" ]; then
+    # Local is an ancestor of origin — fast-forward is safe.
+    if ! git pull --ff-only origin "$branch"; then
+      echo "git pull failed (network issue) — retry later."
+      [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
+      return 1
+    fi
+  elif [ "$merge_base" = "$origin_tip" ]; then
+    # Local is ahead of origin — nothing to pull.
+    echo "Local branch is ahead of origin — nothing to update."
     [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
-    return 1
+    return 0
+  else
+    # Diverged histories (force-push on the server side).
+    # Hard-reset to origin to sync with the rewritten history.
+    echo "Remote history was rewritten — resetting to origin/$branch..."
+    echo "  (local: ${local_tip:0:7} → origin: ${origin_tip:0:7})"
+    git reset --hard "origin/$branch"
+    # Stashed changes are likely obsolete after reset; drop them.
+    if [ "$stashed" = 1 ]; then
+      echo "  Note: local changes were stashed but may no longer apply after reset."
+      echo "  Run 'git stash list' to see them, or 'git stash drop' to discard."
+    fi
   fi
 
-  # Restore the stashed local changes on top of the freshly pulled code.
-  if [ "$stashed" = 1 ]; then
+  # Restore the stashed local changes on top of the freshly pulled code
+  # (only for the fast-forward path; the hard-reset path handled stash above).
+  if [ "$stashed" = 1 ] && [ "$merge_base" = "$local_tip" ]; then
     if ! git stash pop >/dev/null 2>&1; then
       echo "⚠️  Update pulled successfully, but your local changes conflict with it."
       echo "   Your changes are safe in 'git stash' (run: git stash list / git stash pop)."
