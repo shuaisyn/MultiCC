@@ -462,6 +462,20 @@ cd MultiCC && ./multicc install   # install as macOS launchd background service
 
 **Update anytime:** `./multicc update` — pulls latest code, reinstalls deps if `package.json` changed, and restarts.
 
+> **⚠️ If `./multicc update` fails** (e.g. after a server-side history rewrite / force-push, which can happen when sensitive files are purged from the repo), reset your local branch to match the remote:
+> ```bash
+> cd MultiCC
+> git fetch origin
+> git reset --hard origin/main
+> npm install
+> ./multicc restart
+> ```
+> Or as a one-liner:
+> ```bash
+> cd MultiCC && git fetch origin && git reset --hard origin/main && npm install && ./multicc restart
+> ```
+> **Note:** `git reset --hard` discards uncommitted local changes. If you have local modifications, stash them first with `git stash` and restore with `git stash pop` after the reset.
+
 ### Prerequisites
 
 - **Node.js** >= 20.19 (required by `chokidar` 5 ESM — backported `require(ESM)` support landed in Node 20.19 / 22.12)
