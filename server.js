@@ -4723,6 +4723,46 @@ app.get('/api/apk-info', (req, res) => {
 // is claimed first; auth is bypassed via the capability <id> (see middleware).
 artifacts.mount(app);
 
+// Cache-busting for embedded WebViews: rewrite local <script src="x.js"> /
+// <link href="x.css"> in served HTML to "x.js?v=<mtime>", and send the HTML
+// itself with no-store. Many embedded WebViews ignore Cache-Control on static
+// assets and keep a stale copy; they still re-fetch when the asset URL changes,
+// so appending the file's mtime as a query makes every frontend edit show up on
+// the next page load without users having to clear cache manually.
+const _publicDir = path.join(__dirname, 'public');
+function _serveVersionedHtml(absPath, res) {
+  fs.readFile(absPath, 'utf8', (err, html) => {
+    if (err) { res.status(500).end(); return; }
+    const out = html.replace(
+      /((?:src|href)\s*=\s*["'])(?!https?:)(?!\/\/)([^"'?#]+\.)(js|css)(["'])/gi,
+      (m, pre, name, ext, q) => {
+        try {
+          const mt = Math.floor(fs.statSync(path.join(_publicDir, name + ext)).mtimeMs);
+          return `${pre}${name}${ext}?v=${mt}${q}`;
+        } catch (_) { return m; }
+      });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.type('text/html').send(out);
+  });
+}
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  let rel;
+  try { rel = decodeURIComponent(req.path).replace(/^\/+/, ''); } catch (_) { return next(); }
+  const cands = !rel || rel === '/' ? ['index.html']
+    : rel.endsWith('.html') ? [rel]
+    : [rel + '.html'];
+  for (const c of cands) {
+    const fp = path.resolve(_publicDir, c);
+    if ((fp === _publicDir || fp.startsWith(_publicDir + path.sep))
+        && fs.existsSync(fp) && fs.statSync(fp).isFile()) {
+      return _serveVersionedHtml(fp, res);
+    }
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public'), {
   extensions: ['html'],
   setHeaders: (res, filePath) => {
