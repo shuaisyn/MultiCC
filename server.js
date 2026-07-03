@@ -4929,6 +4929,19 @@ function setSessionSummary(sessionId, summary) {
 
 const SESSION_MEMORY_MAX = 8000;  // hard cap on a session's persisted memory text
 
+// Normalize persisted.memory into an entries array, regardless of whether it
+// is stored in the new array format or the legacy string format. Returns []
+// when there is no memory. A second worker may add an identically-named helper
+// when merging the array-format change; if so, the merge-conflict resolution
+// keeps whichever version landed first (they are intentionally identical).
+function getMemoryEntries(persisted) {
+  const m = persisted?.memory;
+  if (!m) return [];
+  if (Array.isArray(m)) return m;
+  if (typeof m === 'string' && m.trim()) return [{ type: 'fact', text: m.trim(), ts: 0 }];
+  return [];
+}
+
 // Distill a chunk of about-to-be-discarded chat history into the session's
 // long-lived memory. We deliberately keep ONLY key problems and how they were
 // solved (decisions, fixes, gotchas, user preferences, unfinished threads) — not
@@ -5387,10 +5400,100 @@ function resolveRolePrompt(persisted) {
   // Session memory (distilled from cleared/trimmed history — key problems and how
   // they were solved). Lives alongside, not inside, the role prompt; appended so
   // every turn carries it without the user re-explaining past decisions.
-  const mem = (persisted.memory || '').trim();
-  if (!mem) return base;
-  const memBlock = `[会话记忆：以下是本会话过往积累的关键问题与解决方式，供你延续上下文，不要重复已解决的事]\n${mem}\n[会话记忆结束]`;
+  //
+  // On-demand injection: instead of dumping the entire memory every turn, match
+  // entries against the current user message's keywords and inject only the
+  // relevant ones. Falls back to the most recent 3 entries when nothing matches.
+  const entries = getMemoryEntries(persisted);
+  if (!entries || entries.length === 0) return base;
+
+  const recentUserMsg = getLatestUserMessage(persisted.id) || '';
+  const relevant = getRelevantMemoryEntries(recentUserMsg, entries);
+  if (relevant.length === 0) return base;
+
+  const memText = relevant.map(e => `[${e.type}] ${e.text}`).join('\n');
+  const memBlock = `[会话记忆：以下是本会话过往积累的、与当前问题可能相关的关键信息，供你延续上下文，不要重复已解决的事]\n${memText}\n[会话记忆结束]`;
   return base ? `${base}\n\n${memBlock}` : memBlock;
+}
+
+// Return the most recent user message from a session's chat history (string
+// content only). Used by resolveRolePrompt to keyword-match memory entries
+// against what the user is asking about right now.
+function getLatestUserMessage(sessionName) {
+  const history = chatHistories.get(sessionName);
+  if (!history || history.length === 0) return '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i].role === 'user' && typeof history[i].content === 'string') {
+      return history[i].content;
+    }
+  }
+  return '';
+}
+
+// Extract keywords from a user message for memory matching. English words are
+// matched as tokens (>=3 chars); Chinese is sliced into 2-grams plus short
+// whole-segment tokens. Common English stop-words are filtered out.
+function extractKeywords(text) {
+  if (!text) return [];
+  const cleaned = text.replace(/[^一-龥a-zA-Z0-9_\s/-]/g, ' ').trim();
+  const keywords = new Set();
+
+  // English words (>=3 chars)
+  const enWords = cleaned.match(/[a-zA-Z][a-zA-Z0-9_-]{2,}/g) || [];
+  enWords.forEach(w => keywords.add(w));
+
+  // Chinese 2-grams + short whole segments
+  const cjk = cleaned.match(/[一-龥]+/g) || [];
+  for (const seg of cjk) {
+    for (let i = 0; i < seg.length - 1; i++) {
+      keywords.add(seg.substring(i, i + 2));
+    }
+    if (seg.length <= 6) keywords.add(seg);
+  }
+
+  const stopWords = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'this', 'that', 'with', 'have', 'from', 'they', 'them', 'what', 'were', 'been', 'will', 'would', 'could', 'should']);
+  return [...keywords].filter(k => !stopWords.has(k.toLowerCase()) && k.length >= 2);
+}
+
+// Score memory entries against the current user message's keywords and return
+// the most relevant ones, up to maxChars of formatted text. Entries with score
+// 0 are skipped once at least one matched; if nothing matches at all, the most
+// recent 3 entries are returned as a floor so the model always has some context.
+function getRelevantMemoryEntries(query, entries, maxChars = 2000) {
+  if (!entries || entries.length === 0) return [];
+
+  const keywords = extractKeywords(query);
+
+  const scored = entries.map(e => {
+    const text = e.text.toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+      if (text.includes(kw.toLowerCase())) {
+        score += kw.length;  // longer keywords weigh more
+      }
+    }
+    // Type weight: todo and gotcha are more likely to affect current decisions
+    const typeWeight = { todo: 1.5, gotcha: 1.3, decision: 1.0, fact: 0.8, preference: 1.2 };
+    score *= (typeWeight[e.type] || 1.0);
+    return { entry: e, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const result = [];
+  let totalChars = 0;
+  for (const { entry, score } of scored) {
+    if (score === 0 && result.length > 0) break;  // skip unmatched once we have matches
+    const lineLen = entry.text.length + 20;  // account for "[type] " formatting overhead
+    if (totalChars + lineLen > maxChars) break;
+    result.push(entry);
+    totalChars += lineLen;
+  }
+
+  // Floor: if nothing matched, return the most recent 3 entries
+  if (result.length === 0 && entries.length > 0) {
+    return entries.slice(-3);
+  }
+  return result;
 }
 
 // Signature of a transport/API failure that ends a turn with a truncated answer
