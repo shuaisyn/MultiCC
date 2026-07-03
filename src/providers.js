@@ -581,16 +581,22 @@ function resolveSpawnEnv(session) {
     // reads Authorization: Bearer). Leave AUTH_TOKEN as-is for Bearer auth.
 
     // Alias-only relay remap: a provider with a base URL but no canonical
-    // ANTHROPIC_MODEL only declares alias targets, and its relay rejects those
-    // targets as literal model ids (e.g. iFlytek rejects "astron-code-latest"
-    // but accepts every claude-* name). Claude Code resolves internal tiers —
-    // background/haiku tasks, ultracode subagents — through
-    // ANTHROPIC_DEFAULT_*_MODEL, so without remapping those sub-calls still
-    // send the rejected literal and 1211 mid-turn. Point every model reference
-    // at a safe claude-* wire name so any resolution path the CLI takes lands
-    // on a model the relay accepts. (buildChatSpawnArgs still substitutes the
-    // main --model; this covers the tier-based sub-calls.)
-    if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) applyWireDefaults(env);
+    // ANTHROPIC_MODEL only declares alias targets (its real model id, e.g.
+    // iFlytek's "astron-code-latest"). The relay ACCEPTS that id and REJECTS
+    // claude-* wire names (iFlytek → 10404). Promote the first alias target
+    // to ANTHROPIC_MODEL so the main --model and every tier-based sub-call
+    // (background/haiku tasks, ultracode subagents) all send a model the relay
+    // accepts. The tier vars are left as-is (already the real model id).
+    if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) {
+      // Find the real model id from tier vars (e.g. "astron-code-latest") —
+      // do NOT use applyWireDefaults which would inject claude-* names that
+      // relays like iFlytek reject with 10404 PathDomainError.
+      const realModel = env.ANTHROPIC_DEFAULT_SONNET_MODEL
+        || env.ANTHROPIC_DEFAULT_OPUS_MODEL
+        || env.ANTHROPIC_DEFAULT_HAIKU_MODEL
+        || env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+      if (realModel) env.ANTHROPIC_MODEL = realModel;
+    }
     // Canonical wire model + the set of models this provider actually serves
     // (post-remap), so the spawn path can reject stale per-session model values
     // that are no longer valid (e.g. "astron-code-latest" after import-correction).
