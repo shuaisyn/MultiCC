@@ -28,6 +28,28 @@ for (const k of [
   if (process.env[k]) { console.log(`[multicc] stripping inherited ${k} so claude uses the OAuth subscription`); delete process.env[k]; }
 }
 
+// Backstop: strip Claude Code "SDK / simple mode" markers that leak into this
+// server's own env (they get baked into the pm2 daemon whenever `pm2 start` /
+// `pm2 restart` is run from inside an interactive Claude Code session). The
+// critical one is CLAUDE_CODE_SIMPLE=1: a spawned `claude` child that inherits
+// it enters SDK/simple mode and its tool set collapses from ~28 tools down to
+// just Read/Edit/Bash — no Agent, no Task*, no Workflow, no mcp__*, no Skill
+// (empirically verified). buildChildEnv() already strips it for the chat spawn
+// path, but other spawn paths (run-detached, gateway, detached sessions)
+// inherit process.env directly and would leak it. Deleting here at startup
+// means EVERY spawn path inherits a clean value. The sibling CLAUDE_CODE_* /
+// CLAUDECODE markers are pure leakage here too — this server is not itself a
+// claude-code child/sdk session — so they're stripped as well; CLAUDE_CODE_SIMPLE
+// is the only one that affects the tool set, but the rest are cleaned up for
+// hygiene so a spawned child never mistakes itself for a nested session.
+for (const k of [
+  'CLAUDE_CODE_SIMPLE',
+  'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_SESSION_ID',
+]) {
+  if (process.env[k]) { console.log(`[multicc] stripping leaked ${k} so spawned claude keeps the full tool set`); delete process.env[k]; }
+}
+
 const express = require('express');
 const http = require('http');
 const https = require('https');
