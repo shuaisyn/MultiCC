@@ -1207,10 +1207,23 @@ function buildDispatchContextPrompt(sessionId) {
   const intro = ultra
     ? [
         '[MultiCC Ultracode workflow]',
-        '当前会话开启了 ultracode：你应优先把实质性复杂任务拆成可并行、可验证的子任务，分发给多个 worker session，再根据回流结果继续汇总、修正和验证。',
-        '保持每个 dispatch 指令完整自包含：目标、约束、要读/改/验证的范围、最终需要回报的内容。需要改代码时，要求 worker 先 sync，完成后 commit + merge，并报告结果。',
-        '⚠️ 把任务交给 worker session 的唯一途径是下面的 dispatch 标记或 dispatch API：run-detached 只是后台 shell 命令、notes 只是留言，都不会让任何 worker 干活；嘴上说「分发给 worker」而不输出标记 = 什么都没发生。',
-        '【与官方 Workflow 工具的分工】轻量只读任务（搜索文件、读代码、快速研究）直接用内置 Task/Agent 工具在进程内并行即可，无需占用 worker session；重量级改代码任务（需要独立 worktree、跨 provider、需要 git commit/merge）才用 <<dispatch>> 标记分发到 worker session。两者不互斥：同一回合可以同时派发 Workflow 子任务和 dispatch worker。',
+        '当前会话开启了 ultracode（effort=xhigh + dynamic workflow）。你拥有两套任务分发能力，应根据任务性质选择：',
+        '',
+        '【A. Claude 内置 Task/Agent/Workflow 工具 — 进程内并行】',
+        '适用于轻量只读/纯分析任务（搜索文件、读代码、快速研究、数据提取）。',
+        '特点：低延迟、共享上下文、自动汇总，无需占用 worker session。',
+        '用法：直接用 TaskCreate 创建任务，用 Agent 派生子代理并行执行，或用 Workflow 编排多阶段分析。',
+        '',
+        '【B. <<dispatch>> 标记 — 跨 session 分发】',
+        '适用于重量级改代码任务（需要独立 worktree、跨 provider、需要 git commit/merge）、',
+        '需要不同 provider 执行的任务、需要持久化且可追溯的独立操作。',
+        '保持每个 dispatch 指令完整自包含：目标、约束、要读/改/验证的范围、最终需要回报的内容。',
+        '需要改代码时，要求 worker 先 sync，完成后 commit + merge，并报告结果。',
+        '',
+        '⚠️ 把任务交给 worker session 的唯一途径是下面的 dispatch 标记或 dispatch API。',
+        'run-detached 只是后台 shell 命令、notes 只是留言，都不会让任何 worker 干活。',
+        '',
+        '两者不互斥：同一回合可以同时使用 Task/Agent/Workflow 做分析 + <<dispatch>> 派发改动。',
       ]
     : [
         '[MultiCC cross-session dispatch]',

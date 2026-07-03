@@ -427,7 +427,6 @@ const CLAUDE_ROUTING_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'CLAUDE_CODE_SIMPLE',
 ];
 
 // Build the full child environment for spawning a session's CLI.
@@ -473,18 +472,16 @@ function resolveSpawnEnv(session) {
     for (const k of Object.keys(src)) {
       if (/^ANTHROPIC_/.test(k) && typeof src[k] === 'string') env[k] = src[k];
     }
-    // Custom provider → must bypass the user's OAuth/keychain login so the
-    // request actually routes to the provider's endpoint with its own token.
-    // Claude CLI auth precedence (v2.1.x): OAuth/keychain > ANTHROPIC_API_KEY >
-    // ANTHROPIC_AUTH_TOKEN.  Without CLAUDE_CODE_SIMPLE=1, OAuth wins and the
-    // provider's ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL are silently ignored.
-if (env.ANTHROPIC_BASE_URL) {
-  env.CLAUDE_CODE_SIMPLE = '1';
-  // Only set ANTHROPIC_API_KEY if the provider explicitly provided one.
-  // Auto-copying AUTH_TOKEN to API_KEY forces the x-api-key header on
-  // providers that don't accept it (e.g. Zhipu GLM 401s because it only
-  // reads Authorization: Bearer). Leave AUTH_TOKEN as-is for Bearer auth.
-}    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name, tools: src.MULTICC_TOOLS };
+    // Claude CLI v2.1.199+ auth precedence: when ANTHROPIC_AUTH_TOKEN is set,
+    // it takes precedence over OAuth/keychain WITHOUT needing CLAUDE_CODE_SIMPLE=1.
+    // (CLI prints "connectors are disabled" warning but routes to the API key.)
+    // Omitting CLAUDE_CODE_SIMPLE=1 preserves the full tool set (Agent, TaskCreate,
+    // Workflow, etc.) which is required for dynamic workflow / ultracode support.
+    // Only set ANTHROPIC_API_KEY if the provider explicitly provided one.
+    // Auto-copying AUTH_TOKEN to API_KEY forces the x-api-key header on
+    // providers that don't accept it (e.g. Zhipu GLM 401s because it only
+    // reads Authorization: Bearer). Leave AUTH_TOKEN as-is for Bearer auth.
+    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name, tools: src.MULTICC_TOOLS };
   }
 
   try {
