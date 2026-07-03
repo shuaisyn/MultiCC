@@ -1200,6 +1200,7 @@ function buildDispatchContextPrompt(sessionId) {
         '[MultiCC Ultracode workflow]',
         '当前会话开启了 ultracode：你应优先把实质性复杂任务拆成可并行、可验证的子任务，分发给多个 worker session，再根据回流结果继续汇总、修正和验证。',
         '保持每个 dispatch 指令完整自包含：目标、约束、要读/改/验证的范围、最终需要回报的内容。需要改代码时，要求 worker 先 sync，完成后 commit + merge，并报告结果。',
+        '⚠️ 把任务交给 worker session 的唯一途径是下面的 dispatch 标记或 dispatch API：run-detached 只是后台 shell 命令、notes 只是留言，都不会让任何 worker 干活；嘴上说「分发给 worker」而不输出标记 = 什么都没发生。',
       ]
     : [
         '[MultiCC cross-session dispatch]',
@@ -1210,6 +1211,7 @@ function buildDispatchContextPrompt(sessionId) {
     '格式：<<dispatch target="真实 session id">完整、自包含的任务说明</dispatch>>',
     'target 必须逐字使用下面列表中的某个 id；不要使用 SID、SESSION_ID、<目标会话id> 等占位符。',
     '如果要并行执行多个子任务，可以在同一回复中输出多个 dispatch 标记；系统会把结果自动回流给你。',
+    `等价方式（适合在回合中途派活）：curl -s -X POST $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/dispatch -H 'Content-Type: application/json' -d '{"target":"<session id>","message":"<自包含任务>"}'，结果同样自动回流。`,
     `可用目标 sessions: ${JSON.stringify(targets)}`,
     ultra ? '[MultiCC Ultracode workflow end]' : '[MultiCC cross-session dispatch end]',
     '',
@@ -1293,7 +1295,7 @@ const GATEWAY_ID = '__gateway__';
 const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000;   // pending confirmation expires after 10 min
 let pendingDispatch = null;                    // { id, targetId, message, createdAt }
 const dispatchRuns = new Map();                // dispatchId → { targetId, chatSessionId, createdAt }
-const DISPATCH_RE = /<<dispatch\s+target="([^"]+)"\s*>([\s\S]*?)<\/dispatch>>/;
+const DISPATCH_RE = /<<dispatch\s+target=["'“”]?([^"'“”>\s]+)["'“”]?\s*>([\s\S]*?)<\/dispatch>>?/;
 const DISPATCH_CONFIRM_RE = /^(确认|确定|yes|y|ok)$/i;
 const DISPATCH_CANCEL_RE = /^(取消|算了|no|n)$/i;
 
@@ -1458,7 +1460,7 @@ bus.on('chat:dispatch-complete', finalizeDispatch);
 // in the SAME directory. A dispatched worker's own turn carries originDispatchId
 // and is handled by the回流 branch above, so workers cannot re-dispatch (mirrors
 // "a fork can't fork").
-const DISPATCH_RE_G = /<<dispatch\s+target="([^"]+)"\s*>([\s\S]*?)<\/dispatch>>/g;
+const DISPATCH_RE_G = /<<dispatch\s+target=["'“”]?([^"'“”>\s]+)["'“”]?\s*>([\s\S]*?)<\/dispatch>>?/g;
 function parseAllDispatchMarkers(text) {
   if (!text) return [];
   const out = [];
@@ -1469,11 +1471,35 @@ function parseAllDispatchMarkers(text) {
   }
   return out;
 }
+// Ultracode safety net. Observed failure mode (mafit chat-24): the model
+// narrates "分发给3个 ultra worker" but hands the work to run-detached shell
+// tasks instead of emitting markers — the workers silently receive nothing.
+// If an ultracode turn declares dispatch intent yet neither emitted a marker
+// nor called the dispatch API recently, inject one corrective hint (cooldown-
+// limited so a stubborn model can't loop us).
+const lastDispatchOutAt = new Map();   // dispatcherId → ts of last real dispatch (marker or API)
+const lastUltraNudgeAt = new Map();    // dispatcherId → ts of last nudge
+const ULTRA_NUDGE_COOLDOWN_MS = 15 * 60 * 1000;
+const ULTRA_DISPATCH_INTENT_RE = /(分发|派发|派给|分派|指派|交给|dispatch)[^\n]{0,60}(ultra\s*worker|worker|子会话|兄弟会话)|(ultra\s*worker)[^\n]{0,60}(分发|派发|并行|执行)/i;
+function maybeNudgeUltracodeDispatch(dispatcherId, finalText) {
+  const rec = persistedSessions.get(dispatcherId);
+  if (!rec || normalizeEffort(rec.effort) !== 'ultracode') return;
+  if (!ULTRA_DISPATCH_INTENT_RE.test(finalText || '')) return;
+  const now = Date.now();
+  if (now - (lastDispatchOutAt.get(dispatcherId) || 0) < 10 * 60 * 1000) return;
+  if (now - (lastUltraNudgeAt.get(dispatcherId) || 0) < ULTRA_NUDGE_COOLDOWN_MS) return;
+  lastUltraNudgeAt.set(dispatcherId, now);
+  waitInjector.safeInject(dispatcherId,
+    '⚠️ 你提到要把任务分发给 worker，但这轮既没有输出 <<dispatch>> 标记、也没有调用 dispatch API —— worker session 实际上什么都没收到（run-detached 只是后台 shell 命令，不等于派活）。' +
+    '若要真正派活：在回复文本末尾输出 <<dispatch target="worker session id">自包含任务说明</dispatch>>（可一次输出多个并行），' +
+    `或调用 curl -s -X POST $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/dispatch -H 'Content-Type: application/json' -d '{"target":"...","message":"..."}'。若你有意自己完成全部工作，忽略本提示继续即可。`);
+}
 function maybeDispatchFromChatTurn(dispatcherId, finalText) {
   const markers = parseAllDispatchMarkers(finalText);
-  if (!markers.length) return;
+  if (!markers.length) { maybeNudgeUltracodeDispatch(dispatcherId, finalText); return; }
   const from = persistedSessions.get(dispatcherId);
   if (!from) return;
+  lastDispatchOutAt.set(dispatcherId, Date.now());
   for (const mk of markers) {
     if (mk.target === dispatcherId) continue;                       // no self-dispatch
     const v = validateDispatchTarget(mk.target);
@@ -2923,6 +2949,31 @@ app.get('/api/sessions/:id/notes', (req, res) => {
   const s = persistedSessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'session not found' });
   res.json(notes.filter(n => n.toSessionId === s.id || n.fromSessionId === s.id));
+});
+
+// Curl-friendly dispatch: same semantics as the <<dispatch>> reply marker, but
+// callable mid-turn. Every other multicc capability (wait/run-detached/notes)
+// is reachable via curl, so models — third-party ones especially — habitually
+// reach for curl; without this door they "dispatch" into run-detached and the
+// ultra workers never hear about it. Result flows back automatically as a
+// 【target 回复】message via finalizeDispatch.
+app.post('/api/sessions/:id/dispatch', (req, res) => {
+  const from = persistedSessions.get(req.params.id);
+  if (!from) return res.status(404).json({ error: 'session not found' });
+  const target = String((req.body && req.body.target) || '').trim();
+  const message = String((req.body && req.body.message) || '').trim();
+  if (!target || !message) return res.status(400).json({ error: 'target 和 message 必填' });
+  if (target === from.id) return res.status(400).json({ error: '不能把任务分发给自己' });
+  const v = validateDispatchTarget(target);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  if (v.rec.dirId !== from.dirId) return res.status(400).json({ error: '只能分发给同目录会话' });
+  appendEvent(from.dirId, 'dispatch', `→ ${v.rec.label || target}`, from.id);
+  lastDispatchOutAt.set(from.id, Date.now());
+  dispatchToSession(target, message, { replyTo: from.id })
+    .then(r => r.ok
+      ? res.json({ ok: true, target, chatId: r.chatId, note: '任务已投递；完成后结果会以【回复】消息自动回流到本会话' })
+      : res.status(409).json({ ok: false, error: r.error }))
+    .catch(e => res.status(500).json({ ok: false, error: e.message }));
 });
 
 // Directory event log.
