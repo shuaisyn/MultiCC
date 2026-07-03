@@ -1337,7 +1337,32 @@ function handleGatewayControl(rawText) {
 // Deliver a confirmed dispatch to its target session, creating an ephemeral chat
 // for terminal-only targets. Returns { ok, chatId } or { ok:false, error }.
 async function dispatchToSession(targetId, message, opts = {}) {
-  const v = validateDispatchTarget(targetId);
+  let v = validateDispatchTarget(targetId);
+  // On-demand ultracode worker creation: if the target matches *-ultra-NN but
+  // doesn't exist yet, auto-create it from the dispatcher's config. This replaces
+  // the old eager ensureUltracodeWorkers() — workers are born only when the LLM
+  // actually emits a <<dispatch>> marker naming them.
+  if (!v.ok) {
+    const m = targetId.match(/-ultra-(\d{2})$/);
+    if (m && opts.replyTo) {
+      const dispatcher = persistedSessions.get(opts.replyTo);
+      if (dispatcher && normalizeEffort(dispatcher?.effort) === 'ultracode') {
+        const dir = directories.get(dispatcher.dirId);
+        if (dir) {
+          const created = createSessionRecord({
+            dir, cli: dispatcher.cli || 'claude', kind: 'chat',
+            label: `⚡ Ultra Worker ${String(parseInt(m[1], 10))}`,
+            id: targetId, ephemeral: true,
+            model: dispatcher.model || null,
+            provider: dispatcher.provider || '',
+            effort: 'xhigh',
+            rolePrompt: '你是 MultiCC Ultracode worker。只执行派给你的自包含子任务；先同步 worktree，完成后验证、提交并尽量合并回基分支，最后用精简结构汇报改动、验证结果和风险。',
+          });
+          if (created.ok) v = validateDispatchTarget(targetId);
+        }
+      }
+    }
+  }
   if (!v.ok) return { ok: false, error: v.error };
   const rec = v.rec;
 
@@ -5915,7 +5940,6 @@ function runChatTurn(sessionName, text, opts = {}) {
   if (persisted.type === 'gateway') {
     promptText = buildGatewayPrompt(promptText);
   } else if (persisted.type !== 'aux') {
-    ensureUltracodeWorkers(sessionName);
     const dispatchContext = buildDispatchContextPrompt(sessionName);
     if (dispatchContext) promptText = dispatchContext + promptText;
   }
