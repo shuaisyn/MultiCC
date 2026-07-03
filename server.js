@@ -1845,6 +1845,77 @@ app.get('/api/sessions', (req, res) => {
   res.json(list);
 });
 
+// ── Dashboard API ──────────────────────────────────────────────────────
+// GET /api/dashboard/sessions — summary of all persistedSessions with filtering
+app.get('/api/dashboard/sessions', (req, res) => {
+  const { kind, active: activeParam } = req.query;
+  const filterActive = activeParam === undefined ? null : activeParam === 'true';
+
+  const list = [...persistedSessions.values()]
+    .filter(p => p.type !== 'aux' && p.type !== 'gateway')
+    .filter(p => !kind || (p.kind || 'terminal') === kind)
+    .map(p => {
+      const activeChat = chatSessions.get(p.id);
+      const termSession = sessions.get(p.id);
+      let isActive;
+      let lastActivity;
+      if (p.kind === 'chat') {
+        isActive = !!activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming);
+        lastActivity = chatLastActivity(p.id, activeChat);
+      } else {
+        // terminal sessions are active when present in `sessions` map
+        isActive = !!termSession;
+        lastActivity = termSession ? termSession.lastActivity : null;
+      }
+      return {
+        id: p.id,
+        label: p.label || null,
+        cli: p.cli || 'claude',
+        kind: p.kind || 'terminal',
+        active: isActive,
+        createdAt: p.createdAt || null,
+        lastActivity,
+      };
+    })
+    .filter(s => filterActive === null || s.active === filterActive);
+
+  res.json({ sessions: list, count: list.length });
+});
+
+// GET /api/dashboard/stats — aggregate statistics
+app.get('/api/dashboard/stats', (req, res) => {
+  const all = [...persistedSessions.values()]
+    .filter(p => p.type !== 'aux' && p.type !== 'gateway');
+
+  let activeCount = 0;
+  const byCli = {};
+  const byKind = {};
+
+  for (const p of all) {
+    const cli = p.cli || 'claude';
+    const k = p.kind || 'terminal';
+    byCli[cli] = (byCli[cli] || 0) + 1;
+    byKind[k] = (byKind[k] || 0) + 1;
+
+    const activeChat = chatSessions.get(p.id);
+    const termSession = sessions.get(p.id);
+    let isActive;
+    if (p.kind === 'chat') {
+      isActive = !!activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming);
+    } else {
+      isActive = !!termSession;
+    }
+    if (isActive) activeCount++;
+  }
+
+  res.json({
+    total: all.length,
+    active: activeCount,
+    byCli,
+    byKind,
+  });
+});
+
 // ── Agent resources (extracted to src/skills.js) ──
 // Reads core state (directories, persistedSessions) from the shared state registry.
 const {
