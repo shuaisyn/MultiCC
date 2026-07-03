@@ -698,7 +698,7 @@ function handleEvent(msg) {
         // loadSessionModel() 仅首次加载执行；重连只走 init，缺这些字段就会显示 Default。
         // providerId 必须恢复，否则 AI 配置弹窗的 Provider 下拉会落到「默认登录」。
         if (msg.providerId !== undefined) _sessionProvider = msg.providerId || '';
-        if (msg.providerName) _sessionProviderDisplayName = msg.providerName;
+        if (msg.providerName !== undefined) _sessionProviderDisplayName = msg.providerName || '';
         if (msg.cli) _sessionCli = msg.cli;
         // effectiveModel/model refresh unconditionally on reconnect, exactly like
         // provider/effort above — otherwise a server-side alias-map change leaves
