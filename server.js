@@ -6719,6 +6719,8 @@ function handleChatWs(ws, req, urlObj) {
     cwd: cs.cwd, session: sessionName, session_id: sessionName,
     cli: cs.cli,
     is_streaming: cs.isStreaming,
+    model: persisted.model || null,
+    effectiveModel: effectiveSessionModel(persisted),
     effort: persisted.effort || null,
     effectiveEffort: effectiveSessionEffort(persisted),
     providerId: provId,

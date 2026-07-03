@@ -693,6 +693,15 @@ function handleEvent(msg) {
         if (msg.effort !== undefined) {
           _sessionEffort = msg.effort || '';
           _sessionEffectiveEffort = msg.effectiveEffort || _sessionEffort || 'medium';
+        }
+        // 重新打开 / 断线重连时，用 init 携带的实际生效 provider/model 恢复顶部标签。
+        // loadSessionModel() 仅首次加载执行；重连只走 init，缺这些字段就会显示 Default。
+        if (msg.providerName) _sessionProviderDisplayName = msg.providerName;
+        if (msg.effectiveModel !== undefined && !_sessionEffectiveModel) {
+          _sessionEffectiveModel = msg.effectiveModel || '';
+          if (!_sessionModel && msg.model) _sessionModel = msg.model;
+        }
+        if (msg.effort !== undefined || msg.providerName || msg.effectiveModel !== undefined) {
           updateEffortBtn();
         }
         // Sync streaming state with server on (re)connect
@@ -2100,7 +2109,9 @@ function modelShortName(model) {
 function updateModelBtn() {
   if (!modelBtn) return;
   const shown = _sessionEffectiveModel || _sessionModel;
-  const provider = providerShortName(_sessionProvider);
+  const provider = _sessionProviderDisplayName
+    || (_sessionProvider ? providerShortName(_sessionProvider) : '')
+    || tt('default');
   const model = shown ? modelDisplayName(shown, _sessionProvider) : tt('default');
   const effort = effortShortName(_sessionEffectiveEffort || _sessionEffort);
   modelBtn.textContent = `🧠 ${provider} | ${model} | ${effort}`;
@@ -2464,6 +2475,7 @@ effortBtn?.addEventListener('click', async () => {
 /* ── Per-session provider switch (cc-switch) ── */
 const providerBtn = document.getElementById('provider-btn');
 let _sessionProvider = '';       // provider id ('' = default login)
+let _sessionProviderDisplayName = '';  // 实际生效 provider 的显示名（init 兜底；_sessionProvider 为空或 _providerList 未加载时用）
 let _sessionCli = 'claude';
 let _providerList = [];           // cached [{id,appType,name,baseUrl,model,isOfficial}]
 
