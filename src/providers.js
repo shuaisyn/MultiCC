@@ -5,10 +5,10 @@
 // multicc keeps its OWN provider store (providers.json). cc-switch
 // (~/.cc-switch/cc-switch.db) is an import SOURCE: the user can pull its provider
 // list into multicc's store, then add / edit / delete freely here. multicc never
-// writes to cc-switch — not even at import. Alias-only relays whose cc-switch
-// configs declare rejected model literals (e.g. iFlytek's "astron-code-latest")
-// are auto-corrected in multicc's OWN store at import time (see applyWireDefaults
-// in importFromCcSwitch), so the source stays untouched and the provider works.
+// writes to cc-switch — not even at import. Alias-only relays (base URL but no
+// canonical ANTHROPIC_MODEL) get their alias target promoted to ANTHROPIC_MODEL
+// at spawn time (see applyWireDefaults in resolveSpawnEnv), so the source stays
+// untouched and the provider works.
 //
 // A provider's `settingsConfig` mirrors cc-switch's shape so the spawn-env logic
 // is uniform: claude → { env: { ANTHROPIC_* } }, codex → { auth, config(toml) }.
@@ -59,29 +59,30 @@ const CODEX_HOMES_DIR = path.join(os.homedir(), '.multicc', 'codex-homes');
 const APP_TYPES = ['claude', 'codex'];
 
 // Safe wire model used when a provider is "alias-only" — it declares only
-// ANTHROPIC_DEFAULT_*_MODEL alias targets (no canonical ANTHROPIC_MODEL) and its
-// relay rejects those targets as literal --model values (e.g. iFlytek rejects
-// "astron-code-latest" but accepts every claude-* name). All Anthropic-compatible
-// relays accept claude-* wire names, so this is the safe substitution. Override
-// via env if a particular relay prefers a different canonical id.
+// ANTHROPIC_DEFAULT_*_MODEL alias targets (no canonical ANTHROPIC_MODEL). Such
+// relays serve their OWN real model ids through the tier vars (e.g. iFlytek's
+// "astron-code-latest", Sub2API's "deepseek-v4-pro") and REJECT claude-* wire
+// names — iFlytek returns 10404 PathDomainError:Model Not Found for
+// claude-sonnet-4-5. So the correct fix is to PROMOTE the relay's own alias
+// target to ANTHROPIC_MODEL (so the main --model arg lands on a model the relay
+// accepts) and LEAVE the tier vars untouched. Only an alias-only relay with NO
+// tier target at all (a pure claude-* passthrough, e.g. CrazyRouter) falls back
+// to this claude-* wire name. Override via env if a relay prefers otherwise.
 const WIRE_DEFAULT_MODEL = process.env.CLAUDE_WIRE_DEFAULT_MODEL || 'claude-sonnet-4-5';
 
-// Tier → safe wire model applied to alias-only relays (has base URL, no canonical
-// ANTHROPIC_MODEL) whose configured alias targets the relay rejects as literals
-// (e.g. iFlytek's "astron-code-latest"). All Anthropic-compatible relays accept
-// claude-* names. claude-fable-5 is untested on these relays → sonnet default.
-const DEFAULT_TIER_MAP = {
-  ANTHROPIC_MODEL: WIRE_DEFAULT_MODEL,
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: WIRE_DEFAULT_MODEL,
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-  ANTHROPIC_DEFAULT_FABLE_MODEL: WIRE_DEFAULT_MODEL,
-  ANTHROPIC_SMALL_FAST_MODEL: 'claude-haiku-4-5',
-};
-// Overwrite every model-selecting env key with a safe claude-* wire name. Used
-// both at spawn (resolveSpawnEnv) and at import (so the stored config is valid).
+// Promote the relay's own alias target (declared via ANTHROPIC_DEFAULT_*_MODEL)
+// to the canonical ANTHROPIC_MODEL. Do NOT clobber the tier vars with claude-*
+// names — alias-only relays reject those (iFlytek 10404). Used at spawn
+// (resolveSpawnEnv) so every model-resolution path the CLI takes lands on the
+// relay's real, accepted model id.
 function applyWireDefaults(env) {
-  for (const [k, v] of Object.entries(DEFAULT_TIER_MAP)) env[k] = v;
+  if (env.ANTHROPIC_MODEL) return;
+  const tierTarget =
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL ||
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL ||
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL;
+  env.ANTHROPIC_MODEL = tierTarget || WIRE_DEFAULT_MODEL;
 }
 // True for claude configs that need the wire-default remap: a relay base URL is
 // set but no canonical ANTHROPIC_MODEL is declared (only alias targets).
@@ -606,6 +607,16 @@ function resolveSpawnEnv(session) {
       env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL,
       env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL,
     ]).filter(Boolean);
+    // Debug: log the model-routing env actually injected into the claude child
+    // (token redacted), so relay errors like iFlytek 10404 can be traced to the
+    // exact model id sent. Grep `[multicc/provider] claude env`.
+    try {
+      const envSummary = Object.keys(env)
+        .filter(k => /^ANTHROPIC_(BASE_URL|MODEL|DEFAULT_.*_MODEL|SMALL_FAST_MODEL)$/.test(k))
+        .sort()
+        .reduce((o, k) => { o[k] = env[k]; return o; }, {});
+      console.log(`[multicc/provider] claude env [${providerId}] provider=${p.name} aliasOnly=${!!env.ANTHROPIC_BASE_URL && !src.ANTHROPIC_MODEL} modelEnv=${JSON.stringify(envSummary)}`);
+    } catch (_) {}
     return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, aliasOnly: !!env.ANTHROPIC_BASE_URL && !src.ANTHROPIC_MODEL, providerModel, providerModels, providerName: p.name, tools: src.MULTICC_TOOLS };
   }
 

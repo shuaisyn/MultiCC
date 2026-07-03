@@ -751,6 +751,27 @@ const MULTICC_IMG_HINT = [
   '  · multicc 会在任一会话 merge 回基分支后，自动把同目录其它会话的 worktree 同步到新基分支（冲突的会跳过并提示）；但「你自己这个会话」和「正在进行中的对话」仍以你主动 sync 为准，涉及共享文件的关键节点请主动同步一次再动手。',
 ].join('\n');
 
+// Debug helper: dump the full `claude -p` argv (long prompt / system-prompt
+// values truncated) every time we invoke the CLI, so model-routing / provider
+// issues (e.g. a relay 10404 on a wrong model id) can be traced in pm2 logs.
+// Grep `[multicc/chat] claude -p`.
+function debugLogClaudeInvoke(session, args) {
+  try {
+    const sid = (session && (session.id || session.cliSessionId)) || '-';
+    const provider = (session && session.provider) || '';
+    const redacted = (args || []).map((a, i) => {
+      if (typeof a !== 'string') return a;
+      const prev = args[i - 1];
+      // Truncate the system-prompt value and any over-long literal (the prompt).
+      if ((prev === '--append-system-prompt' || a.length > 160)) {
+        return a.length > 160 ? a.slice(0, 160) + `…(+${a.length - 160} chars)` : a;
+      }
+      return a;
+    });
+    console.log(`[multicc/chat] claude -p invoke [${sid}] provider=${provider || '<default>'} argv: ${redacted.join(' ')}`);
+  } catch (_) {}
+}
+
 const cliProviders = {
   claude: {
     name: 'claude',
@@ -808,6 +829,7 @@ const cliProviders = {
       if (opts.isFirstTurn) args.push('--session-id', session.cliSessionId);
       else args.push('--resume', session.cliSessionId);
       args.push(prompt);
+      debugLogClaudeInvoke(session, args);
       return args;
     },
     // Whether this provider needs the session id captured asynchronously after first launch

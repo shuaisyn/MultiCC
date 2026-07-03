@@ -696,13 +696,17 @@ function handleEvent(msg) {
         }
         // 重新打开 / 断线重连时，用 init 携带的实际生效 provider/model 恢复顶部标签。
         // loadSessionModel() 仅首次加载执行；重连只走 init，缺这些字段就会显示 Default。
+        // providerId 必须恢复，否则 AI 配置弹窗的 Provider 下拉会落到「默认登录」。
+        if (msg.providerId !== undefined) _sessionProvider = msg.providerId || '';
         if (msg.providerName) _sessionProviderDisplayName = msg.providerName;
+        if (msg.cli) _sessionCli = msg.cli;
         if (msg.effectiveModel !== undefined && !_sessionEffectiveModel) {
           _sessionEffectiveModel = msg.effectiveModel || '';
           if (!_sessionModel && msg.model) _sessionModel = msg.model;
         }
-        if (msg.effort !== undefined || msg.providerName || msg.effectiveModel !== undefined) {
+        if (msg.effort !== undefined || msg.providerName || msg.effectiveModel !== undefined || msg.providerId !== undefined) {
           updateEffortBtn();
+          updateModelBtn();
         }
         // Sync streaming state with server on (re)connect
         if (msg.is_streaming && _pendingCancel) {
@@ -2260,7 +2264,7 @@ function normalizeModelForProvider(providerId, model) {
 
 function buildModelChoices(providerId) {
   // Alias-mapped relays: offer the tiers directly so each option can read
-  // "opus → claude-opus-4-8 (GLM5.2)".
+  // "opus · GLM5.2 · glm-5.2" (别名 - 展示名 - 真实id).
   const tiers = providerAliasTiers(providerId);
   if (tiers.length) return ['', ...tiers.map(([t]) => t), '__custom__'];
   const opts = providerModelOptions(providerId);
@@ -2270,12 +2274,12 @@ function buildModelChoices(providerId) {
 }
 
 function modelChoiceLabel(v, providerId) {
-  // Alias tier option: "opus → claude-opus-4-8 (GLM5.2)".
+  // Alias tier option: "opus · GLM5.2 · glm-5.2" (别名 - 展示名 - 真实id).
   if (providerId) {
     const map = providerAliasMap(providerId);
     if (map && map[v] && map[v].model) {
       const m = map[v];
-      return `${v} → ${m.model}${m.name ? ` (${m.name})` : ''}`;
+      return `${v}${m.name ? ` · ${m.name}` : ''} · ${m.model}`;
     }
   }
   const named = CLAUDE_MODEL_OPTIONS.find(o => o.value === v);
@@ -2429,6 +2433,8 @@ async function loadSessionModel() {
 }
 
 modelBtn?.addEventListener('click', async () => {
+  // 每次打开前重新拉取一次会话配置，避免重连/加载未完成时弹窗显示默认值。
+  await loadSessionModel();
   await ensureProviderList(_sessionCli === 'codex' ? 'codex' : 'claude');
   const picked = await showAIConfigPicker({
     provider: _sessionProvider,

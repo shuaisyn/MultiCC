@@ -1903,13 +1903,13 @@ function showModelPicker({ title = tt('modelTitle'), okText = tt('create'), curr
     box.appendChild(msg);
 
     // Alias-mapped relays: list the tiers directly, each reading
-    // "opus → claude-opus-4-8 (GLM5.2)"; map a stored wire id back to its tier.
+    // "opus · GLM5.2 · glm-5.2" (别名 - 展示名 - 真实id); map a stored wire id back to its tier.
     const tiers = providerAliasTiers(providerId);
     const optionList = tiers.length
       ? [
           ...tiers.map(([t, m]) => ({
             value: t,
-            label: `${t} → ${m.model}${m.name ? ` (${m.name})` : ''}`,
+            label: `${t}${m.name ? ` · ${m.name}` : ''} · ${m.model}`,
           })),
           { value: '__custom__', labelKey: 'custom' },
         ]
@@ -2054,7 +2054,7 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   if (tiers.length) {
     opts = tiers.map(t => {
       const m = aliasMap[t];
-      return { value: t, label: `${t} → ${m.model}${m.name ? ` (${m.name})` : ''}` };
+      return { value: t, label: `${t}${m.name ? ` · ${m.name}` : ''} · ${m.model}` };
     });
   } else if (prov && prov.modelOptions && prov.modelOptions.length) {
     opts = prov.modelOptions.map(m => ({ value: m, label: m }));
