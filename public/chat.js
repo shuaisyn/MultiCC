@@ -700,9 +700,12 @@ function handleEvent(msg) {
         if (msg.providerId !== undefined) _sessionProvider = msg.providerId || '';
         if (msg.providerName) _sessionProviderDisplayName = msg.providerName;
         if (msg.cli) _sessionCli = msg.cli;
-        if (msg.effectiveModel !== undefined && !_sessionEffectiveModel) {
+        // effectiveModel/model refresh unconditionally on reconnect, exactly like
+        // provider/effort above — otherwise a server-side alias-map change leaves
+        // the AI-config button showing the NEW provider paired with the OLD model.
+        if (msg.effectiveModel !== undefined) {
           _sessionEffectiveModel = msg.effectiveModel || '';
-          if (!_sessionModel && msg.model) _sessionModel = msg.model;
+          if (msg.model !== undefined) _sessionModel = msg.model || '';
         }
         if (msg.effort !== undefined || msg.providerName || msg.effectiveModel !== undefined || msg.providerId !== undefined) {
           updateEffortBtn();
