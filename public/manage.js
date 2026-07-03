@@ -1877,9 +1877,13 @@ function modelDisplayName(model, providerId) {
   if (!model) return model;
   const map = providerAliasMap(providerId);
   if (map) {
-    if (map[model] && map[model].name) return map[model].name;
+    if (map[model]) {
+      const e = map[model];
+      if (e.name) return e.name;     // 显示名优先（如 GLM5.2）
+      if (e.model) return e.model;   // 否则用映射的真模型 id（如 glm-5.2），不回退到 tier 别名 opus
+    }
     for (const v of Object.values(map)) {
-      if (v && v.model === model && v.name) return v.name;
+      if (v && v.model === model) return v.name || model;
     }
   }
   return modelShortName(model);
