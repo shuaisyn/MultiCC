@@ -1980,7 +1980,7 @@ async function fetchAgentPresetPrompt(id) {
 // Build the <select> options for a model dropdown based on the selected
 // provider's modelOptions. Falls back to CLAUDE_MODEL_OPTIONS when no
 // provider or a provider without modelOptions is chosen.
-function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProviderId, isClaude) {
+function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProviderId, isClaude, aliasBox) {
   const prev = modelSelect.value;
   modelSelect.innerHTML = '';
   const prov = providers.find(p => p.id === selectedProviderId);
@@ -2002,6 +2002,22 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   const syncCustom = () => { modelCustom.style.display = modelSelect.value === '__custom__' ? '' : 'none'; };
   syncCustom();
   modelSelect.onchange = () => { syncCustom(); if (modelSelect.value === '__custom__') modelCustom.focus(); };
+  // Alias↔model mapping (alias-only relays only). These relays reject the alias
+  // targets as literal ids, so multicc sends a claude-* wire name; this shows the
+  // configured backend model per tier for reference.
+  if (aliasBox) {
+    const map = prov && prov.aliasMap ? Object.entries(prov.aliasMap).filter(([, v]) => v && v.model) : [];
+    if (map.length) {
+      const order = ['opus', 'sonnet', 'haiku', 'fable'];
+      map.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+      aliasBox.innerHTML = '<div style="margin-bottom:4px;color:#6e7681;">别名 → 模型（实际发送 claude-* 线上名）</div>' +
+        map.map(([t, m]) => `<div><b style="color:#c9d1d9;">${t}</b> → ${escapeHtml(m.model)}${m.name ? ` <span style="color:#6e7681;">(${escapeHtml(m.name)})</span>` : ''}</div>`).join('');
+      aliasBox.style.display = '';
+    } else {
+      aliasBox.style.display = 'none';
+      aliasBox.innerHTML = '';
+    }
+  }
 }
 
 // Single unified creation dialog (name + role + provider + model)
@@ -2123,15 +2139,19 @@ function showCreateSessionDialog({ cli, kind, providers = [], isClaude = true })
     modelCustom = document.createElement('input');
     modelCustom.type = 'text';
     modelCustom.placeholder = '模型 ID，如 claude-opus-4-8';
-    modelCustom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;box-sizing:border-box;';
+    modelCustom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:6px;display:none;box-sizing:border-box;';
     box.appendChild(modelCustom);
 
+    const aliasBox = document.createElement('div');
+    aliasBox.style.cssText = 'font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.7;display:none;box-sizing:border-box;';
+    box.appendChild(aliasBox);
+
     // Initial model options (no provider selected → Claude defaults or empty for Codex)
-    rebuildModelOptions(modelSelect, modelCustom, providers, '', isClaude);
+    rebuildModelOptions(modelSelect, modelCustom, providers, '', isClaude, aliasBox);
 
     // Provider → Model linkage: when provider changes, rebuild model list
     provSelect.addEventListener('change', () => {
-      rebuildModelOptions(modelSelect, modelCustom, providers, provSelect.value, isClaude);
+      rebuildModelOptions(modelSelect, modelCustom, providers, provSelect.value, isClaude, aliasBox);
     });
 
     // ── Buttons ──

@@ -3880,6 +3880,71 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
     return _isClaude ? kClaudeModelOptions : const [];
   }
 
+  /// Alias↔model mapping for the picked provider (alias-only relays only, e.g.
+  /// iFlytek). Same logic as chat_screen.dart _aliasMapWidget. Null when absent.
+  Widget? get _aliasMapWidget {
+    final id = _pickedProvider;
+    if (id == null || id.isEmpty) return null;
+    Map<String, dynamic>? prov;
+    for (final p in widget.providers) {
+      if (p['id'] == id) {
+        prov = p;
+        break;
+      }
+    }
+    final map = prov?['aliasMap'];
+    if (map is! Map) return null;
+    const order = ['opus', 'sonnet', 'haiku', 'fable'];
+    final tiers = <MapEntry<String, Map>>[];
+    for (final t in order) {
+      final v = map[t];
+      if (v is Map && v['model'] != null) tiers.add(MapEntry(t, v));
+    }
+    if (tiers.isEmpty) return null;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.panel,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '别名 → 模型（实际发送 claude-* 线上名）',
+            style: TextStyle(color: AppColors.faint, fontSize: 11),
+          ),
+          const SizedBox(height: 4),
+          ...tiers.map((e) {
+            final name = e.value['name']?.toString();
+            return Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text.rich(
+                TextSpan(
+                  style: const TextStyle(color: AppColors.muted, fontSize: 11),
+                  children: [
+                    TextSpan(
+                      text: '${e.key} → ',
+                      style: const TextStyle(
+                        color: AppColors.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    TextSpan(text: '${e.value['model']}'),
+                    if (name != null && name.isNotEmpty)
+                      TextSpan(text: ' ($name)'),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   Future<void> _pickPreset() async {
     final id = await showModalBottomSheet<String>(
       context: context,
@@ -3983,6 +4048,7 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
   @override
   Widget build(BuildContext context) {
     final modelOptions = _currentModelOptions;
+    final aliasWidget = _aliasMapWidget;
     return AlertDialog(
       backgroundColor: const Color(0xFF0f1115),
       title: Text(
@@ -4122,6 +4188,7 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
                 autofocus: true,
               ),
             ],
+            if (aliasWidget != null) aliasWidget,
             const SizedBox(height: 12),
             Text(
               _isClaude ? 'Effort' : 'Reasoning Level',

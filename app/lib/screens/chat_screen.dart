@@ -772,6 +772,65 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     return value;
   }
 
+  // Alias↔model mapping for the selected provider (alias-only relays only, e.g.
+  // iFlytek opus/sonnet/haiku/fable → astron-code-latest). These relays reject the
+  // alias targets as literal ids, so multicc sends a claude-* wire name at spawn;
+  // this shows the configured backend model per tier for reference. Null when the
+  // provider has no aliasMap.
+  Widget? _aliasMapWidget(String provider) {
+    final map = _providerMap(provider)?['aliasMap'];
+    if (map is! Map) return null;
+    const order = ['opus', 'sonnet', 'haiku', 'fable'];
+    final tiers = <MapEntry<String, Map>>[];
+    for (final t in order) {
+      final v = map[t];
+      if (v is Map && v['model'] != null) tiers.add(MapEntry(t, v));
+    }
+    if (tiers.isEmpty) return null;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.panel,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: AppColors.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '别名 → 模型（实际发送 claude-* 线上名）',
+            style: TextStyle(color: AppColors.faint, fontSize: 11),
+          ),
+          const SizedBox(height: 4),
+          ...tiers.map((e) {
+            final name = e.value['name']?.toString();
+            return Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text.rich(
+                TextSpan(
+                  style: const TextStyle(color: AppColors.muted, fontSize: 11),
+                  children: [
+                    TextSpan(
+                      text: '${e.key} → ',
+                      style: const TextStyle(
+                        color: AppColors.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    TextSpan(text: '${e.value['model']}'),
+                    if (name != null && name.isNotEmpty)
+                      TextSpan(text: ' ($name)'),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   void _onProviderChanged(String? value) {
     final next = value ?? '';
     final choices = _modelChoices(next);
@@ -803,6 +862,7 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
   @override
   Widget build(BuildContext context) {
     final modelChoices = _modelChoices(_provider);
+    final aliasWidget = _aliasMapWidget(_provider);
     final providerIds = widget.providers
         .map((p) => p['id']?.toString() ?? '')
         .toSet();
@@ -902,6 +962,7 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
                 ),
               ),
             ],
+            if (aliasWidget != null) aliasWidget,
             const SizedBox(height: 12),
             Text(
               _isClaude ? 'Effort' : 'Reasoning Level',

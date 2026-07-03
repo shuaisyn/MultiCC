@@ -2214,6 +2214,17 @@ function providerModelOptions(providerId) {
   return (p && Array.isArray(p.modelOptions)) ? p.modelOptions.filter(Boolean) : [];
 }
 
+// Alias↔model mapping for the selected provider (alias-only relays declare one
+// model per tier, e.g. iFlytek opus/sonnet/haiku/fable → astron-code-latest).
+// Returned shape matches the server summary: { opus:{model,name}, sonnet:{...}, ... }.
+function providerAliasMap(providerId) {
+  if (!providerId) return null;
+  const p = _providerList.find(o => o.id === providerId);
+  if (!p || !p.aliasMap) return null;
+  const entries = Object.entries(p.aliasMap).filter(([, v]) => v && v.model);
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
 function buildModelChoices(providerId) {
   const opts = providerModelOptions(providerId);
   if (opts.length) return ['', ...opts, '__custom__'];
@@ -2243,6 +2254,7 @@ function showAIConfigPicker({ provider, model, effort }) {
       <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">Model</label>
       <select id="ai-model" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:8px;"></select>
       <input id="ai-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;">
+      <div id="ai-aliasmap" style="font-size:11px;color:#8b949e;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.7;display:none;"></div>
       <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">${_sessionCli === 'codex' ? 'Reasoning Level' : 'Effort'}</label>
       <select id="ai-effort" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;"></select>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
@@ -2255,6 +2267,7 @@ function showAIConfigPicker({ provider, model, effort }) {
     const providerSel = box.querySelector('#ai-provider');
     const modelSel = box.querySelector('#ai-model');
     const custom = box.querySelector('#ai-model-custom');
+    const aliasBox = box.querySelector('#ai-aliasmap');
     const effortSel = box.querySelector('#ai-effort');
     const effortLabel = box.querySelector('#ai-effort-label');
 
@@ -2293,6 +2306,22 @@ function showAIConfigPicker({ provider, model, effort }) {
       modelSel.value = isKnown ? (preferredModel || '') : '__custom__';
       custom.value = isKnown ? '' : (preferredModel || '');
       syncCustom();
+      renderAliasMap(nextProvider);
+    }
+    // Show the provider's alias→model correspondence (only for alias-only relays
+    // that declare one). These relays reject the alias targets as literal model
+    // ids, so multicc sends a safe claude-* wire name at spawn time — the mapping
+    // below is the configured backend model per tier, for reference.
+    function renderAliasMap(providerId) {
+      const map = providerAliasMap(providerId);
+      if (!map) { aliasBox.style.display = 'none'; aliasBox.innerHTML = ''; return; }
+      const order = ['opus', 'sonnet', 'haiku', 'fable'].filter(t => map[t]);
+      const lines = order.map(t => {
+        const m = map[t];
+        return `<div><b style="color:#c9d1d9;">${t}</b> → ${escapeHtml(m.model)}${m.name ? ` <span style="color:#6e7681;">(${escapeHtml(m.name)})</span>` : ''}</div>`;
+      });
+      aliasBox.innerHTML = `<div style="margin-bottom:4px;color:#6e7681;">别名 → 模型（实际发送 claude-* 线上名）</div>${lines.join('')}`;
+      aliasBox.style.display = '';
     }
     function syncCustom() {
       custom.style.display = modelSel.value === '__custom__' ? '' : 'none';

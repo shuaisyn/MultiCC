@@ -2,10 +2,14 @@
 
 // Per-session provider config — owned by multicc, importable from cc-switch.
 //
-// multicc keeps its OWN provider store (providers.json) and never writes into
-// cc-switch's database. cc-switch (~/.cc-switch/cc-switch.db) is only an import
-// SOURCE: the user can pull its provider list into multicc's store, then add /
-// edit / delete freely here without touching cc-switch.
+// multicc keeps its OWN provider store (providers.json). cc-switch
+// (~/.cc-switch/cc-switch.db) is an import SOURCE: the user can pull its provider
+// list into multicc's store, then add / edit / delete freely here. multicc does
+// NOT write to cc-switch during normal operation. The ONE deliberate exception
+// is `fixProviderModels()` — an explicit admin action (POST .../fix-source) that
+// corrects a provider's settings_config in place (e.g. rewrite an alias-only
+// relay's rejected model literals to valid wire names). It backs up first and
+// touches a single row by composite PK; it is never invoked automatically.
 //
 // A provider's `settingsConfig` mirrors cc-switch's shape so the spawn-env logic
 // is uniform: claude → { env: { ANTHROPIC_* } }, codex → { auth, config(toml) }.
@@ -17,7 +21,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const crypto = require('crypto');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 
 const PROJECT_DIR = path.join(__dirname, '..');
 
@@ -54,6 +58,14 @@ const STORE_FILE = path.join(__dirname, '..', 'providers.json');
 const CODEX_HOMES_DIR = path.join(os.homedir(), '.multicc', 'codex-homes');
 
 const APP_TYPES = ['claude', 'codex'];
+
+// Safe wire model used when a provider is "alias-only" — it declares only
+// ANTHROPIC_DEFAULT_*_MODEL alias targets (no canonical ANTHROPIC_MODEL) and its
+// relay rejects those targets as literal --model values (e.g. iFlytek rejects
+// "astron-code-latest" but accepts every claude-* name). All Anthropic-compatible
+// relays accept claude-* wire names, so this is the safe substitution. Override
+// via env if a particular relay prefers a different canonical id.
+const WIRE_DEFAULT_MODEL = process.env.CLAUDE_WIRE_DEFAULT_MODEL || 'claude-sonnet-4-5';
 
 // ── multicc store (providers.json) ───────────────────────────────────────────
 
@@ -216,18 +228,31 @@ function buildSettingsConfig(appType, { baseUrl, authToken, model, models, provi
 // Public-safe summary — never leaks a full token (only masked).
 function summarize(p) {
   const cfg = parseConfig(p.settingsConfig);
-  let baseUrl = '', model = '', token = '', modelOptions = [];
+  let baseUrl = '', model = '', token = '', modelOptions = [], aliasOnly = false, aliasMap = {};
   if (p.appType === 'claude') {
     const env = cfg.env || {};
     baseUrl = env.ANTHROPIC_BASE_URL || '';
     model = env.ANTHROPIC_MODEL || '';
     token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
     // Collect all models this provider can serve: primary + DEFAULT_* overrides + catalog.
-    const aliasKeys = ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+    const aliasKeys = ['ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL'];
     const catalog = (cfg.modelCatalog && Array.isArray(cfg.modelCatalog.models))
       ? cfg.modelCatalog.models.map(m => m && m.model).filter(Boolean)
       : [];
     modelOptions = uniqueModels([env.ANTHROPIC_MODEL, ...aliasKeys.map(k => env[k]), ...catalog]);
+    // Alias-only relay: has a base URL but no canonical ANTHROPIC_MODEL — it only
+    // declares per-tier alias targets (e.g. iFlytek maps opus/sonnet/haiku/fable →
+    // astron-code-latest). Such relays reject those targets as literal --model
+    // values, so the spawn path substitutes a safe wire default (see buildChatSpawnArgs).
+    aliasOnly = !!baseUrl && !model;
+    // Surface the alias↔model correspondence for the model picker, carrying cc-switch's
+    // friendly *_MODEL_NAME label (e.g. opus → astron-code-latest (GLM5.2)).
+    for (const k of aliasKeys) {
+      const m = env[k];
+      if (!m) continue;
+      const tier = k.replace('ANTHROPIC_DEFAULT_', '').replace('_MODEL', '').toLowerCase();
+      aliasMap[tier] = { model: m, name: env[k + '_NAME'] || '' };
+    }
   } else {
     baseUrl = (cfg.proxyTarget && cfg.proxyTarget.originalBaseUrl) || tomlValue(cfg.config, 'base_url');
     model = tomlValue(cfg.config, 'model');
@@ -255,6 +280,8 @@ function summarize(p) {
     baseUrl,
     model,
     modelOptions,
+    aliasOnly,
+    aliasMap,
     useChatResponsesProxy: !!(cfg.proxyTarget && cfg.proxyTarget.mode === 'chat-to-responses'),
     tokenMask: maskToken(token),
     hasToken: !!token,
@@ -457,6 +484,7 @@ function buildChildEnv(base, session, extra = {}) {
   return {
     env,
     skipDefaultModel: spawn.skipDefaultModel,
+    aliasOnly: spawn.aliasOnly,
     providerName: spawn.providerName,
     codexHome: spawn.codexHome,
     tools: spawn.tools,
@@ -468,10 +496,10 @@ function buildChildEnv(base, session, extra = {}) {
 //   - skipDefaultModel: claude routes elsewhere → don't force the global --model.
 function resolveSpawnEnv(session) {
   const providerId = session && session.provider;
-  if (!providerId) return { env: {}, skipDefaultModel: false, providerName: null };
+  if (!providerId) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: null };
   const appType = (session.cli === 'codex') ? 'codex' : 'claude';
   const p = getProvider(appType, providerId);
-  if (!p) return { env: {}, skipDefaultModel: false, providerName: null };
+  if (!p) return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: null };
   const cfg = parseConfig(p.settingsConfig);
 
   if (appType === 'claude') {
@@ -489,7 +517,26 @@ function resolveSpawnEnv(session) {
     // Auto-copying AUTH_TOKEN to API_KEY forces the x-api-key header on
     // providers that don't accept it (e.g. Zhipu GLM 401s because it only
     // reads Authorization: Bearer). Leave AUTH_TOKEN as-is for Bearer auth.
-    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, providerName: p.name, tools: src.MULTICC_TOOLS };
+
+    // Alias-only relay remap: a provider with a base URL but no canonical
+    // ANTHROPIC_MODEL only declares alias targets, and its relay rejects those
+    // targets as literal model ids (e.g. iFlytek rejects "astron-code-latest"
+    // but accepts every claude-* name). Claude Code resolves internal tiers —
+    // background/haiku tasks, ultracode subagents — through
+    // ANTHROPIC_DEFAULT_*_MODEL, so without remapping those sub-calls still
+    // send the rejected literal and 1211 mid-turn. Point every model reference
+    // at a safe claude-* wire name so any resolution path the CLI takes lands
+    // on a model the relay accepts. (buildChatSpawnArgs still substitutes the
+    // main --model; this covers the tier-based sub-calls.)
+    if (env.ANTHROPIC_BASE_URL && !env.ANTHROPIC_MODEL) {
+      env.ANTHROPIC_MODEL = WIRE_DEFAULT_MODEL;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-4-8';
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = WIRE_DEFAULT_MODEL;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-4-5';
+      env.ANTHROPIC_DEFAULT_FABLE_MODEL = WIRE_DEFAULT_MODEL; // claude-fable-5 untested on these relays → safe default
+      env.ANTHROPIC_SMALL_FAST_MODEL = 'claude-haiku-4-5';
+    }
+    return { env, skipDefaultModel: !!env.ANTHROPIC_BASE_URL, aliasOnly: !!env.ANTHROPIC_BASE_URL && !src.ANTHROPIC_MODEL, providerName: p.name, tools: src.MULTICC_TOOLS };
   }
 
   try {
@@ -506,9 +553,9 @@ function resolveSpawnEnv(session) {
       toml = withTomlModel(toml, session.model);
       fs.writeFileSync(path.join(home, 'config.toml'), toml);
     }
-    return { env: { CODEX_HOME: home }, skipDefaultModel: false, providerName: p.name, codexHome: home };
+    return { env: { CODEX_HOME: home }, skipDefaultModel: false, aliasOnly: false, providerName: p.name, codexHome: home };
   } catch (_) {
-    return { env: {}, skipDefaultModel: false, providerName: p.name };
+    return { env: {}, skipDefaultModel: false, aliasOnly: false, providerName: p.name };
   }
 }
 
@@ -649,6 +696,103 @@ function getProviderUsageStats() {
   return { stats, total };
 }
 
+// ── Relay probe + cc-switch source correction ────────────────────────────────
+
+// Candidate wire names probed to discover what an alias-only relay accepts.
+// All Anthropic-compatible relays accept claude-* names; this confirms which.
+const PROBE_CANDIDATES = ['claude-sonnet-4-5', 'claude-opus-4-8', 'claude-haiku-4-5', 'claude-sonnet-4.5', 'claude-sonnet-5'];
+
+// Env vars that select a model — stripped from the probe child so the candidate
+// `--model` is authoritative (otherwise an alias target would shadow it).
+const PROBE_STRIP_KEYS = ['ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL'];
+
+// Probe one candidate by spawning the real claude CLI with the provider's env and
+// `--model <candidate>`. Raw /v1/messages probing is unreliable because picky
+// relays (e.g. iFlytek) reject anything but the CLI's full request shape; the CLI
+// is the ground truth for what multicc itself will send. Resolves {model, ok, sample}.
+function _probeCandidate(cliCmd, baseEnv, model) {
+  return new Promise((resolve) => {
+    const env = { ...process.env, ...baseEnv };
+    for (const k of PROBE_STRIP_KEYS) delete env[k];
+    const child = spawn(cliCmd, ['-p', '--model', model, '--max-turns', '1', '--dangerously-skip-permissions', 'hi'], { env, windowsHide: true });
+    let out = '';
+    const sink = (c) => { if (out.length < 2048) out += c.toString(); };
+    child.stdout.on('data', sink);
+    child.stderr.on('data', sink);
+    const to = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 25000);
+    child.on('error', () => { clearTimeout(to); resolve({ model, ok: false, reason: 'spawn failed (is the claude CLI installed?)' }); });
+    child.on('close', () => {
+      clearTimeout(to);
+      const rejected = /1211|模型不存在|model.*(not found|不存在)|model_not_found/i.test(out);
+      resolve({ model, ok: !rejected, sample: out.slice(0, 95) });
+    });
+  });
+}
+
+// Probe which candidate model names a relay accepts. Spawns the claude CLI per
+// candidate (sequential; ~N×turn). Returns { tested:[{model,ok,...}], accepted:[model,...] }.
+async function probeRelayModels(baseEnv, candidates, cliCmd) {
+  const cands = (candidates && candidates.length) ? candidates : PROBE_CANDIDATES;
+  if (!baseEnv || !baseEnv.ANTHROPIC_BASE_URL) return { tested: [], accepted: [], error: 'no base url' };
+  const cmd = cliCmd || 'claude';
+  const tested = [];
+  for (const m of cands) tested.push(await _probeCandidate(cmd, baseEnv, m));
+  return { tested, accepted: tested.filter(o => o.ok).map(o => o.model) };
+}
+
+// Default tier → wire-model map applied when correcting an alias-only relay.
+const DEFAULT_TIER_MAP = {
+  ANTHROPIC_MODEL: WIRE_DEFAULT_MODEL,
+  ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-4-8',
+  ANTHROPIC_DEFAULT_SONNET_MODEL: WIRE_DEFAULT_MODEL,
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+  ANTHROPIC_DEFAULT_FABLE_MODEL: WIRE_DEFAULT_MODEL, // claude-fable-5 untested on these relays
+  ANTHROPIC_SMALL_FAST_MODEL: 'claude-haiku-4-5',
+};
+
+// Rewrite ONE cc-switch provider's settings_config in place so its model literals
+// are valid wire names (targets alias-only relays whose configured alias targets
+// are rejected, e.g. iFlytek's "astron-code-latest"). Backs up the DB first, then
+// UPDATEs the single row identified by the composite PK (id, app_type). Never
+// invoked automatically — only via the explicit POST .../fix-source endpoint.
+// `tierMap` overrides DEFAULT_TIER_MAP. Returns { ok, backup?, before?, after?, error? }.
+// `tierMap` overrides DEFAULT_TIER_MAP. `dryRun` reads the row and reports the
+// before/after WITHOUT backing up or writing. Returns { ok, dryRun, backup?, before?, after?, error? }.
+function fixProviderModels(appType, id, tierMap = {}, dryRun = false) {
+  if (appType !== 'claude') return { ok: false, error: 'only claude providers are supported' };
+  if (!ensureDatabase()) return { ok: false, error: 'better-sqlite3 unavailable' };
+  const overrides = { ...DEFAULT_TIER_MAP, ...tierMap };
+  let db;
+  try {
+    db = new Database(CC_DB, { readonly: dryRun, timeout: 15000 });
+    const row = db.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(id, appType);
+    if (!row) return { ok: false, error: 'provider row not found' };
+    const cfg = parseConfig(row.settings_config);
+    const env = { ...(cfg.env || {}) };
+    const before = {};
+    for (const k of Object.keys(overrides)) if (env[k] !== undefined) before[k] = env[k];
+    for (const [k, v] of Object.entries(overrides)) env[k] = v;
+    if (dryRun) return { ok: true, dryRun: true, before, after: overrides };
+
+    // Real write: back up first, then UPDATE the single row.
+    const bkDir = path.join(path.dirname(CC_DB), 'backups');
+    try { fs.mkdirSync(bkDir, { recursive: true }); } catch (_) {}
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const bkPath = path.join(bkDir, `cc-switch.db.${ts}`);
+    try { fs.copyFileSync(CC_DB, bkPath); } catch (e) { return { ok: false, error: `backup failed: ${e.message}` }; }
+    cfg.env = env;
+    const update = db.transaction(() =>
+      db.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?')
+        .run(JSON.stringify(cfg), id, appType));
+    update();
+    return { ok: true, backup: bkPath, before, after: overrides };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    try { if (db) db.close(); } catch (_) {}
+  }
+}
+
 module.exports = {
   available,
   ccSwitchAvailable,
@@ -666,4 +810,7 @@ module.exports = {
   readDailyWindows,
   CLAUDE_ROUTING_KEYS,
   CODEX_HOMES_DIR,
+  WIRE_DEFAULT_MODEL,
+  probeRelayModels,
+  fixProviderModels,
 };
