@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d1117" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <title>MultiCC Dashboard — 会话状态看板</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body>
+  <!-- Header -->
+  <div class="dash-header">
+    <span class="logo">Multi<span>CC</span></span>
+    <span class="title">📊 Dashboard</span>
+    <span class="spacer"></span>
+    <span class="refresh-indicator">
+      <span class="refresh-dot" id="refresh-dot"></span>
+      <span id="refresh-label">连接中…</span>
+    </span>
+    <a href="/" class="hdr-btn" title="终端">🖥️ 终端</a>
+    <a href="/chat" class="hdr-btn" title="聊天">💬 Chat</a>
+    <a href="/manage" class="hdr-btn" title="管理">⚙️ Manage</a>
+  </div>
+
+  <!-- Main content -->
+  <div class="dash-main">
+    <!-- Error box -->
+    <div id="error-box" class="error-state" style="display:none"></div>
+
+    <!-- Stats cards -->
+    <div class="stats-grid" id="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">总会话数</div>
+        <div class="stat-value">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">活跃会话</div>
+        <div class="stat-value">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">CLI 分布</div>
+        <div class="stat-value">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">类型分布</div>
+        <div class="stat-value">—</div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="filter-bar">
+      <div class="filter-group">
+        <label>类型:</label>
+        <select id="filter-kind">
+          <option value="">全部</option>
+          <option value="chat">chat</option>
+          <option value="terminal">terminal</option>
+          <option value="gateway">gateway</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>状态:</label>
+        <button class="filter-active active" data-value="">全部</button>
+        <button class="filter-active" data-value="true">活跃</button>
+        <button class="filter-active" data-value="false">非活跃</button>
+      </div>
+      <span class="spacer" style="flex:1"></span>
+      <span style="font-size:12px;color:var(--muted)">共 <b id="session-count" style="color:var(--fg)">0</b> 个会话 · 每 5s 自动刷新</span>
+    </div>
+
+    <!-- Sessions table -->
+    <div id="table-wrap" class="table-wrap">
+      <div class="loading-state">加载中…</div>
+    </div>
+  </div>
+
+  <script src="/dashboard.js"></script>
+</body>
+</html>
