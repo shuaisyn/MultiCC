@@ -13,8 +13,8 @@
 
 const assert = require('assert');
 const cp = require('child_process');
-const detached = require('./src/detached');
-const waitInjector = require('./src/wait-injector');
+const detached = require('../src/detached');
+const waitInjector = require('../src/wait-injector');
 
 function sh(cmd) { return cp.execSync(cmd, { shell: '/bin/sh' }).toString(); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
