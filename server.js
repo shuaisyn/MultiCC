@@ -662,18 +662,14 @@ const cliProviders = {
         '--include-partial-messages', '--dangerously-skip-permissions',
         '--append-system-prompt', sysPrompt,
       ];
-      // Resolve the wire model. An explicit per-session model is honored ONLY when
-      // it's an alias (opus/sonnet/haiku/fable/default) or a model the provider
-      // actually serves — otherwise a stale value is used (e.g. "astron-code-latest"
-      // left on a session after its iFlytek provider was import-corrected), which
-      // the relay rejects → 400 [1211]. Fall back to the provider's canonical model,
-      // or the global /model default for the default login.
-      const isAlias = /^(opus|sonnet|haiku|fable|default)$/i.test(session.model || '');
-      const served = opts.providerModels || [];
-      const hasProvider = opts.providerModel !== undefined && opts.providerModel !== null;
-      const model = !hasProvider
-        ? (session.model || (opts.skipDefaultModel ? null : claudeDefaultModel()))
-        : ((session.model && (isAlias || served.includes(session.model))) ? session.model : opts.providerModel);
+      // Resolve the wire model (single source of truth: providers.resolveSessionWireModel).
+      // An explicit per-session model is honored ONLY when it's an alias tier or a
+      // model the provider serves; otherwise fall back to the provider's canonical
+      // model, or the global /model default for the default login.
+      const model = providers.resolveSessionWireModel(session.model, {
+        providerModel: opts.providerModel, providerModels: opts.providerModels,
+        skipDefaultModel: opts.skipDefaultModel, defaultModel: claudeDefaultModel(),
+      });
       if (model) args.push('--model', model);
       const effort = cliEffortLevel(session);
       if (effort) args.push('--effort', effort);
@@ -4313,7 +4309,7 @@ const GOAL_CONFIG_DEFAULT = {
 //   CLI-level limit). 0 = 不限制.
 // maxBudget → advisory output-token budget injected into the goal prompt so the
 //   agent self-stops near the cap (no hard CLI flag). 0 = 不限制.
-const GOAL_ROUNDS_DEFAULT = 200;   // fallback round cap when a send omits it
+const GOAL_ROUNDS_DEFAULT = 0;     // fallback round cap when a send omits it (0 = unlimited)
 const GOAL_BUDGET_DEFAULT = 0;     // fallback budget (0 = unlimited)
 const GOAL_ROUNDS_MAX = 200;       // sanity ceiling for --max-turns
 const GOAL_BUDGET_MAX = 5000000;   // sanity ceiling for the advisory token budget
@@ -6450,14 +6446,11 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
     MULTICC_DIR_ID: persisted.dirId || '',
     MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
   });
-  // Same wire-model resolution as buildChatSpawnArgs: honor the per-session model
-  // only if it's an alias or a served model; else the provider's canonical model.
-  const _isAlias = /^(opus|sonnet|haiku|fable|default)$/i.test(persisted.model || '');
-  const _served = providerModels || [];
-  const _hasProvider = providerModel !== undefined && providerModel !== null;
-  const model = !_hasProvider
-    ? (persisted.model || (skipDefaultModel ? null : claudeDefaultModel()))
-    : ((persisted.model && (_isAlias || _served.includes(persisted.model))) ? persisted.model : providerModel);
+  // Wire-model resolution lives in providers.resolveSessionWireModel (shared
+  // with buildChatSpawnArgs) so the two spawn paths cannot drift apart.
+  const model = providers.resolveSessionWireModel(persisted.model, {
+    providerModel, providerModels, skipDefaultModel, defaultModel: claudeDefaultModel(),
+  });
   const extraArgs = [];
   const effort = cliEffortLevel(persisted);
   if (effort) extraArgs.push('--effort', effort);

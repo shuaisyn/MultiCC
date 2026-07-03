@@ -197,6 +197,28 @@ const ALIAS_TIER_KEYS = {
   fable: 'ANTHROPIC_DEFAULT_FABLE_MODEL',
 };
 
+// Source-of-truth regex for "is this an alias tier?" — derived from
+// ALIAS_TIER_KEYS plus the synthetic 'default' tier, so the vocabulary lives in
+// one place. Used by resolveSessionWireModel below.
+const ALIAS_TIER_REGEX = new RegExp('^(?:' + [...Object.keys(ALIAS_TIER_KEYS), 'default'].join('|') + ')$', 'i');
+
+// Resolve the wire model id to send to the CLI for a given session + provider.
+// An explicit per-session model is honored ONLY when it's an alias tier
+// (opus/sonnet/haiku/fable/default) or a model the provider actually serves —
+// otherwise a stale value (e.g. "astron-code-latest" left on a session after
+// its provider's model changed) is dropped, because relays reject unknown ids
+// (400 / 1211 / 10404). Falls back to the provider's canonical model, or to
+// `defaultModel` for the default login. Single source of truth for this
+// decision; called by BOTH chat-spawn paths in server.js so they cannot drift.
+function resolveSessionWireModel(sessionModel, { providerModel = null, providerModels = [], skipDefaultModel = false, defaultModel = null } = {}) {
+  const served = providerModels || [];
+  const hasProvider = providerModel !== undefined && providerModel !== null;
+  if (!hasProvider) {
+    return sessionModel || (skipDefaultModel ? null : (defaultModel || null));
+  }
+  return (sessionModel && (ALIAS_TIER_REGEX.test(sessionModel) || served.includes(sessionModel))) ? sessionModel : providerModel;
+}
+
 // Apply a { opus: {model, name}, sonnet: {...}, ... } map onto a claude env
 // object (in place), writing/clearing ANTHROPIC_DEFAULT_*_MODEL[_NAME]. Blank
 // model for a tier clears that tier's mapping.
@@ -834,6 +856,7 @@ module.exports = {
   importFromCcSwitch,
   resolveSpawnEnv,
   buildChildEnv,
+  resolveSessionWireModel,
   getProviderUsageStats,
   readDailyWindows,
   CLAUDE_ROUTING_KEYS,
