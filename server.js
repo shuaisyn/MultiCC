@@ -505,8 +505,22 @@ function claudeDefaultModel() {
 // whose env decides the model without declaring ANTHROPIC_MODEL).
 function effectiveSessionModel(session) {
   if (!session) return null;
-  if (session.model) return session.model;
   const appType = (session.cli === 'codex') ? 'codex' : 'claude';
+  if (session.model) {
+    // Alias-mapped relay: a Claude tier key (opus/sonnet/haiku/fable) stands for
+    // a real wire model on this provider (e.g. opus → glm-5.2). Resolve it here so
+    // every display (REST, init, cards) shows the real model id instead of the
+    // tier alias, without needing the client to have the provider list loaded.
+    const providerId = session.provider;
+    if (providerId) {
+      try {
+        const am = providers.getProviderSummary(appType, providerId)?.aliasMap;
+        const entry = am && am[session.model];
+        if (entry && entry.model) return entry.model;
+      } catch (_) { /* fall through */ }
+    }
+    return session.model;
+  }
   const providerId = session.provider;
   if (providerId) {
     try {
