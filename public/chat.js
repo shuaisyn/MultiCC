@@ -2347,6 +2347,8 @@ async function loadSessionModel() {
     updateStreamBtn();
     _sessionAutoCommit = !!info.autoCommit;
     updateAutoCommitBtn();
+    _sessionAutoDispatch = !!info.autoDispatch;
+    updateAutoDispatchCheck();
   } catch (_) {}
 }
 
@@ -2839,6 +2841,37 @@ autoCommitBtn?.addEventListener('click', async () => {
     addSystemMsg(_sessionAutoCommit ? '✓ 已开启「任务完成后自动提交合并」，每轮完成后将自动 commit 并合并回基分支' : '✓ 已关闭「任务完成后自动提交合并」');
   } catch (e) {
     addSystemMsg('保存失败：' + e.message);
+  }
+});
+
+/* ── Per-session auto-dispatch (auto dispatch tasks to other sessions) ── */
+const autoDispatchCheck = document.getElementById('auto-dispatch-check');
+let _sessionAutoDispatch = false;
+
+function updateAutoDispatchCheck() {
+  if (autoDispatchCheck) autoDispatchCheck.checked = _sessionAutoDispatch;
+}
+
+autoDispatchCheck?.addEventListener('change', async () => {
+  const newVal = autoDispatchCheck.checked;
+  try {
+    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoDispatch: newVal }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      addSystemMsg('保存失败：' + (data.error || `HTTP ${res.status}`));
+      autoDispatchCheck.checked = _sessionAutoDispatch; // rollback
+      return;
+    }
+    _sessionAutoDispatch = !!data.autoDispatch;
+    updateAutoDispatchCheck();
+    addSystemMsg(_sessionAutoDispatch ? '✓ 已开启「Auto dispatch」，会话可自动派发任务到其它 session' : '✓ 已关闭「Auto dispatch」');
+  } catch (e) {
+    addSystemMsg('保存失败：' + e.message);
+    autoDispatchCheck.checked = _sessionAutoDispatch; // rollback
   }
 });
 
