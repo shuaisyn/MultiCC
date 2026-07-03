@@ -1201,6 +1201,7 @@ function buildDispatchContextPrompt(sessionId) {
         '当前会话开启了 ultracode：你应优先把实质性复杂任务拆成可并行、可验证的子任务，分发给多个 worker session，再根据回流结果继续汇总、修正和验证。',
         '保持每个 dispatch 指令完整自包含：目标、约束、要读/改/验证的范围、最终需要回报的内容。需要改代码时，要求 worker 先 sync，完成后 commit + merge，并报告结果。',
         '⚠️ 把任务交给 worker session 的唯一途径是下面的 dispatch 标记或 dispatch API：run-detached 只是后台 shell 命令、notes 只是留言，都不会让任何 worker 干活；嘴上说「分发给 worker」而不输出标记 = 什么都没发生。',
+        '【与官方 Workflow 工具的分工】轻量只读任务（搜索文件、读代码、快速研究）直接用内置 Task/Agent 工具在进程内并行即可，无需占用 worker session；重量级改代码任务（需要独立 worktree、跨 provider、需要 git commit/merge）才用 <<dispatch>> 标记分发到 worker session。两者不互斥：同一回合可以同时派发 Workflow 子任务和 dispatch worker。',
       ]
     : [
         '[MultiCC cross-session dispatch]',
