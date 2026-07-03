@@ -78,3 +78,6 @@ provider-defaults.json
 
 # Local-only scripts (not for git)
 scripts/bigmodel-snatch/
+
+# Sensitive docs
+PROMOTION_EXECUTION.md
