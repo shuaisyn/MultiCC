@@ -5608,17 +5608,23 @@ function editProvider(appType, id) {
   // Model-mapping section (claude only): opus/sonnet/haiku/fable → wire model + optional display name.
   const aliasSection = appType !== 'claude' ? '' : (() => {
     const tierLabel = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' };
+    const inputCss = 'flex:1;min-width:0;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12.5px;padding:7px 9px;outline:none;box-sizing:border-box';
+    const header = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:11px;color:var(--faint)">
+      <span style="width:48px;flex-shrink:0">别名</span>
+      <span style="flex:1;min-width:0">模型名（显示名）</span>
+      <span style="flex:1;min-width:0">映射名（真实模型id）</span>
+    </div>`;
     const rows = ['opus', 'sonnet', 'haiku', 'fable'].map(t => {
       const entry = (p.aliasMap && p.aliasMap[t]) || {};
-      const inputCss = 'flex:1;min-width:0;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12.5px;padding:7px 9px;outline:none;box-sizing:border-box';
       return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
         <span style="width:48px;flex-shrink:0;font-size:12px;color:var(--faint)">${tierLabel[t]}</span>
-        <input id="ep-alias-${t}-model" type="text" value="${escapeHtml(entry.model || '')}" placeholder="模型 id（可选）" autocomplete="off" style="${inputCss}">
-        <input id="ep-alias-${t}-name" type="text" value="${escapeHtml(entry.name || '')}" placeholder="显示名（可选）" autocomplete="off" style="${inputCss}">
+        <input id="ep-alias-${t}-name" type="text" value="${escapeHtml(entry.name || '')}" placeholder="如 GLM5.2（可选）" autocomplete="off" style="${inputCss}">
+        <input id="ep-alias-${t}-model" type="text" value="${escapeHtml(entry.model || '')}" placeholder="如 glm-5.2（可选）" autocomplete="off" style="${inputCss}">
       </div>`;
     }).join('');
     return `<div style="margin-bottom:10px">
-      <div style="font-size:12px;color:var(--faint);margin-bottom:6px">模型映射（分级覆盖，可选）</div>
+      <div style="font-size:12px;color:var(--faint);margin-bottom:6px">模型映射（分级覆盖，可选；留空=该级别不映射）</div>
+      ${header}
       ${rows}
     </div>`;
   })();
