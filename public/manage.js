@@ -1839,11 +1839,7 @@ function providerAliasMap(providerId) {
 
 // Ordered alias tiers [tier,{model,name}] for an alias-mapped relay, or [].
 function providerAliasTiers(providerId) {
-  const map = providerAliasMap(providerId);
-  if (!map) return [];
-  return ALIAS_TIERS
-    .filter(t => map[t] && map[t].model)
-    .map(t => [t, map[t]]);
+  return aliasTiersFromMap(providerAliasMap(providerId));
 }
 
 // Map a stored wire model id (e.g. claude-opus-4-8) back to its alias tier so
@@ -2030,18 +2026,13 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   modelSelect.innerHTML = '';
   const prov = providers.find(p => p.id === selectedProviderId);
   // Alias-mapped relays: offer the tiers directly, each option reading
-  // "opus → claude-opus-4-8 (GLM5.2)". The tier key is the value — the server
-  // honors session.model === opus/sonnet/haiku/fable as a wire model.
-  const aliasMap = prov && prov.aliasMap ? prov.aliasMap : null;
-  const tiers = aliasMap
-    ? ALIAS_TIERS.filter(t => aliasMap[t] && aliasMap[t].model)
-    : [];
+  // "opus · GLM5.2 · glm-5.2". The tier key is the value — the server honors
+  // session.model === opus/sonnet/haiku/fable as a wire model. Tier order +
+  // filtering come from the shared aliasTiersFromMap helper.
+  const tiers = aliasTiersFromMap(prov && prov.aliasMap ? prov.aliasMap : null);
   let opts;
   if (tiers.length) {
-    opts = tiers.map(t => {
-      const m = aliasMap[t];
-      return { value: t, label: formatAliasTierLabel(t, m) };
-    });
+    opts = tiers.map(([t, m]) => ({ value: t, label: formatAliasTierLabel(t, m) }));
   } else if (prov && prov.modelOptions && prov.modelOptions.length) {
     opts = prov.modelOptions.map(m => ({ value: m, label: m }));
   } else {

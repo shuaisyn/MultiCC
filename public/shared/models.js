@@ -33,6 +33,15 @@
     return opt ? (opt.labelKey ? tt(opt.labelKey) : opt.label) : model;
   }
 
+  // Ordered [tier, entry] pairs for an alias-mapped relay, or []. Pure over the
+  // resolved aliasMap — single source of truth for the tier-filter+order logic
+  // that providerAliasTiers (chat.js & manage.js) and rebuildModelOptions
+  // (manage.js) previously reimplemented.
+  function aliasTiersFromMap(aliasMap) {
+    if (!aliasMap) return [];
+    return ALIAS_TIERS.filter(t => aliasMap[t] && aliasMap[t].model).map(t => [t, aliasMap[t]]);
+  }
+
   // Format an alias-tier option label as "tier · displayName · wireModelId"
   // (别名 - 展示名 - 真实id). displayName is omitted when the entry has none,
   // yielding "tier · wireModelId".
@@ -44,5 +53,6 @@
   window.CLAUDE_MODEL_OPTIONS = CLAUDE_MODEL_OPTIONS;
   window.ALIAS_TIERS = ALIAS_TIERS;
   window.modelShortName = modelShortName;
+  window.aliasTiersFromMap = aliasTiersFromMap;
   window.formatAliasTierLabel = formatAliasTierLabel;
 })();

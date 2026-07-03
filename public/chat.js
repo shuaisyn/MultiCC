@@ -2176,11 +2176,7 @@ function providerAliasMap(providerId) {
 // Each tier is a real, selectable wire model on these relays (the server honors
 // session.model === opus/sonnet/haiku/fable directly).
 function providerAliasTiers(providerId) {
-  const map = providerAliasMap(providerId);
-  if (!map) return [];
-  return ALIAS_TIERS
-    .filter(t => map[t] && map[t].model)
-    .map(t => [t, map[t]]);
+  return aliasTiersFromMap(providerAliasMap(providerId));
 }
 
 // Map a stored wire model id (e.g. claude-opus-4-8) back to its alias tier so the
