@@ -2434,12 +2434,27 @@ app.patch('/api/sessions/:id', (req, res) => {
     appendEvent(s.dirId, 'session_role_changed', s.rolePrompt ? (s.label || s.id) : `${s.label || s.id}（清除，继承目录）`, s.id);
   }
   if (req.body.memory !== undefined) {
-    // Session memory: distilled key problems/solutions. User can view/edit/clear.
-    const mem = (req.body.memory == null ? '' : String(req.body.memory));
-    if (mem.length > SESSION_MEMORY_MAX) return res.status(400).json({ error: `memory too long (max ${SESSION_MEMORY_MAX})` });
-    s.memory = mem.trim() || null;
+    // Session memory: structured entries (array of {type,text,ts}).
+    // Accept both new array format and legacy string (auto-converted).
+    let memVal = req.body.memory;
+    let entries;
+    if (memVal == null) {
+      entries = null;  // clear
+    } else if (Array.isArray(memVal)) {
+      entries = memVal.filter(e => e && typeof e.text === 'string' && e.text.trim())
+        .map(e => ({ type: MEMORY_TYPES.includes(e.type) ? e.type : 'fact', text: e.text.trim(), ts: e.ts || Date.now() }));
+      const total = entries.reduce((s, e) => s + e.text.length, 0);
+      if (total > SESSION_MEMORY_MAX) return res.status(400).json({ error: `memory too long (max ${SESSION_MEMORY_MAX} chars)` });
+    } else if (typeof memVal === 'string' && memVal.trim()) {
+      // Legacy string format — auto-convert to a single fact entry.
+      if (memVal.length > SESSION_MEMORY_MAX) return res.status(400).json({ error: `memory too long (max ${SESSION_MEMORY_MAX})` });
+      entries = [{ type: 'fact', text: memVal.trim(), ts: 0 }];
+    } else {
+      entries = null;  // empty/null → clear
+    }
+    s.memory = entries;
     appendEvent(s.dirId, 'memory_updated', s.memory ? '手动编辑会话记忆' : '清空会话记忆', s.id);
-    workspaceBroadcast(s.dirId, { type: 'memory', sessionId: s.id, memory: s.memory || '' });
+    workspaceBroadcast(s.dirId, { type: 'memory', sessionId: s.id, memory: s.memory || [] });
   }
   if (req.body.streaming !== undefined) {
     // Experimental: keep a persistent streaming claude process across turns.
@@ -4998,19 +5013,83 @@ function setSessionSummary(sessionId, summary) {
   workspaceBroadcast(persisted.dirId, { type: 'summary', sessionId, summary, ts });
 }
 
-const SESSION_MEMORY_MAX = 8000;  // hard cap on a session's persisted memory text
+const SESSION_MEMORY_MAX = 8000;  // hard cap: total text length across all memory entries
+
+// Memory entry types
+// decision=确认的技术决策, gotcha=踩过的坑/正确做法, preference=用户偏好/约束, todo=待跟进事项, fact=关键事实
+const MEMORY_TYPES = ['decision', 'gotcha', 'preference', 'todo', 'fact'];
+
+// Priority for eviction when total text exceeds SESSION_MEMORY_MAX.
+// Lower index = evicted first (most ephemeral). todo goes first, preference survives longest.
+const MEMORY_EVICTION_ORDER = ['todo', 'fact', 'gotcha', 'decision', 'preference'];
 
 // Normalize persisted.memory into an entries array, regardless of whether it
 // is stored in the new array format or the legacy string format. Returns []
-// when there is no memory. A second worker may add an identically-named helper
-// when merging the array-format change; if so, the merge-conflict resolution
-// keeps whichever version landed first (they are intentionally identical).
+// when there is no memory.
 function getMemoryEntries(persisted) {
   const m = persisted?.memory;
   if (!m) return [];
-  if (Array.isArray(m)) return m;
+  if (Array.isArray(m)) return m.filter(e => e && typeof e.text === 'string' && e.text.trim());
   if (typeof m === 'string' && m.trim()) return [{ type: 'fact', text: m.trim(), ts: 0 }];
   return [];
+}
+
+function _memoryEvictionRank(type) {
+  const i = MEMORY_EVICTION_ORDER.indexOf(type);
+  return i === -1 ? MEMORY_EVICTION_ORDER.length : i;  // unknown types evicted first
+}
+
+function _trimMemoryEntries(entries) {
+  let totalLen = entries.reduce((s, e) => s + (e.text || '').length, 0);
+  if (totalLen <= SESSION_MEMORY_MAX) return entries;
+  // Sort for eviction: eviction-rank asc (todo first), then ts asc (oldest first within same rank).
+  const sorted = [...entries].sort((a, b) => {
+    const r = _memoryEvictionRank(a.type) - _memoryEvictionRank(b.type);
+    if (r !== 0) return r;
+    return (a.ts || 0) - (b.ts || 0);
+  });
+  let cut = 0;
+  while (cut < sorted.length && totalLen > SESSION_MEMORY_MAX) {
+    totalLen -= (sorted[cut].text || '').length;
+    cut++;
+  }
+  return sorted.slice(cut);  // survivors (order not preserved — caller doesn't rely on it)
+}
+
+// Simple similarity for dedup: Jaccard on word sets, fallback to substring check for short strings.
+function _memorySimilarity(a, b) {
+  const ta = (a || '').trim().toLowerCase();
+  const tb = (b || '').trim().toLowerCase();
+  if (!ta || !tb) return 0;
+  if (ta === tb) return 1;
+  if (ta.length < 40 || tb.length < 40) {
+    if (ta.includes(tb) || tb.includes(ta)) return 0.7;
+    return 0;
+  }
+  const wa = new Set(ta.split(/[\s,，。；;:：、（）()\[\]]+/).filter(Boolean));
+  const wb = new Set(tb.split(/[\s,，。；;:：、（）()\[\]]+/).filter(Boolean));
+  if (!wa.size || !wb.size) return 0;
+  let inter = 0;
+  for (const w of wa) if (wb.has(w)) inter++;
+  return inter / (wa.size + wb.size - inter);  // Jaccard
+}
+
+function _mergeMemoryEntries(prior, fresh) {
+  // For each fresh entry, find a similar prior entry (similarity > 0.6);
+  // replace the prior with the fresh (assumed more up-to-date); otherwise append.
+  const out = [...prior];
+  for (const f of fresh) {
+    let replaced = false;
+    for (let i = 0; i < out.length; i++) {
+      if (_memorySimilarity(f.text, out[i].text) > 0.6) {
+        out[i] = f;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) out.push(f);
+  }
+  return out;
 }
 
 // Distill a chunk of about-to-be-discarded chat history into the session's
@@ -5027,23 +5106,62 @@ function distillHistoryIntoMemory(sessionId, messages) {
     .map(m => `${m.role === 'user' ? '用户' : '助手'}: ${m.content.trim().slice(0, 2000)}`)
     .join('\n');
   if (text.length < 40) return;  // nothing worth distilling
-  const prior = (persisted.memory || '').trim();
+  const prior = getMemoryEntries(persisted);
   const prompt =
-`你是会话记忆提炼器。下面是一段即将被清理/丢弃的对话。请只提炼出「值得长期记住的关键问题，以及解决该问题的方式/手段/结论」——例如：踩过的坑与正确做法、确认过的技术决策、用户明确表达的偏好/约束、尚未完成需后续跟进的事项。\n忽略普通的任务过程、寒暄、可重新获得的中间步骤。每条一行，动词或名词开头，精炼。若这段对话没有任何值得长期记住的，只输出一个减号 "-"。\n\n${prior ? `【已有的会话记忆（请与新内容合并去重，不要丢失旧的有效条目；若总量过长则压缩同类项）】\n${prior}\n\n` : ''}【待提炼的对话】\n${text.slice(0, 12000)}\n\n请直接输出合并后的会话记忆（多行要点），不要解释、不要加标题。`;
+`你是会话记忆提炼器。下面是一段即将被清理/丢弃的对话。请只提炼出「值得长期记住的关键信息」，每条一行，格式为 \`[类型] 内容\`。
+
+类型必须是以下 5 种之一：
+- [decision] 确认过的技术决策或方案选择
+- [gotcha] 踩过的坑、错误做法与对应的正确做法
+- [preference] 用户明确表达的偏好或约束
+- [todo] 尚未完成、需后续跟进的事项
+- [fact] 关键的技术事实或项目状态
+
+忽略普通的任务过程、寒暄、可重新获得的中间步骤。每条内容精炼（不超过 100 字），动词或名词开头。若这段对话没有任何值得长期记住的，只输出一个减号 "-"。
+
+${prior.length ? `【已有的会话记忆条目（请与新内容合并去重：语义重复的条目只保留信息更完整的一条）】\n${prior.map(e => `[${e.type}] ${e.text}`).join('\n')}\n\n` : ''}【待提炼的对话】
+${text.slice(0, 12000)}
+
+请直接输出合并后的所有记忆条目（每行一条），不要解释、不要加标题。`;
   auxQueue.enqueue({ type: 'memory_distill', prompt, meta: { sessionId } })
     .then(result => {
-      let out = (result && result.text || '').trim();
-      if (!out || out === '-' || out === '—') return;
+      let raw = (result && result.text || '').trim();
+      if (!raw || raw === '-' || raw === '—') return;
       // Strip an accidental code fence / leading label the model may add.
-      out = out.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-      if (out.length > SESSION_MEMORY_MAX) out = out.slice(0, SESSION_MEMORY_MAX);
+      raw = raw.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+      if (!raw || raw === '-' || raw === '—') return;
+
+      // Parse each line: [type] text
+      const fresh = [];
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t || t === '-' || t === '—') continue;
+        let m = t.match(/^\[(\w+)\]\s*(.*)$/);
+        let type, entryText;
+        if (m) {
+          type = m[1].toLowerCase();
+          entryText = m[2].trim();
+        } else {
+          type = 'fact';
+          entryText = t;
+        }
+        if (!MEMORY_TYPES.includes(type)) type = 'fact';
+        if (!entryText) continue;
+        fresh.push({ type, text: entryText, ts: Date.now() });
+      }
+      if (!fresh.length) return;
+
       const p = persistedSessions.get(sessionId);
       if (!p) return;
-      p.memory = out;
+      const existing = getMemoryEntries(p);
+      let merged = _mergeMemoryEntries(existing, fresh);
+      merged = _trimMemoryEntries(merged);
+      p.memory = merged;
       savePersistedSessions();
-      appendEvent(p.dirId, 'memory_updated', `已提炼会话记忆（${out.length} 字）`, sessionId);
-      workspaceBroadcast(p.dirId, { type: 'memory', sessionId, memory: out });
-      console.log(`[multicc/memory] distilled ${sessionId}: memory now ${out.length} chars`);
+      const totalLen = merged.reduce((s, e) => s + (e.text || '').length, 0);
+      appendEvent(p.dirId, 'memory_updated', `已提炼会话记忆（${merged.length} 条，${totalLen} 字）`, sessionId);
+      workspaceBroadcast(p.dirId, { type: 'memory', sessionId, memory: merged });
+      console.log(`[multicc/memory] distilled ${sessionId}: memory now ${merged.length} entries / ${totalLen} chars`);
     })
     .catch(e => console.warn(`[multicc/memory] distill ${sessionId} failed: ${e.message}`));
 }
