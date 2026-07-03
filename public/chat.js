@@ -2168,64 +2168,6 @@ function showEffortPicker(current) {
   });
 }
 
-// WebView-safe picker (native select/confirm are unreliable in Android WebViews).
-function showModelPicker(current, providerOptions) {
-  const allowed = (providerOptions && providerOptions.length)
-    ? ['', ...providerOptions.filter(Boolean), '__custom__']
-    : CLAUDE_MODEL_OPTIONS.map(o => o.value);
-  return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
-    const box = document.createElement('div');
-    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:12px;padding:18px;width:380px;max-width:94vw;';
-    const msg = document.createElement('div');
-    msg.style.cssText = 'font-size:14px;color:#c9d1d9;line-height:1.6;margin-bottom:12px;';
-    msg.textContent = tt('modelTitle');
-    box.appendChild(msg);
-
-    const isKnown = allowed.includes(current);
-    const select = document.createElement('select');
-    select.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;';
-for (const v of allowed) {
-  const opt = document.createElement("option");
-  opt.value = v;
-  const named = CLAUDE_MODEL_OPTIONS.find(o => o.value === v);
-  opt.textContent = named ? (named.labelKey ? tt(named.labelKey) : named.label) : v;
-  select.appendChild(opt);
-    }
-    select.value = isKnown ? current : '__custom__';
-    box.appendChild(select);
-
-    const custom = document.createElement('input');
-    custom.type = 'text';
-    custom.placeholder = '模型 ID，如 claude-opus-4-8';
-    custom.value = isKnown ? '' : current;
-    custom.style.cssText = 'width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;';
-    box.appendChild(custom);
-    const syncCustom = () => { custom.style.display = select.value === '__custom__' ? '' : 'none'; };
-    syncCustom();
-    select.onchange = () => { syncCustom(); if (select.value === '__custom__') custom.focus(); };
-
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-    const cancel = document.createElement('button');
-    cancel.textContent = tt('cancel');
-    cancel.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;';
-    const ok = document.createElement('button');
-    ok.textContent = tt('save');
-    ok.style.cssText = 'background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;';
-    row.appendChild(cancel); row.appendChild(ok);
-    box.appendChild(row);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-
-    const close = (result) => { overlay.remove(); resolve(result); };
-    ok.onclick = () => close(select.value === '__custom__' ? custom.value.trim() : select.value);
-    cancel.onclick = () => close(null);
-    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
-  });
-}
-
 function providerModelOptions(providerId) {
   if (!providerId) return [];
   const p = _providerList.find(o => o.id === providerId);
