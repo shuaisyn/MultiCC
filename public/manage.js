@@ -1841,7 +1841,7 @@ function providerAliasMap(providerId) {
 function providerAliasTiers(providerId) {
   const map = providerAliasMap(providerId);
   if (!map) return [];
-  return ['opus', 'sonnet', 'haiku', 'fable']
+  return ALIAS_TIERS
     .filter(t => map[t] && map[t].model)
     .map(t => [t, map[t]]);
 }
@@ -2034,7 +2034,7 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   // honors session.model === opus/sonnet/haiku/fable as a wire model.
   const aliasMap = prov && prov.aliasMap ? prov.aliasMap : null;
   const tiers = aliasMap
-    ? ['opus', 'sonnet', 'haiku', 'fable'].filter(t => aliasMap[t] && aliasMap[t].model)
+    ? ALIAS_TIERS.filter(t => aliasMap[t] && aliasMap[t].model)
     : [];
   let opts;
   if (tiers.length) {
@@ -5264,7 +5264,7 @@ document.getElementById('prov-new-apptype')?.addEventListener('change', syncNewP
 function readAliasMapFields(prefix, root) {
   const scope = root || document;
   const map = {};
-  for (const tier of ['opus', 'sonnet', 'haiku', 'fable']) {
+  for (const tier of ALIAS_TIERS) {
     const model = (scope.querySelector(`#${prefix}-${tier}-model`)?.value || '').trim();
     const name = (scope.querySelector(`#${prefix}-${tier}-name`)?.value || '').trim();
     if (model) map[tier] = { model, name };
@@ -5275,7 +5275,7 @@ function readAliasMapFields(prefix, root) {
 // Sets the 4 tier rows' input values from an aliasMap ({tier: {model, name}}).
 function fillAliasMapFields(prefix, root, aliasMap) {
   const scope = root || document;
-  for (const tier of ['opus', 'sonnet', 'haiku', 'fable']) {
+  for (const tier of ALIAS_TIERS) {
     const entry = (aliasMap && aliasMap[tier]) || {};
     const modelEl = scope.querySelector(`#${prefix}-${tier}-model`);
     const nameEl = scope.querySelector(`#${prefix}-${tier}-name`);
@@ -5600,7 +5600,7 @@ function editProvider(appType, id) {
       <span style="flex:1;min-width:0">模型名（显示名）</span>
       <span style="flex:1;min-width:0">映射名（真实模型id）</span>
     </div>`;
-    const rows = ['opus', 'sonnet', 'haiku', 'fable'].map(t => {
+    const rows = ALIAS_TIERS.map(t => {
       const entry = (p.aliasMap && p.aliasMap[t]) || {};
       return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
         <span style="width:48px;flex-shrink:0;font-size:12px;color:var(--faint)">${tierLabel[t]}</span>

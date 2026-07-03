@@ -2178,7 +2178,7 @@ function providerAliasMap(providerId) {
 function providerAliasTiers(providerId) {
   const map = providerAliasMap(providerId);
   if (!map) return [];
-  return ['opus', 'sonnet', 'haiku', 'fable']
+  return ALIAS_TIERS
     .filter(t => map[t] && map[t].model)
     .map(t => [t, map[t]]);
 }

@@ -22,6 +22,11 @@
     { value: '__custom__', labelKey: 'custom' },
   ];
 
+  // Claude alias tiers in display/precedence order. Single source of truth for
+  // the vocabulary previously hardcoded as ['opus','sonnet','haiku','fable'] at
+  // 6+ sites across chat.js and manage.js.
+  const ALIAS_TIERS = ['opus', 'sonnet', 'haiku', 'fable'];
+
   // Short display name for a wire model id, falling back to the id itself.
   function modelShortName(model) {
     const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
@@ -37,6 +42,7 @@
   }
 
   window.CLAUDE_MODEL_OPTIONS = CLAUDE_MODEL_OPTIONS;
+  window.ALIAS_TIERS = ALIAS_TIERS;
   window.modelShortName = modelShortName;
   window.formatAliasTierLabel = formatAliasTierLabel;
 })();
