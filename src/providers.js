@@ -427,6 +427,14 @@ const CLAUDE_ROUTING_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  // CLAUDE_CODE_SIMPLE is deliberately NOT set by multicc — leaving it unset
+  // preserves the full tool set (Agent, TaskCreate, Workflow, ultracode).
+  // But it MUST still be stripped here: the pm2/launchd parent often carries
+  // CLAUDE_CODE_SIMPLE=1 left over from an earlier setup, and without stripping
+  // it leaks into every spawned claude child via {…base}, overriding the
+  // per-session provider/model routing (observed: domestic providers return
+  // "model not found" / 1211). Strip-without-set => clean child env.
+  'CLAUDE_CODE_SIMPLE',
 ];
 
 // Build the full child environment for spawning a session's CLI.
