@@ -2079,15 +2079,7 @@ startMergeStatusPolling();
 
 /* ── Per-session model switch ── */
 const modelBtn = document.getElementById('model-btn');
-const CLAUDE_MODEL_OPTIONS = [
-  { value: '', labelKey: 'defaultClaudeSetting' },
-  { value: 'claude-fable-5', label: 'Fable 5' },
-  { value: 'claude-fable-5[1m]', label: 'Fable 5 (1M context)' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
-  { value: '__custom__', labelKey: 'custom' },
-];
+// CLAUDE_MODEL_OPTIONS + modelShortName live in shared/models.js (loaded before chat.js).
 let _sessionModel = '';        // raw per-session override (null/'' = follow default)
 let _sessionEffectiveModel = ''; // model actually used at spawn time (for display)
 const effortBtn = document.getElementById('effort-btn');
@@ -2107,11 +2099,6 @@ const CODEX_REASONING_OPTIONS = [
 ];
 let _sessionEffort = '';
 let _sessionEffectiveEffort = 'medium';
-
-function modelShortName(model) {
-  const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
-  return opt ? (opt.labelKey ? tt(opt.labelKey) : opt.label) : model;
-}
 
 function updateModelBtn() {
   if (!modelBtn) return;
@@ -2224,7 +2211,7 @@ function modelChoiceLabel(v, providerId) {
     const map = providerAliasMap(providerId);
     if (map && map[v] && map[v].model) {
       const m = map[v];
-      return `${v}${m.name ? ` · ${m.name}` : ''} · ${m.model}`;
+      return formatAliasTierLabel(v, m);
     }
   }
   const named = CLAUDE_MODEL_OPTIONS.find(o => o.value === v);

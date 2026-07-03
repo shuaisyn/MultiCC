@@ -1827,21 +1827,7 @@ async function deleteDirectory(id) {
   }
 }
 
-// Claude model choices for new sessions. value '' = follow the user's /model default.
-const CLAUDE_MODEL_OPTIONS = [
-  { value: '', labelKey: 'defaultClaudeSetting' },
-  { value: 'claude-fable-5', label: 'Fable 5' },
-  { value: 'claude-fable-5[1m]', label: 'Fable 5 (1M context)' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
-  { value: '__custom__', labelKey: 'custom' },
-];
-
-function modelShortName(model) {
-  const opt = CLAUDE_MODEL_OPTIONS.find(o => o.value === model);
-  return opt ? (opt.labelKey ? tt(opt.labelKey) : opt.label) : model;
-}
+// CLAUDE_MODEL_OPTIONS + modelShortName live in shared/models.js (loaded before manage.js).
 
 // aliasMap (tier→{model,name}) for a provider id from the cached provider list,
 // or null. Alias-mapped relays declare one wire model per Claude tier.
@@ -1909,7 +1895,7 @@ function showModelPicker({ title = tt('modelTitle'), okText = tt('create'), curr
       ? [
           ...tiers.map(([t, m]) => ({
             value: t,
-            label: `${t}${m.name ? ` · ${m.name}` : ''} · ${m.model}`,
+            label: formatAliasTierLabel(t, m),
           })),
           { value: '__custom__', labelKey: 'custom' },
         ]
@@ -2054,7 +2040,7 @@ function rebuildModelOptions(modelSelect, modelCustom, providers, selectedProvid
   if (tiers.length) {
     opts = tiers.map(t => {
       const m = aliasMap[t];
-      return { value: t, label: `${t}${m.name ? ` · ${m.name}` : ''} · ${m.model}` };
+      return { value: t, label: formatAliasTierLabel(t, m) };
     });
   } else if (prov && prov.modelOptions && prov.modelOptions.length) {
     opts = prov.modelOptions.map(m => ({ value: m, label: m }));
