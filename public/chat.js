@@ -2450,7 +2450,8 @@ modelBtn?.addEventListener('click', async () => {
     _sessionEffort = data.effort || '';
     _sessionEffectiveEffort = data.effectiveEffort || _sessionEffort || 'medium';
     updateModelBtn();
-    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_sessionEffectiveModel || _sessionModel || tt('default')} | ${effortShortName(_sessionEffectiveEffort)}，下一轮对话生效`);
+    const _savedModel = _sessionEffectiveModel || _sessionModel;
+    addSystemMsg(`✓ AI 配置已保存：${providerShortName(_sessionProvider)} | ${_savedModel ? modelDisplayName(_savedModel, _sessionProvider) : tt('default')} | ${effortShortName(_sessionEffectiveEffort)}，下一轮对话生效`);
   } catch (e) {
     addSystemMsg('AI 配置保存失败：' + e.message);
   }
