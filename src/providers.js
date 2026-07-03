@@ -461,16 +461,10 @@ function importFromCcSwitch() {
   for (const r of rows) {
     if (!APP_TYPES.includes(r.app_type)) continue;
     const cfg = parseConfig(r.settings_config);
-    // Auto-correct alias-only relays at import: cc-switch configs for relays
-    // like iFlytek declare only alias targets the relay rejects (e.g.
-    // astron-code-latest) and no canonical ANTHROPIC_MODEL. Remap the stored
-    // env to safe claude-* wire names here so the provider is valid in
-    // multicc's own store — no cc-switch modification needed. Preserves auth,
-    // base URL, and the *_MODEL_NAME display labels. Idempotent on re-import.
-    if (r.app_type === 'claude' && isAliasOnlyClaude(cfg)) {
-      cfg.env = { ...cfg.env };
-      applyWireDefaults(cfg.env);
-    }
+    // Keep cc-switch's REAL model ids in the stored env so the editor / model
+    // picker shows e.g. glm-5.2 (not a claude-* wire name). The spawn path
+    // (resolveSpawnEnv) applies the safe wire default to alias-only relays at
+    // spawn time, so we deliberately do NOT overwrite the env at import.
     const entry = {
       id: r.id,
       appType: r.app_type,
