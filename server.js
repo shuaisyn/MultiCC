@@ -2520,6 +2520,58 @@ app.patch('/api/sessions/:id', (req, res) => {
   res.json({ ...s, subagent: serializeSubagent(s.subagent), effectiveModel: effectiveSessionModel(s), effectiveEffort: effectiveSessionEffort(s) });
 });
 
+// ── Folder-based session memory: the human window into the same memory the ──
+// agent auto-reads/writes each turn. Two scopes: own (private to this session)
+// and shared (all sessions in the directory). Each scope is a folder of .md.
+app.get('/api/sessions/:id/memory', (req, res) => {
+  const persisted = persistedSessions.get(req.params.id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  ensureMemoryDirs(persisted);
+  const own = sessionMemoryDir(persisted);
+  const shared = sharedMemoryDir(persisted.dirId);
+  res.json({
+    own:    { dir: own,    primary: primaryMemFileName(persisted.cli), files: listMemoryFiles(own) },
+    shared: { dir: shared, files: listMemoryFiles(shared) },
+    // Legacy auto-distilled JSON entries, surfaced so the UI can offer a
+    // one-click "promote into a .md" until the distiller writes files directly.
+    legacy: getMemoryEntries(persisted),
+  });
+});
+
+// Create or overwrite one memory file: { scope:'own'|'shared', name, content }.
+app.put('/api/sessions/:id/memory', (req, res) => {
+  const persisted = persistedSessions.get(req.params.id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  const { scope, name, content } = req.body || {};
+  const sc = scope === 'shared' ? 'shared' : 'own';
+  const fn = safeMemFileName(name);
+  if (!fn) return res.status(400).json({ error: 'invalid file name (must be a plain *.md name)' });
+  if (String(content || '').length > 40000) return res.status(400).json({ error: 'content too long (max 40000)' });
+  ensureMemoryDirs(persisted);
+  const dir = memScopeDir(persisted, sc);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, fn), String(content == null ? '' : content));
+  } catch (e) { return res.status(500).json({ error: 'write failed: ' + e.message }); }
+  if (persisted.dirId) workspaceBroadcast(persisted.dirId, { type: 'memory', sessionId: persisted.id, scope: sc });
+  res.json({ ok: true, files: listMemoryFiles(dir) });
+});
+
+// Delete one memory file: { scope:'own'|'shared', name }.
+app.delete('/api/sessions/:id/memory', (req, res) => {
+  const persisted = persistedSessions.get(req.params.id);
+  if (!persisted) return res.status(404).json({ error: 'session not found' });
+  const { scope, name } = req.body || {};
+  const sc = scope === 'shared' ? 'shared' : 'own';
+  const fn = safeMemFileName(name);
+  if (!fn) return res.status(400).json({ error: 'invalid file name' });
+  const dir = memScopeDir(persisted, sc);
+  try { fs.unlinkSync(path.join(dir, fn)); }
+  catch (e) { if (e.code !== 'ENOENT') return res.status(500).json({ error: 'delete failed: ' + e.message }); }
+  if (persisted.dirId) workspaceBroadcast(persisted.dirId, { type: 'memory', sessionId: persisted.id, scope: sc });
+  res.json({ ok: true, files: listMemoryFiles(dir) });
+});
+
 // ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
 // The link is built from the request host so a share created via the public
 // (tunnel) URL is reachable externally; created on localhost it'll be a local link.
@@ -5326,10 +5378,11 @@ ${text.slice(0, 12000)}
       let merged = _mergeMemoryEntries(existing, fresh);
       merged = _trimMemoryEntries(merged);
       p.memory = merged;
+      writeAutoMemoryFile(p, merged);   // mirror into the folder as _auto.md (single injected surface)
       savePersistedSessions();
       const totalLen = merged.reduce((s, e) => s + (e.text || '').length, 0);
       appendEvent(p.dirId, 'memory_updated', `已提炼会话记忆（${merged.length} 条，${totalLen} 字）`, sessionId);
-      workspaceBroadcast(p.dirId, { type: 'memory', sessionId, memory: merged });
+      workspaceBroadcast(p.dirId, { type: 'memory', sessionId });
       console.log(`[multicc/memory] distilled ${sessionId}: memory now ${merged.length} entries / ${totalLen} chars`);
     })
     .catch(e => console.warn(`[multicc/memory] distill ${sessionId} failed: ${e.message}`));
@@ -5741,9 +5794,160 @@ function cancelProgressSummary(cs) {
 // dispatch path can drive a session with no connected client. opts.isFirstTurn
 // forces first-turn spawn semantics; opts.originDispatchId, when set, pushes the
 // final assistant text back to WeChat once the turn completes (auto-回流).
+// ── Folder-based session memory ────────────────────────────────────────────
+// Each session gets its own on-disk memory folder, plus a shared folder scoped
+// to the owning directory (the "mother folder"). Stored OUTSIDE user repos
+// (under the multicc install dir) so nothing leaks into git worktrees/merges:
+//   memories/<dirId>/_shared/            ← shared across all sessions in the dir
+//   memories/<dirId>/sessions/<id>/      ← private to one session
+// The session's own primary file is named per CLI to match native conventions
+// (CLAUDE.md for claude, AGENTS.md for codex). The agent edits these with its
+// normal file tools to persist what it learns; every turn we read own+shared
+// and inject them into the role prompt (works for claude and codex alike).
+const MEMORY_STORE_ROOT = path.join(__dirname, 'memories');
+const SESSION_MEM_CAP = 5000;   // chars of own-folder memory injected per turn
+const SHARED_MEM_CAP  = 4000;   // chars of shared-folder memory injected per turn
+
+function sessionMemoryDir(persisted) {
+  return path.join(MEMORY_STORE_ROOT, String(persisted.dirId), 'sessions', String(persisted.id));
+}
+function sharedMemoryDir(dirId) {
+  return path.join(MEMORY_STORE_ROOT, String(dirId), '_shared');
+}
+function primaryMemFileName(cli) {
+  return cli === 'codex' ? 'AGENTS.md' : 'CLAUDE.md';
+}
+
+// Create the folders on first use and seed a starter primary file (per CLI) and
+// a shared readme so the convention is discoverable. Best-effort; never throws.
+function ensureMemoryDirs(persisted) {
+  const own = sessionMemoryDir(persisted);
+  const shared = sharedMemoryDir(persisted.dirId);
+  try {
+    fs.mkdirSync(own, { recursive: true });
+    fs.mkdirSync(shared, { recursive: true });
+    const primary = path.join(own, primaryMemFileName(persisted.cli));
+    if (!fs.existsSync(primary)) {
+      fs.writeFileSync(primary,
+`# 本会话私有记忆
+
+> 「${persisted.label || persisted.id}」会话专属的长期记忆，只有本会话读得到。
+> 把值得长期记住的东西写进本文件夹的 .md（决定 / 踩过的坑 / 进行中的任务 / 用户偏好）。
+> 想让本项目所有会话都看到的，写到公共记忆文件夹（见注入提示里的路径）。
+
+（暂无内容）
+`);
+    }
+    const readme = path.join(shared, 'README.md');
+    if (!fs.existsSync(readme)) {
+      fs.writeFileSync(readme,
+`# 公共记忆（本项目所有会话共享）
+
+> 这里的内容会注入到本目录下每一个会话的上下文。放跨会话复用的项目知识、约定、稳定事实。
+> 一事一文件、精炼；临时/私有的东西请写进各自会话的私有记忆文件夹，不要放这里。
+`);
+    }
+    // One-time migration: mirror any legacy distilled JSON entries into _auto.md
+    // so existing sessions' memory surfaces in the folder (and stays injected).
+    const auto = path.join(own, '_auto.md');
+    if (!fs.existsSync(auto)) {
+      const legacy = getMemoryEntries(persisted);
+      if (legacy && legacy.length) writeAutoMemoryFile(persisted, legacy);
+    }
+  } catch (_) { /* best-effort */ }
+  return { own, shared };
+}
+
+// Mirror the auto-distilled entries into the session's own folder as _auto.md —
+// the single injected surface for auto memory. Empty entries remove the file.
+function writeAutoMemoryFile(persisted, entries) {
+  if (!persisted || !persisted.dirId || !persisted.id) return;
+  try {
+    const dir = sessionMemoryDir(persisted);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, '_auto.md');
+    if (!entries || !entries.length) { try { fs.unlinkSync(file); } catch (_) {} return; }
+    const body = entries.map(e => `- [${e.type}] ${e.text}`).join('\n');
+    fs.writeFileSync(file,
+`# 自动提炼记忆（辅助 AI 从被清理的历史中提炼；本文件会被自动覆盖，想长期保留请另写 .md）
+
+${body}
+`);
+  } catch (_) { /* best-effort */ }
+}
+
+// Read all .md files in a folder, concatenated as labeled chunks, capped by chars.
+function readMemoryFolder(dir, capChars) {
+  let files;
+  try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.md')).sort(); }
+  catch (_) { return ''; }
+  const out = []; let total = 0;
+  for (const f of files) {
+    let body;
+    try { body = fs.readFileSync(path.join(dir, f), 'utf8').trim(); } catch (_) { continue; }
+    if (!body) continue;
+    const chunk = `#### ${f}\n${body}`;
+    if (total + chunk.length > capChars) {
+      out.push('（… 记忆超出注入上限，其余已省略；需要时用 Read 工具直接读文件夹里的文件）');
+      break;
+    }
+    out.push(chunk); total += chunk.length;
+  }
+  return out.join('\n\n');
+}
+
+// Build the folder-memory injection block (own + shared) for a session. Returns
+// null for aux/gateway/system sessions or when identifiers are missing.
+function buildFolderMemoryBlock(persisted) {
+  if (!persisted || !persisted.dirId || !persisted.id) return null;
+  if (persisted.type === 'aux' || persisted.type === 'gateway') return null;
+  const { own, shared } = ensureMemoryDirs(persisted);
+  const ownText = readMemoryFolder(own, SESSION_MEM_CAP);
+  const sharedText = readMemoryFolder(shared, SHARED_MEM_CAP);
+  return (
+`[记忆库｜每轮自动注入] 你有一个持久记忆文件夹（存在 multicc 数据区，不在本仓库、不进 git）。想长期记住的信息，用 Write/Edit 写进对应文件夹的 .md 文件即可，下一轮起自动带上；过时的删掉。
+· 私有记忆（仅本会话可见）文件夹：${own}
+· 公共记忆（本项目所有会话共享）文件夹：${shared}
+
+【私有记忆】
+${ownText || '（空）'}
+
+【公共记忆】
+${sharedText || '（空）'}
+[记忆库结束]`
+  );
+}
+
+// ── Folder-memory file ops (used by the memory editor UI) ──────────────────
+// List every .md file in a memory folder as {name, content}. Missing dir → [].
+function listMemoryFiles(dir) {
+  let files;
+  try { files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.md')).sort(); }
+  catch (_) { return []; }
+  return files.map(name => {
+    let content = '';
+    try { content = fs.readFileSync(path.join(dir, name), 'utf8'); } catch (_) {}
+    return { name, content };
+  });
+}
+// Validate a user-supplied memory filename: plain name, .md, no path traversal.
+// Allows word chars, dash, dot, space and CJK. Returns the safe name or null.
+function safeMemFileName(name) {
+  const n = String(name || '').trim();
+  if (!n || n.includes('/') || n.includes('\\') || n.includes('..')) return null;
+  if (!/^[\w.\- 一-龥]+\.md$/i.test(n)) return null;
+  return n;
+}
+// Resolve which folder a scope ('own' | 'shared') maps to for a session.
+function memScopeDir(persisted, scope) {
+  return scope === 'shared' ? sharedMemoryDir(persisted.dirId) : sessionMemoryDir(persisted);
+}
+
 // Resolve the effective custom role prompt for a session: an explicit
 // session-level role wins; otherwise inherit the owning directory's default.
-// Returns null when neither is set (sessions keep the bare image hint only).
+// The distilled JSON memory (keyword-matched) and the folder-based memory
+// (own + shared) are appended so every turn carries them. Returns null when
+// nothing at all applies.
 function resolveRolePrompt(persisted) {
   if (!persisted) return null;
   // Base persona: explicit session role wins, else the directory default.
@@ -5752,23 +5956,17 @@ function resolveRolePrompt(persisted) {
     const dir = persisted.dirId ? directories.get(persisted.dirId) : null;
     base = (dir && dir.rolePrompt) || null;
   }
-  // Session memory (distilled from cleared/trimmed history — key problems and how
-  // they were solved). Lives alongside, not inside, the role prompt; appended so
-  // every turn carries it without the user re-explaining past decisions.
-  //
-  // On-demand injection: instead of dumping the entire memory every turn, match
-  // entries against the current user message's keywords and inject only the
-  // relevant ones. Falls back to the most recent 3 entries when nothing matches.
-  const entries = getMemoryEntries(persisted);
-  if (!entries || entries.length === 0) return base;
 
-  const recentUserMsg = getLatestUserMessage(persisted.id) || '';
-  const relevant = getRelevantMemoryEntries(recentUserMsg, entries);
-  if (relevant.length === 0) return base;
+  const parts = [];
+  if (base) parts.push(base);
 
-  const memText = relevant.map(e => `[${e.type}] ${e.text}`).join('\n');
-  const memBlock = `[会话记忆：以下是本会话过往积累的、与当前问题可能相关的关键信息，供你延续上下文，不要重复已解决的事]\n${memText}\n[会话记忆结束]`;
-  return base ? `${base}\n\n${memBlock}` : memBlock;
+  // Folder-based memory (own + shared) is the single injected surface. The
+  // auto-distiller mirrors its output into the own folder as _auto.md, so the
+  // old keyword-matched JSON block is gone — everything flows through the folder.
+  const folderBlock = buildFolderMemoryBlock(persisted);
+  if (folderBlock) parts.push(folderBlock);
+
+  return parts.length ? parts.join('\n\n') : null;
 }
 
 // Return the most recent user message from a session's chat history (string

@@ -2753,78 +2753,154 @@ function updateMemoryBtn() {
   if (!memoryBtn) return;
   const set = !!(_sessionMemory && _sessionMemory.trim());
   memoryBtn.textContent = set ? tt('memorySet') : tt('memory');
-  memoryBtn.title = set
-    ? '该会话已积累记忆（清理历史时辅助 AI 自动提炼的关键问题与解决方式），点击查看/编辑'
-    : '会话记忆：清理历史时辅助 AI 会自动提炼关键问题与解决方式存到这里，可手动查看/编辑';
+  memoryBtn.title = '会话记忆库：私有（仅本会话）＋公共（项目共享）记忆，每轮自动注入给模型；AI 也会自读写。点击查看/编辑';
 }
 
-// Minimal textarea editor; returns the new text or null on cancel.
-function showMemoryEditor(current) {
-  return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
-    const box = document.createElement('div');
-    box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;width:min(640px,94vw);max-height:86vh;display:flex;flex-direction:column;gap:10px;';
-    const title = document.createElement('div');
-    title.style.cssText = 'color:#f0f6fc;font-size:14px;font-weight:600;';
-    title.textContent = '🧠 会话记忆';
-    const msg = document.createElement('div');
-    msg.style.cssText = 'color:#8b949e;font-size:12px;line-height:1.5;';
-    msg.textContent = '辅助 AI 在清理历史时自动提炼的「关键问题 + 解决方式」，会随每轮对话注入给模型。可手动编辑或清空。';
-    const ta = document.createElement('textarea');
-    ta.value = current || '';
-    ta.placeholder = '（还没有积累记忆。聊一段后点 Clear 或历史超长自动滚动时，辅助 AI 会在这里记下关键问题与解决方式。）';
-    ta.style.cssText = 'width:100%;flex:1;min-height:240px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:ui-monospace,monospace;padding:10px;resize:vertical;';
-    const hint = document.createElement('div');
-    hint.style.cssText = 'color:#6e7681;font-size:11px;';
-    hint.textContent = '留空＝清除全部记忆。Ctrl/⌘+Enter 保存，Esc 取消。';
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-    const cancel = document.createElement('button');
-    cancel.textContent = tt('cancel');
-    cancel.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;';
-    const ok = document.createElement('button');
-    ok.textContent = tt('save');
-    ok.style.cssText = 'background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;';
-    row.appendChild(cancel); row.appendChild(ok);
-    box.appendChild(title); box.appendChild(msg); box.appendChild(ta); box.appendChild(hint); box.appendChild(row);
-    overlay.appendChild(box); document.body.appendChild(overlay);
-    const close = (r) => { document.removeEventListener('keydown', onKey, true); overlay.remove(); resolve(r); };
-    const accept = () => { if (ta.value.length > 8000) { addSystemMsg('记忆过长（上限 8000 字）'); return; } close(ta.value); };
-    function onKey(e) {
-      if (e.key === 'Escape') { e.preventDefault(); close(null); }
-      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
-    }
-    ok.onclick = accept; cancel.onclick = () => close(null);
-    overlay.onclick = (e) => { if (e.target === overlay) close(null); };
-    document.addEventListener('keydown', onKey, true);
-    setTimeout(() => ta.focus(), 0);
-  });
-}
+// Folder-memory editor: two scopes (own = private to this session, shared =
+// all sessions in the directory), each a folder of .md files. Reads/writes via
+// /api/sessions/:id/memory (GET folder · PUT file · DELETE file). Replaces the
+// old single-textarea distilled-memory editor.
+async function openMemoryEditor() {
+  let data;
+  try {
+    const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/memory`));
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) { addSystemMsg('记忆读取失败：' + e.message); return; }
 
-memoryBtn?.addEventListener('click', async () => {
-  // Re-fetch latest memory (aux AI may have updated it since last load).
-  try {
-    const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`));
-    if (r.ok) { const info = await r.json(); _sessionMemory = memoryToText(info.memory); updateMemoryBtn(); }
-  } catch (_) {}
-  const next = await showMemoryEditor(_sessionMemory);
-  if (next === null) return;
-  try {
-    const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ memory: next }),
-    });
-    const data = await res.json();
-    if (!res.ok) { addSystemMsg('记忆保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
-    _sessionMemory = next.trim();
-    updateMemoryBtn();
-    addSystemMsg(_sessionMemory ? '✓ 会话记忆已更新' : '✓ 已清空会话记忆');
-  } catch (e) {
-    addSystemMsg('记忆保存失败：' + e.message);
+  const model = {
+    own:    { dir: (data.own && data.own.dir) || '', primary: (data.own && data.own.primary) || 'CLAUDE.md', files: {} },
+    shared: { dir: (data.shared && data.shared.dir) || '', files: {} },
+  };
+  ((data.own && data.own.files) || []).forEach(f => { model.own.files[f.name] = f.content; });
+  ((data.shared && data.shared.files) || []).forEach(f => { model.shared.files[f.name] = f.content; });
+
+  let scope = 'own';
+  let curName = (model.own.primary in model.own.files) ? model.own.primary : (Object.keys(model.own.files).sort()[0] || model.own.primary);
+  if (!(curName in model.own.files)) model.own.files[curName] = '';
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;width:min(680px,95vw);max-height:88vh;display:flex;flex-direction:column;gap:10px;';
+
+  const title = document.createElement('div');
+  title.style.cssText = 'color:#f0f6fc;font-size:14px;font-weight:600;';
+  title.textContent = '🧠 会话记忆库';
+  const msg = document.createElement('div');
+  msg.style.cssText = 'color:#8b949e;font-size:12px;line-height:1.5;';
+  msg.textContent = '每轮对话自动注入「私有＋公共」记忆给模型。私有＝仅本会话；公共＝本项目所有会话共享。AI 也会自己读写这些文件。';
+
+  const tabs = document.createElement('div');
+  tabs.style.cssText = 'display:flex;gap:6px;';
+  const tabOwn = document.createElement('button');
+  const tabShared = document.createElement('button');
+  const tabStyle = (a) => `background:${a?'#1f6feb':'#21262d'};border:1px solid ${a?'#388bfd':'#30363d'};border-radius:6px;color:${a?'#fff':'#c9d1d9'};font-size:12px;padding:5px 12px;cursor:pointer;`;
+  tabOwn.textContent = '私有（仅本会话）';
+  tabShared.textContent = '公共（项目共享）';
+
+  const fileRow = document.createElement('div');
+  fileRow.style.cssText = 'display:flex;gap:6px;align-items:center;';
+  const sel = document.createElement('select');
+  sel.style.cssText = 'flex:1;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12px;padding:5px;';
+  const newBtn = document.createElement('button');
+  newBtn.textContent = '＋新建';
+  newBtn.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:12px;padding:5px 10px;cursor:pointer;';
+  const delBtn = document.createElement('button');
+  delBtn.textContent = '🗑删除';
+  delBtn.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#f85149;font-size:12px;padding:5px 10px;cursor:pointer;';
+
+  const ta = document.createElement('textarea');
+  ta.style.cssText = 'width:100%;flex:1;min-height:240px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;font-family:ui-monospace,monospace;padding:10px;resize:vertical;';
+  const pathHint = document.createElement('div');
+  pathHint.style.cssText = 'color:#6e7681;font-size:11px;word-break:break-all;';
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '关闭';
+  closeBtn.style.cssText = 'background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;';
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = tt('save');
+  saveBtn.style.cssText = 'background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;';
+  row.appendChild(closeBtn); row.appendChild(saveBtn);
+
+  tabs.appendChild(tabOwn); tabs.appendChild(tabShared);
+  fileRow.appendChild(sel); fileRow.appendChild(newBtn); fileRow.appendChild(delBtn);
+  box.appendChild(title); box.appendChild(msg); box.appendChild(tabs); box.appendChild(fileRow); box.appendChild(ta); box.appendChild(pathHint); box.appendChild(row);
+  overlay.appendChild(box); document.body.appendChild(overlay);
+
+  const defName = (s) => s === 'own' ? (model.own.primary || 'CLAUDE.md') : 'README.md';
+  function commit() { if (curName) model[scope].files[curName] = ta.value; }
+  function renderTabs() { tabOwn.style.cssText = tabStyle(scope === 'own'); tabShared.style.cssText = tabStyle(scope === 'shared'); }
+  function renderFiles() {
+    if (!Object.keys(model[scope].files).length) model[scope].files[defName(scope)] = '';
+    const names = Object.keys(model[scope].files).sort();
+    if (!(curName in model[scope].files)) curName = names[0];
+    sel.innerHTML = '';
+    names.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o); });
+    sel.value = curName;
+    ta.value = model[scope].files[curName] || '';
+    pathHint.textContent = (model[scope].dir || '') + '/' + curName;
   }
-});
+  function switchScope(s) { commit(); scope = s; const names = Object.keys(model[scope].files).sort(); curName = names[0] || defName(s); if (!(curName in model[scope].files)) model[scope].files[curName] = ''; renderTabs(); renderFiles(); }
+
+  tabOwn.onclick = () => switchScope('own');
+  tabShared.onclick = () => switchScope('shared');
+  sel.onchange = () => { commit(); curName = sel.value; ta.value = model[scope].files[curName] || ''; pathHint.textContent = (model[scope].dir || '') + '/' + curName; };
+  newBtn.onclick = () => {
+    let n = (prompt('新建记忆文件名（.md）：', '') || '').trim();
+    if (!n) return;
+    if (!/\.md$/i.test(n)) n += '.md';
+    if (!/^[\w.\- 一-龥]+\.md$/i.test(n)) { addSystemMsg('文件名不合法（仅字母/数字/中文/._- 加 .md）'); return; }
+    commit();
+    if (!(n in model[scope].files)) model[scope].files[n] = '';
+    curName = n; renderFiles();
+  };
+  delBtn.onclick = async () => {
+    if (!curName) return;
+    if (!confirm(`删除 ${scope === 'own' ? '私有' : '公共'}记忆文件「${curName}」？不可恢复。`)) return;
+    try {
+      const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/memory`), {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, name: curName }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); addSystemMsg('删除失败：' + (d.error || ('HTTP ' + r.status))); return; }
+    } catch (e) { addSystemMsg('删除失败：' + e.message); return; }
+    delete model[scope].files[curName];
+    curName = Object.keys(model[scope].files).sort()[0] || '';
+    renderFiles();
+    addSystemMsg('✓ 已删除记忆文件');
+  };
+  saveBtn.onclick = async () => {
+    commit();
+    if (!curName) { addSystemMsg('没有选中的文件'); return; }
+    try {
+      const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/memory`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, name: curName, content: model[scope].files[curName] }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { addSystemMsg('保存失败：' + (d.error || ('HTTP ' + r.status))); return; }
+      addSystemMsg(`✓ 已保存 ${scope === 'own' ? '私有' : '公共'}记忆 / ${curName}`);
+      updateMemoryBtn();
+    } catch (e) { addSystemMsg('保存失败：' + e.message); }
+  };
+
+  const close = () => { document.removeEventListener('keydown', onKey, true); overlay.remove(); };
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveBtn.onclick(); }
+  }
+  closeBtn.onclick = close;
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  document.addEventListener('keydown', onKey, true);
+
+  renderTabs(); renderFiles();
+  setTimeout(() => ta.focus(), 0);
+}
+
+memoryBtn?.addEventListener('click', () => { openMemoryEditor(); });
 
 // Live update when the aux AI distills new memory for this session.
 function applyMemoryEvent(memory) { _sessionMemory = memoryToText(memory); updateMemoryBtn(); }

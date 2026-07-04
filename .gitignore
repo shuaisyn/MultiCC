@@ -7,6 +7,8 @@ node_modules/
 
 # Local runtime state
 sessions.json
+# Folder-based session/shared memory store (per-session + shared .md, kept local)
+memories/
 directories.json
 scheduled_tasks.json
 shares.json
