@@ -35,6 +35,24 @@
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const fs = require('fs');
+const path = require('path');
+
+// Temporary diagnostic capture: dump the exact outbound body+headers for a
+// live request so a failing turn can be replayed byte-for-byte (direct vs
+// via-proxy) to isolate whether the proxy or the upstream is at fault.
+// Enable with CCFW_CAPTURE=1 in the multicc env; writes to /tmp/ccfw-capture/.
+const CAPTURE_DIR = '/tmp/ccfw-capture';
+function maybeCapture(meta, headers, bodyBuf) {
+  if (process.env.CCFW_CAPTURE !== '1') return;
+  try {
+    fs.mkdirSync(CAPTURE_DIR, { recursive: true });
+    const fname = path.join(CAPTURE_DIR, `${meta.sessionId || 'nosess'}-${meta.stamp}.json`);
+    let body;
+    try { body = JSON.parse(bodyBuf.toString('utf8')); } catch (_) { body = bodyBuf.toString('utf8'); }
+    fs.writeFileSync(fname, JSON.stringify({ ...meta, headers, body }, null, 2));
+  } catch (e) { console.log(`[ccfw] capture failed: ${e.message}`); }
+}
 
 const CCFW_PREFIX = 'ccfw:';
 const TIERS = ['sonnet', 'opus', 'haiku', 'fable'];
@@ -166,10 +184,30 @@ function createHandler({ getProvider }) {
     delete headers['content-length'];
     delete headers['x-api-key'];
     delete headers['authorization'];
+    // Hop-by-hop headers (RFC 7230 §6.1) describe THIS connection, not the
+    // next one — a proxy must not forward them onto the new upstream
+    // connection it opens. Only 'connection' has actually shown up from the
+    // claude CLI in practice; the rest are stripped defensively.
+    delete headers.connection;
+    delete headers['keep-alive'];
+    delete headers['transfer-encoding'];
+    delete headers.te;
+    delete headers.trailer;
+    delete headers.upgrade;
     if (creds.authToken) headers['authorization'] = 'Bearer ' + creds.authToken;
     if (creds.apiKey) headers['x-api-key'] = creds.apiKey;
+    // Recompute Content-Length for the (possibly rewritten) outBody. Without
+    // this, Node has no length to send and falls back to chunked
+    // Transfer-Encoding — which Zhipu's Anthropic-compat gateway cannot
+    // reliably handle for large bodies (confirmed 2026-07-05: identical
+    // requests to open.bigmodel.cn succeed with Content-Length set and fail
+    // with garbled 500/400 when sent chunked). Every provider gets this, not
+    // just Zhipu, since no upstream should be relying on chunked here.
+    headers['content-length'] = String(Buffer.byteLength(outBody));
     const lib = base.protocol === 'https:' ? https : http;
     console.log(`[ccfw] sess=${sessionId || '-'} role=${role} provider=${creds.name || routeProviderId} model=${ccfw ? ccfw.realModel : (model || '(n/a)')} -> ${base.origin}${fullPath}`);
+    if (process.env.CCFW_CAPTURE === '1') console.log(`[ccfw] outbound-headers sess=${sessionId || '-'} ${JSON.stringify(headers)}`);
+    maybeCapture({ sessionId, role, provider: creds.name || routeProviderId, url: `${base.origin}${fullPath}`, stamp: Date.now() }, headers, outBody);
 
     const up = lib.request({
       method: req.method,
@@ -178,11 +216,30 @@ function createHandler({ getProvider }) {
       path: fullPath,
       headers,
     }, (upRes) => {
-      res.writeHead(upRes.statusCode || 502, upRes.headers);
+      const statusCode = upRes.statusCode || 0;
+      const ok = statusCode >= 200 && statusCode < 300;
+      console.log(`[ccfw] <- sess=${sessionId || '-'} role=${role} provider=${creds.name || routeProviderId} status=${statusCode}`);
+      res.writeHead(statusCode || 502, upRes.headers);
+      if (!ok) {
+        // Non-2xx responses are small JSON (not SSE), so buffering a short
+        // snippet for diagnostics is cheap and doesn't touch the 2xx/SSE path.
+        let snippet = '';
+        upRes.on('data', (chunk) => {
+          if (snippet.length < 500) snippet += chunk.toString('utf8', 0, Math.min(chunk.length, 500 - snippet.length));
+        });
+        upRes.on('end', () => {
+          if (snippet) console.log(`[ccfw] !! sess=${sessionId || '-'} role=${role} status=${statusCode} body=${snippet.replace(/\s+/g, ' ')}`);
+        });
+      }
       upRes.pipe(res);
     });
     up.on('error', (e) => {
       console.log(`[ccfw] upstream error: ${e.message}`);
+      // If we already flushed a 2xx and started piping (e.g. the upstream
+      // socket dies mid-SSE-stream), headers are sent and res may already be
+      // ending — writing a fresh JSON error body onto that stream would
+      // corrupt whatever partial SSE the client already received. Just end it.
+      if (res.headersSent) { try { res.end(); } catch (_) {} return; }
       try { res.writeHead(502, { 'content-type': 'application/json' }); } catch (_) {}
       res.end(JSON.stringify({ error: { type: 'ccfw_upstream_error', message: e.message } }));
     });

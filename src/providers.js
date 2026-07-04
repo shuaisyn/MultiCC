@@ -836,9 +836,19 @@ async function probeRelayModels(baseEnv, candidates, cliCmd) {
 // DIFFERENT provider by setting CLAUDE_CODE_SUBAGENT_MODEL to the combined
 // `ccfw:<providerId>:<model>` string the proxy parses. Omit it (or leave empty)
 // and subagents share the main provider.
+//
+// A session can have a non-empty `providerId` that still has no baseUrl (e.g.
+// a "Claude Official"/OAuth-passthrough provider entry someone selected
+// explicitly) — routing that through the proxy just 502s ("no baseUrl") since
+// there is nothing to forward to. Bypass in that case exactly like the
+// no-provider case (found 2026-07-05: a live session had this set and every
+// turn was 502ing silently through the proxy).
 function applyClaudeProxyEnv(env, { providerId, sessionId, subagent, port, enabled }) {
   if (!enabled) return;
   if (!providerId || !sessionId || !port) return;
+  const p = getProvider('claude', providerId);
+  const cfg = p ? parseConfig(p.settingsConfig) : {};
+  if (!cfg.env || !cfg.env.ANTHROPIC_BASE_URL) return;
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}/claude-proxy/${providerId}/${sessionId}`;
   env.ANTHROPIC_AUTH_TOKEN = `multicc-${sessionId}`;
   delete env.ANTHROPIC_API_KEY; // real creds stay in the store; proxy resolves them
