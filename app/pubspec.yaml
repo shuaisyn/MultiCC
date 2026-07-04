@@ -50,6 +50,12 @@ dependencies:
   # Voice recording
   record: ^6.0.0
 
+  # Streaming TTS playback (call mode) — plays PCM16 chunks from /ws/tts via a
+  # StreamAudioSource; lighter build footprint than flutter_sound.
+  just_audio: ^0.9.43
+  # Configure AVAudioSession (PlayAndRecord / VoiceChat) for full-duplex call audio.
+  audio_session: ^0.1.21
+
   # File picker
   file_picker: ^8.1.2
 

@@ -4,6 +4,12 @@ class NotificationService {
   static final _plugin = FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
 
+  /// Whether to request iOS notification permission at init. Defaults to true;
+  /// set `--dart-define=SKIP_NOTIF_PROMPT=true` to suppress the launch-time
+  /// permission alert (used for automated simulator runs).
+  static const bool _requestNotifPermission =
+      !bool.fromEnvironment('SKIP_NOTIF_PROMPT');
+
   /// Last time a notification fired for each id — used to de-dup the same
   /// verdict arriving over both the chat socket and the workspace socket.
   static final Map<int, DateTime> _recent = {};
@@ -22,6 +28,11 @@ class NotificationService {
     if (_initialized) return;
     _initialized = true;
 
+    // Skip the entire notification init for builds run with
+    // `--dart-define=SKIP_NOTIF_PROMPT=true` (automated sim runs where the
+    // iOS permission alert can't be tapped). Default builds initialize normally.
+    if (const bool.fromEnvironment('SKIP_NOTIF_PROMPT')) return;
+
     // On iOS simulators, DarwinInitializationSettings with permission requests
     // can hang indefinitely because the simulator doesn't have a real
     // notification service.  Wrap the whole init in a timeout so the app doesn't
@@ -29,12 +40,12 @@ class NotificationService {
     try {
       await _plugin
           .initialize(
-            settings: const InitializationSettings(
-              android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+            settings: InitializationSettings(
+              android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
               iOS: DarwinInitializationSettings(
-                requestAlertPermission: true,
-                requestBadgePermission: true,
-                requestSoundPermission: true,
+                requestAlertPermission: _requestNotifPermission,
+                requestBadgePermission: _requestNotifPermission,
+                requestSoundPermission: _requestNotifPermission,
               ),
             ),
             onDidReceiveNotificationResponse: _onResponse,
