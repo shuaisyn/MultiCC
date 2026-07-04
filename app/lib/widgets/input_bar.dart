@@ -114,8 +114,11 @@ class _InputBarState extends State<InputBar> {
   // ── Voice recording ──
 
   void _openVoiceCall() {
+    // ChatProvider 只在 ChatView 子树内 provide；本页 push 到根 Navigator，
+    // 必须在此先读出 provider 再传入，否则 VoiceCallScreen 拿不到会灰屏。
+    final provider = context.read<ChatProvider>();
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
+      MaterialPageRoute(builder: (_) => VoiceCallScreen(chatProvider: provider)),
     );
   }
 
