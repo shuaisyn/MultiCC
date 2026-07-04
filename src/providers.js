@@ -823,6 +823,32 @@ async function probeRelayModels(baseEnv, candidates, cliCmd) {
   return { tested, accepted: tested.filter(o => o.ok).map(o => o.model) };
 }
 
+// Rewrite a child process env so claude routes through the local claude-proxy
+// (src/claude-proxy.js) instead of the provider's real endpoint. Only applies to
+// provider-backed sessions — default-login sessions have no provider creds for
+// the proxy to forward, so they bypass and use OAuth/login directly.
+//
+// The real provider token is intentionally kept OUT of the child env: the proxy
+// resolves it live from the store at request time, so a leaked child env reveals
+// only the virtual `multicc-<sessionId>` token (useless outside the proxy).
+//
+// `subagent = {providerId, model}` routes Task-tool subagent requests to a
+// DIFFERENT provider by setting CLAUDE_CODE_SUBAGENT_MODEL to the combined
+// `ccfw:<providerId>:<model>` string the proxy parses. Omit it (or leave empty)
+// and subagents share the main provider.
+function applyClaudeProxyEnv(env, { providerId, sessionId, subagent, port, enabled }) {
+  if (!enabled) return;
+  if (!providerId || !sessionId || !port) return;
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}/claude-proxy/${providerId}/${sessionId}`;
+  env.ANTHROPIC_AUTH_TOKEN = `multicc-${sessionId}`;
+  delete env.ANTHROPIC_API_KEY; // real creds stay in the store; proxy resolves them
+  if (subagent && subagent.providerId && subagent.model) {
+    env.CLAUDE_CODE_SUBAGENT_MODEL = `ccfw:${subagent.providerId}:${subagent.model}`;
+  } else {
+    delete env.CLAUDE_CODE_SUBAGENT_MODEL; // never let a stale inherited value leak
+  }
+}
+
 module.exports = {
   ccSwitchAvailable,
   listProviders,
@@ -834,6 +860,7 @@ module.exports = {
   importFromCcSwitch,
   resolveSpawnEnv,
   buildChildEnv,
+  applyClaudeProxyEnv,
   resolveSessionWireModel,
   getProviderUsageStats,
   readDailyWindows,
