@@ -193,7 +193,10 @@ class _ChatViewState extends State<ChatView> {
                   sessionId: provider.sessionName,
                 ),
               ),
-            const InputBar(),
+            InputBar(
+              onPickSubagent: () => openAIConfigSheet(context,
+                  settings: widget.settings, sessionId: provider.sessionName),
+            ),
           ],
         ),
       ),
@@ -648,6 +651,8 @@ class _ModelChipState extends State<_ModelChip> {
         provider: s.provider ?? '',
         model: s.model ?? '',
         effort: s.effectiveEffort ?? s.effort ?? 'medium',
+        subProviderId: s.subagent?.providerId,
+        subModel: s.subagent?.model,
       ),
     );
     if (picked == null) return;
@@ -657,6 +662,8 @@ class _ModelChipState extends State<_ModelChip> {
         provider: picked.provider,
         model: picked.model,
         effort: picked.effort,
+        subagent: picked.subagent,
+        clearSubagent: picked.subagent == null,
       );
       messenger.showSnackBar(
         SnackBar(
@@ -678,6 +685,7 @@ class _AIConfigResult {
   final String providerLabel;
   final String modelLabel;
   final String effortLabel;
+  final SessionSubagent? subagent;
   const _AIConfigResult({
     required this.provider,
     required this.model,
@@ -685,6 +693,7 @@ class _AIConfigResult {
     required this.providerLabel,
     required this.modelLabel,
     required this.effortLabel,
+    this.subagent,
   });
 }
 
@@ -694,12 +703,16 @@ class _AIConfigSheet extends StatefulWidget {
   final String provider;
   final String model;
   final String effort;
+  final String? subProviderId;
+  final String? subModel;
   const _AIConfigSheet({
     required this.cli,
     required this.providers,
     required this.provider,
     required this.model,
     required this.effort,
+    this.subProviderId,
+    this.subModel,
   });
 
   @override
@@ -712,6 +725,11 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
   late String _effort;
   bool _customModel = false;
   late final TextEditingController _customCtrl;
+  // Sub-task (subagent) cascade — same shape as the main provider/model.
+  late String _subProvider;
+  late String _subModel;
+  bool _customSubModel = false;
+  late final TextEditingController _subCustomCtrl;
 
   bool get _isClaude => widget.cli == SessionCli.claude;
 
@@ -734,11 +752,19 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     final known = _modelChoices(_provider).contains(_model);
     _customModel = _model.isNotEmpty && !known;
     _customCtrl = TextEditingController(text: _customModel ? _model : '');
+    // Sub-task seeding.
+    _subProvider = widget.subProviderId ?? '';
+    _subModel = _normalizeModel(_subProvider, widget.subModel ?? '');
+    final subKnown =
+        _subProvider.isNotEmpty && _modelChoices(_subProvider).contains(_subModel);
+    _customSubModel = _subProvider.isNotEmpty && _subModel.isNotEmpty && !subKnown;
+    _subCustomCtrl = TextEditingController(text: _customSubModel ? _subModel : '');
   }
 
   @override
   void dispose() {
     _customCtrl.dispose();
+    _subCustomCtrl.dispose();
     super.dispose();
   }
 
@@ -858,8 +884,27 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     });
   }
 
+  void _onSubProviderChanged(String? value) {
+    final next = value ?? '';
+    final choices = _modelChoices(next);
+    setState(() {
+      _subProvider = next;
+      if (!choices.contains(_subModel)) {
+        _subModel = '';
+        _customSubModel = false;
+        _subCustomCtrl.clear();
+      }
+    });
+  }
+
   void _submit() {
     final model = _customModel ? _customCtrl.text.trim() : _model;
+    final subModel = _subProvider.isEmpty
+        ? null
+        : (_customSubModel ? _subCustomCtrl.text.trim() : _subModel);
+    final subagent = (subModel != null && subModel.isNotEmpty)
+        ? SessionSubagent(providerId: _subProvider, model: subModel)
+        : null;
     Navigator.pop(
       context,
       _AIConfigResult(
@@ -869,6 +914,7 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
         providerLabel: _providerName(_provider),
         modelLabel: _modelResultLabel(_provider, model),
         effortLabel: effortShortNameForCli(widget.cli, _effort),
+        subagent: subagent,
       ),
     );
   }
@@ -884,6 +930,13 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
     final modelValue = _customModel
         ? '__custom__'
         : (modelChoices.contains(_model) ? _model : '');
+    // Sub-task (subagent) cascade state for the view.
+    final subModelChoices = _modelChoices(_subProvider);
+    final subModelValue = _customSubModel
+        ? '__custom__'
+        : (subModelChoices.contains(_subModel)
+            ? _subModel
+            : (subModelChoices.isNotEmpty ? subModelChoices.first : ''));
     return SafeArea(
       child: Padding(
         padding: EdgeInsets.only(
@@ -998,6 +1051,90 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
                   .toList(),
               onChanged: (v) => setState(() => _effort = v ?? 'medium'),
             ),
+            if (_isClaude) ...[
+              const Divider(height: 32),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  const Text(
+                    '子任务 (subagent)',
+                    style: TextStyle(
+                        color: AppColors.text,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Task 工具派生的子 agent 走的 provider+model，留空 = 随主（经 claude-proxy 路由）',
+                      style: TextStyle(color: AppColors.faint, fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              const Text('子任务 Provider',
+                  style: TextStyle(color: AppColors.faint, fontSize: 12)),
+              const SizedBox(height: 5),
+              DropdownButtonFormField<String>(
+                value: _subProvider,
+                dropdownColor: AppColors.panel,
+                decoration: _sheetInputDecoration(),
+                style: const TextStyle(color: AppColors.text, fontSize: 13),
+                items: [
+                  const DropdownMenuItem(value: '', child: Text('默认（随主）')),
+                  ...widget.providers.map(
+                    (p) => DropdownMenuItem(
+                      value: p['id']?.toString() ?? '',
+                      child: Text(
+                        '${p['name'] ?? p['id']}${p['model'] != null && p['model'].toString().isNotEmpty ? ' · ${p['model']}' : ''}',
+                      ),
+                    ),
+                  ),
+                ],
+                onChanged: _onSubProviderChanged,
+              ),
+              if (_subProvider.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text('子任务 Model',
+                    style: TextStyle(color: AppColors.faint, fontSize: 12)),
+                const SizedBox(height: 5),
+                DropdownButtonFormField<String>(
+                  value: subModelValue,
+                  dropdownColor: AppColors.panel,
+                  decoration: _sheetInputDecoration(),
+                  style: const TextStyle(color: AppColors.text, fontSize: 13),
+                  items: [
+                    ...subModelChoices.map(
+                      (m) => DropdownMenuItem(
+                        value: m,
+                        child: Text(_modelOptionLabel(_subProvider, m)),
+                      ),
+                    ),
+                    const DropdownMenuItem(
+                        value: '__custom__', child: Text('自定义…')),
+                  ],
+                  onChanged: (v) {
+                    setState(() {
+                      _customSubModel = v == '__custom__';
+                      if (!_customSubModel) _subModel = v ?? '';
+                    });
+                  },
+                ),
+                if (_customSubModel) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _subCustomCtrl,
+                    autofocus: true,
+                    style: const TextStyle(
+                        color: AppColors.text,
+                        fontSize: 13,
+                        fontFamily: 'monospace'),
+                    decoration: _sheetInputDecoration(hint: '模型 ID'),
+                  ),
+                ],
+              ],
+            ],
             const SizedBox(height: 16),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
@@ -1014,6 +1151,73 @@ class _AIConfigSheetState extends State<_AIConfigSheet> {
         ),
       ),
     );
+  }
+}
+
+/// Open the per-session AI-config sheet for [sessionId] (used by both the
+/// header _ModelChip and the InputBar subagent pill). Fetches the provider list
+/// fresh, seeds the sheet from the current session (incl. subagent override),
+/// and PATCHes provider+model+effort+subagent on save.
+Future<void> openAIConfigSheet(
+  BuildContext context, {
+  required SettingsService settings,
+  required String sessionId,
+}) async {
+  final mgr = context.read<SessionManager>();
+  Session? found;
+  for (final x in mgr.sessions) {
+    if (x.id == sessionId) {
+      found = x;
+      break;
+    }
+  }
+  if (found == null) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(t('sessionNotLoaded'))));
+    return;
+  }
+  final sess = found;
+  List<Map<String, dynamic>> providers = const [];
+  try {
+    final appType = sess.cli == SessionCli.codex ? 'codex' : 'claude';
+    final d = await ManageService(settings: settings).fetchProviders(appType);
+    providers =
+        (d['providers'] as List? ?? []).map((e) => (e as Map).cast<String, dynamic>()).toList();
+  } catch (_) {}
+  if (!context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  final picked = await showModalBottomSheet<_AIConfigResult>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: AppColors.panel,
+    shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+    builder: (_) => _AIConfigSheet(
+      cli: sess.cli,
+      providers: providers,
+      provider: sess.provider ?? '',
+      model: sess.model ?? '',
+      effort: sess.effectiveEffort ?? sess.effort ?? 'medium',
+      subProviderId: sess.subagent?.providerId,
+      subModel: sess.subagent?.model,
+    ),
+  );
+  if (picked == null) return;
+  try {
+    await mgr.updateSessionAIConfig(
+      sess.id,
+      provider: picked.provider,
+      model: picked.model,
+      effort: picked.effort,
+      subagent: picked.subagent,
+      clearSubagent: picked.subagent == null,
+    );
+    messenger.showSnackBar(SnackBar(
+      content: Text(
+          '✓ AI 配置已保存：${picked.providerLabel} | ${picked.modelLabel} | ${picked.effortLabel}，下一轮对话生效'),
+    ));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('AI 配置保存失败：$e')));
   }
 }
 

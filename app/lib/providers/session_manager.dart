@@ -520,12 +520,16 @@ class SessionManager extends ChangeNotifier with WidgetsBindingObserver {
     required String provider,
     required String model,
     required String effort,
+    SessionSubagent? subagent,
+    bool clearSubagent = false,
   }) async {
     await _sessionService.updateSessionAIConfig(
       id,
       provider: provider,
       model: model,
       effort: effort,
+      subagent: subagent,
+      clearSubagent: clearSubagent,
     );
     await loadDashboard();
   }

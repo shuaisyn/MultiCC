@@ -48,6 +48,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _goalSaving = false;
   String? _goalStatus;
 
+  // Claude proxy global toggle (server-side; POST is localhost-only → read-only after 403).
+  bool _proxyEnabled = false;
+  bool _proxyReadOnly = false;
+  String? _proxyStatus;
+
   bool _checkingUpdate = false;
   String _appVersion = '…';
 
@@ -64,6 +69,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _fontScale = s.fontScale.value;
     _goalMinCtrl = TextEditingController(text: '60');
     _loadGoalConfig();
+    _loadProxyConfig();
     _loadVersion();
   }
 
@@ -73,6 +79,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _tokenCtrl.dispose();
     _goalMinCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadProxyConfig() async {
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .get(Uri.parse(s.buildHttpUrl('/api/settings/proxy')), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200 || !mounted) return;
+      final d = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      setState(() => _proxyEnabled = d['enabled'] == true);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleProxy(bool v) async {
+    final prev = _proxyEnabled;
+    setState(() {
+      _proxyEnabled = v;
+      _proxyStatus = null;
+    });
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .post(Uri.parse(s.buildHttpUrl('/api/settings/proxy')),
+              headers: headers, body: jsonEncode({'enabled': v}))
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (res.statusCode == 403) {
+        // POST is localhost-only (isLocalRequest guard). Phone/remote clients
+        // can read but not flip — revert and disable the switch.
+        setState(() {
+          _proxyEnabled = prev;
+          _proxyReadOnly = true;
+          _proxyStatus = '仅可在服务器本机切换，已禁用';
+        });
+      } else {
+        setState(() => _proxyStatus =
+            res.statusCode == 200 ? '已保存（下一轮 spawn 生效）' : '保存失败：HTTP ${res.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _proxyEnabled = prev);
+      if (mounted) setState(() => _proxyStatus = '保存失败：$e');
+    }
   }
 
   Future<void> _loadGoalConfig() async {
@@ -355,6 +408,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       : const Text('保存 Goal 预检设置', style: TextStyle(fontWeight: FontWeight.w700)),
                 ),
               ),
+            ],
+          ),
+          _Section(
+            title: 'Claude 代理路由',
+            children: [
+              const _Hint(
+                  '把 Claude Code 的请求按 provider 路由到不同端点（主进程 vs 子任务 subagent）。全局开关，仅可在服务器本机切换；手机/远程只能查看当前状态（切换会被服务器拒绝并自动转为只读）。'),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用 Claude Code 代理路由',
+                    style: TextStyle(color: AppColors.text, fontSize: 14)),
+                value: _proxyEnabled,
+                activeColor: const Color(0xFF04110f),
+                activeTrackColor: AppColors.accent,
+                onChanged: _proxyReadOnly ? null : _toggleProxy,
+              ),
+              if (_proxyStatus != null) ...[
+                const SizedBox(height: 6),
+                Text(_proxyStatus!,
+                    style: const TextStyle(color: AppColors.accent, fontSize: 13)),
+              ],
             ],
           ),
           _Section(

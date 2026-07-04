@@ -9,6 +9,8 @@ import 'package:http_parser/http_parser.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../providers/chat_provider.dart';
+import '../providers/session_manager.dart';
+import '../models/message.dart';
 import '../services/chat_service.dart';
 import '../services/settings_service.dart';
 import '../screens/voice_call_screen.dart';
@@ -22,7 +24,8 @@ const Map<String, String> _goalDimShort = {
 };
 
 class InputBar extends StatefulWidget {
-  const InputBar({super.key});
+  final VoidCallback? onPickSubagent;
+  const InputBar({super.key, this.onPickSubagent});
 
   @override
   State<InputBar> createState() => _InputBarState();
@@ -663,6 +666,18 @@ class _InputBarState extends State<InputBar> {
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<ChatProvider>();
+    final smgr = context.watch<SessionManager>();
+    Session? activeSess;
+    for (final x in smgr.sessions) {
+      if (x.id == provider.sessionName) {
+        activeSess = x;
+        break;
+      }
+    }
+    final subagentModelLabel =
+        (activeSess?.subagent?.model != null && activeSess!.subagent!.model!.isNotEmpty)
+            ? activeSess.subagent!.model
+            : null;
     final isStreaming = provider.isStreaming;
     final isConnected = provider.connectionState == ChatConnectionState.connected;
     final canSend = (_hasText || _attachments.isNotEmpty) && isConnected && !isStreaming;
@@ -718,6 +733,40 @@ class _InputBarState extends State<InputBar> {
                       ),
                     );
                   }).toList(),
+                ),
+              ),
+
+            // Sub-task (subagent) indicator pill — tap opens the AI-config sheet.
+            if (widget.onPickSubagent != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: GestureDetector(
+                    onTap: widget.onPickSubagent,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF14171c),
+                        border: Border.all(color: const Color(0xFF20242b)),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.psychology_outlined, size: 14, color: Color(0xFFe7eaee)),
+                          const SizedBox(width: 4),
+                          Text(
+                            '子任务: ${subagentModelLabel ?? '随主'}',
+                            style: const TextStyle(
+                                color: Color(0xFFe7eaee),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
 
