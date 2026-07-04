@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../providers/chat_provider.dart';
 import '../services/voice_call_service.dart';
@@ -8,8 +7,12 @@ import '../services/voice_call_service.dart';
 ///
 /// 进入即 [VoiceCallService.start] 开麦 + 连接 TTS；全程由状态机驱动：
 /// 聆听 → 确认 → 执行 → 汇报。用户开口即可打断 AI（barge-in）。
+///
+/// [chatProvider] 必须由调用方传入：本页 push 到根 Navigator，不在 ChatView 的
+/// Provider 子树内，无法用 context.read<ChatProvider>() 获取（否则灰屏崩溃）。
 class VoiceCallScreen extends StatefulWidget {
-  const VoiceCallScreen({super.key});
+  final ChatProvider chatProvider;
+  const VoiceCallScreen({super.key, required this.chatProvider});
 
   @override
   State<VoiceCallScreen> createState() => _VoiceCallScreenState();
@@ -24,7 +27,7 @@ class _VoiceCallScreenState extends State<VoiceCallScreen> with WidgetsBindingOb
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    final provider = context.read<ChatProvider>();
+    final provider = widget.chatProvider;
     _svc = VoiceCallService(chatProvider: provider, settings: provider.settings);
     _svc.addListener(_onSvcChanged);
     // 进入即开始通话。
