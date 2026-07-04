@@ -712,6 +712,20 @@
             <div class="sc-footer"><span class="status-text" id="cc-proxy-msg"></span></div>
           </div>
 
+          <!-- 官方会话走代理 (OAuth 重放) -->
+          <div class="settings-card">
+            <div class="sc-header">官方会话走代理 (OAuth 重放) <span id="cc-oauth-hint" style="font-size:11px;font-weight:400;color:var(--faint);"></span></div>
+            <div class="sc-body">
+              <div style="font-size:12px;color:var(--faint);line-height:1.6;margin-bottom:8px;">
+                让「主 provider = Claude 官方（OAuth 订阅登录）」的会话<b>也经本地代理中转</b>——代理从 macOS 钥匙串读取订阅 OAuth token 转发到 api.anthropic.com。<b>唯一作用</b>：让官方会话的 Task 子任务也能路由到便宜 provider（否则官方会话直连、子任务只能与主进程同用官方）。需先开启上方「代理路由」。
+                <br><b>· 关闭（默认，推荐）：</b>官方会话直连 Anthropic，子任务无法独立路由。<b>零风险。</b>
+                <br><b>· 开启：</b>⚠️ 会在官方客户端之外重放订阅 OAuth token，<b>可能违反 Anthropic 服务条款、有账号风险</b>；且与 CLI 共用同一钥匙串条目。仅只读钥匙串（不刷新），token 过期后需运行一次 <code>claude</code>。知情自担风险再开。
+              </div>
+              <div class="setting-row"><label>官方会话走代理</label><input id="cc-oauth-enabled" type="checkbox" style="width:auto;" onchange="saveOfficialOAuthSetting()" /></div>
+            </div>
+            <div class="sc-footer"><span class="status-text" id="cc-oauth-msg"></span></div>
+          </div>
+
           <!-- macOS 电源（仅 macOS 可见；非 macOS 自动隐藏） -->
           <div class="settings-card" id="macos-power-card" style="display:none;">
             <div class="sc-header">关盖运行 <span style="font-size:11px;font-weight:400;color:var(--faint);">· macOS</span></div>

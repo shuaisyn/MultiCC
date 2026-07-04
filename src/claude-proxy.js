@@ -37,6 +37,7 @@ const http = require('http');
 const { URL } = require('url');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 // Temporary diagnostic capture: dump the exact outbound body+headers for a
 // live request so a failing turn can be replayed byte-for-byte (direct vs
@@ -56,6 +57,63 @@ function maybeCapture(meta, headers, bodyBuf) {
 
 const CCFW_PREFIX = 'ccfw:';
 const TIERS = ['sonnet', 'opus', 'haiku', 'fable'];
+
+// ── claude-official OAuth passthrough (opt-in via CLAUDE_OFFICIAL_VIA_PROXY) ──
+// A "Claude Official" provider has no baseUrl/token in the store — it relies on
+// the CLI's built-in claude.ai OAuth subscription, whose token lives in the
+// macOS Keychain. To route such a session through this proxy (so its subagents
+// can be sent to cheap providers), we replay that Keychain OAuth token to
+// api.anthropic.com. v1 is READ-ONLY on the Keychain (no refresh / writeback):
+// if the token has expired the request fails with guidance to run `claude` once
+// to refresh it. This deliberately avoids racing the CLI over the shared entry.
+const OAUTH_KEYCHAIN_SERVICE = 'Claude Code-credentials';
+const OFFICIAL_PROVIDER_ID = 'claude-official';   // canonical "use the CLI's own login" entry
+const OFFICIAL_BASE_URL = 'https://api.anthropic.com';
+const OAUTH_BETA = 'oauth-2025-04-20';
+// Anthropic's OAuth gate requires the first system block to assert this identity.
+const CLAUDE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+function readKeychainOAuth() {
+  try {
+    const raw = execFileSync('security',
+      ['find-generic-password', '-s', OAUTH_KEYCHAIN_SERVICE, '-w'],
+      { encoding: 'utf8', timeout: 8000 });
+    const d = JSON.parse(raw.trim());
+    return d && d.claudeAiOauth ? d.claudeAiOauth : null;
+  } catch (_) { return null; }
+}
+
+/** Read a currently-valid official OAuth access token, or {token:null,reason}. */
+function readOfficialOAuthToken() {
+  const o = readKeychainOAuth();
+  if (!o || !o.accessToken) return { token: null, reason: 'no OAuth token in Keychain' };
+  if (o.expiresAt && o.expiresAt < Date.now()) {
+    return { token: null, reason: 'OAuth token expired — run `claude` once to refresh the Keychain' };
+  }
+  return { token: o.accessToken };
+}
+
+/** Ensure the request body's first system block is the Claude Code identity
+ *  assertion (required when authenticating with a subscription OAuth token). */
+function ensureClaudeIdentity(bodyBuf) {
+  try {
+    const obj = JSON.parse(bodyBuf.toString('utf8'));
+    const startsWithId = (s) => typeof s === 'string' && s.startsWith(CLAUDE_IDENTITY);
+    const sys = obj.system;
+    if (typeof sys === 'string') {
+      if (startsWithId(sys)) return bodyBuf;
+      obj.system = [{ type: 'text', text: CLAUDE_IDENTITY }, { type: 'text', text: sys }];
+    } else if (Array.isArray(sys) && sys.length) {
+      const f = sys[0];
+      const ft = typeof f === 'string' ? f : (f && f.text);
+      if (startsWithId(ft)) return bodyBuf;
+      obj.system = [{ type: 'text', text: CLAUDE_IDENTITY }, ...sys];
+    } else {
+      obj.system = [{ type: 'text', text: CLAUDE_IDENTITY }];
+    }
+    return Buffer.from(JSON.stringify(obj), 'utf8');
+  } catch (_) { return bodyBuf; }
+}
 
 /** Flatten a stored provider into {baseUrl, token, aliasMap}. */
 function resolveCreds(provider) {
@@ -161,7 +219,26 @@ function createHandler({ getProvider }) {
     }
 
     const provider = getProvider('claude', routeProviderId);
-    const creds = resolveCreds(provider);
+    let creds = resolveCreds(provider);
+    // Official (claude.ai OAuth subscription) route: ONLY the canonical
+    // `claude-official` provider, and only when it has no stored baseUrl (a user
+    // could instead configure it with a real API key, which the normal path
+    // handles). When the opt-in toggle is on, replay the Keychain OAuth token to
+    // api.anthropic.com. Scoped to this exact id so other empty-baseUrl providers
+    // still 502 rather than wrongly borrowing the subscription token.
+    let officialOAuthToken = null;
+    if (routeProviderId === OFFICIAL_PROVIDER_ID && (!creds || !creds.baseUrl)
+        && process.env.CLAUDE_OFFICIAL_VIA_PROXY === '1') {
+      const r = readOfficialOAuthToken();
+      if (r.token) {
+        officialOAuthToken = r.token;
+        creds = { baseUrl: OFFICIAL_BASE_URL, authToken: null, apiKey: null,
+                  aliasMap: {}, name: (creds && creds.name) || 'Claude Official', isOfficialOAuth: true };
+      } else {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: `ccfw: official OAuth unavailable — ${r.reason}` }));
+      }
+    }
     if (!creds || !creds.baseUrl) {
       res.writeHead(502, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ error: `ccfw: provider '${routeProviderId}' has no baseUrl` }));
@@ -199,7 +276,24 @@ function createHandler({ getProvider }) {
     delete headers.te;
     delete headers.trailer;
     delete headers.upgrade;
-    if (creds.authToken) headers['authorization'] = 'Bearer ' + creds.authToken;
+    if (creds.isOfficialOAuth) {
+      // Replay the subscription OAuth token + the OAuth beta, and DO NOT touch the
+      // body: UA / x-stainless / x-app / system prompt pass through untouched, so
+      // the forwarded request stays a genuine CLI request (same machine/IP) with
+      // only the credential swapped. Live-tested 2026-07-05: api.anthropic.com
+      // accepts the bare Bearer oat token even WITHOUT an identity system block,
+      // so rewriting the body is unnecessary — and injecting a system block would
+      // bust the CLI's prompt-cache prefix (wasting subscription quota).
+      // ensureClaudeIdentity() stays as a fallback if the identity gate is ever
+      // enforced.
+      headers['authorization'] = 'Bearer ' + officialOAuthToken;
+      const betas = new Set(String(headers['anthropic-beta'] || '').split(',').map((s) => s.trim()).filter(Boolean));
+      betas.add(OAUTH_BETA);
+      headers['anthropic-beta'] = Array.from(betas).join(',');
+      delete headers['x-api-key'];
+    } else if (creds.authToken) {
+      headers['authorization'] = 'Bearer ' + creds.authToken;
+    }
     if (creds.apiKey) headers['x-api-key'] = creds.apiKey;
     // Recompute Content-Length for the (possibly rewritten) outBody. Without
     // this, Node has no length to send and falls back to chunked
@@ -211,8 +305,13 @@ function createHandler({ getProvider }) {
     headers['content-length'] = String(Buffer.byteLength(outBody));
     const lib = base.protocol === 'https:' ? https : http;
     console.log(`[ccfw] sess=${sessionId || '-'} role=${role} provider=${creds.name || routeProviderId} model=${ccfw ? ccfw.realModel : (model || '(n/a)')} -> ${base.origin}${fullPath}`);
-    if (process.env.CCFW_CAPTURE === '1') console.log(`[ccfw] outbound-headers sess=${sessionId || '-'} ${JSON.stringify(headers)}`);
-    maybeCapture({ sessionId, role, provider: creds.name || routeProviderId, url: `${base.origin}${fullPath}`, stamp: Date.now() }, headers, outBody);
+    // Redact secrets before any diagnostic dump (never write the real Bearer /
+    // API key to logs or /tmp capture — matters especially for the OAuth token).
+    const safeHeaders = { ...headers };
+    if (safeHeaders.authorization) safeHeaders.authorization = 'Bearer ***';
+    if (safeHeaders['x-api-key']) safeHeaders['x-api-key'] = '***';
+    if (process.env.CCFW_CAPTURE === '1') console.log(`[ccfw] outbound-headers sess=${sessionId || '-'} ${JSON.stringify(safeHeaders)}`);
+    maybeCapture({ sessionId, role, provider: creds.name || routeProviderId, url: `${base.origin}${fullPath}`, stamp: Date.now() }, safeHeaders, outBody);
 
     const up = lib.request({
       method: req.method,
@@ -258,4 +357,4 @@ function mountClaudeProxy(app, { getProvider }) {
   app.use('/claude-proxy', createHandler({ getProvider }));
 }
 
-module.exports = { mountClaudeProxy, createHandler, parseProxyUrl, decodeCcfwModel, resolveCreds, CCFW_PREFIX };
+module.exports = { mountClaudeProxy, createHandler, parseProxyUrl, decodeCcfwModel, resolveCreds, CCFW_PREFIX, ensureClaudeIdentity, readOfficialOAuthToken };

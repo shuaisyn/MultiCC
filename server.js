@@ -345,6 +345,13 @@ const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?
 // `let`: hot-reloadable at runtime via POST /api/settings/proxy (persists to .env).
 // Set CLAUDE_PROXY_ENABLED=0 in .env to bypass and route claude directly to the provider.
 let CLAUDE_PROXY_ENABLED = String(process.env.CLAUDE_PROXY_ENABLED ?? '1') !== '0';
+// Default-OFF, opt-in: route claude-official (OAuth-subscription) sessions THROUGH
+// the proxy by replaying the macOS Keychain OAuth token. OFF: official sessions
+// bypass the proxy and connect direct to api.anthropic.com (subagent routing
+// unavailable for them). ON: enables subagent routing on official sessions
+// (⚠️ replays subscription OAuth outside the official client — ToS + shared-Keychain
+// considerations; hot-reloadable via POST /api/settings/official-oauth, persisted).
+let CLAUDE_OFFICIAL_VIA_PROXY = String(process.env.CLAUDE_OFFICIAL_VIA_PROXY ?? '0') === '1';
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
 // Read the user's default model from ~/.claude/settings.json on every spawn so
@@ -1604,6 +1611,7 @@ function createSession(id) {
     providers.applyClaudeProxyEnv(termEnv, {
       providerId: persisted.provider, sessionId: id,
       subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+      officialOAuth: CLAUDE_OFFICIAL_VIA_PROXY,
     });
   }
 
@@ -3954,6 +3962,22 @@ app.post('/api/settings/proxy', (req, res) => {
   res.json({ ok: true, enabled: CLAUDE_PROXY_ENABLED });
 });
 
+// ── Route claude-official (OAuth subscription) through the proxy — default OFF ──
+// Opt-in only: enabling makes official sessions replay their Keychain OAuth token
+// through the proxy so their subagents can route to cheap providers (⚠️ ToS risk).
+app.get('/api/settings/official-oauth', (req, res) => {
+  res.json({ enabled: CLAUDE_OFFICIAL_VIA_PROXY });
+});
+app.post('/api/settings/official-oauth', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: '仅可在本机修改' });
+  if (typeof (req.body && req.body.enabled) !== 'boolean') return res.status(400).json({ error: 'enabled 必须是布尔' });
+  CLAUDE_OFFICIAL_VIA_PROXY = req.body.enabled;                                       // hot-reload: spawns + proxy read this live
+  process.env.CLAUDE_OFFICIAL_VIA_PROXY = req.body.enabled ? '1' : '0';               // proxy handler reads process.env
+  writeEnvFile({ CLAUDE_OFFICIAL_VIA_PROXY: req.body.enabled ? '1' : '0' });          // persists across restarts
+  console.log(`[multicc/proxy] official-via-proxy (OAuth replay) ${req.body.enabled ? 'enabled' : 'disabled'} via UI`);
+  res.json({ ok: true, enabled: CLAUDE_OFFICIAL_VIA_PROXY });
+});
+
 // macOS system power settings
 app.get('/api/settings/power', (req, res) => {
   if (!macosPower.isAvailable()) {
@@ -4330,6 +4354,7 @@ const auxQueue = {
       providers.applyClaudeProxyEnv(built.env, {
         providerId: auxConfig.providerId || null, sessionId: 'aux',
         port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+        officialOAuth: CLAUDE_OFFICIAL_VIA_PROXY,
       });
       // Model precedence: explicit aux config wins; else if the provider routes
       // elsewhere (custom base_url) let its own ANTHROPIC_MODEL decide (omit
@@ -6419,6 +6444,7 @@ function runChatTurn(sessionName, text, opts = {}) {
     providers.applyClaudeProxyEnv(childEnv, {
       providerId: persisted.provider, sessionId: sessionName,
       subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+      officialOAuth: CLAUDE_OFFICIAL_VIA_PROXY,
     });
     const proc = spawn(provider.cmd, spawnArgs, {
       cwd: cs.cwd,
@@ -6838,6 +6864,7 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
   providers.applyClaudeProxyEnv(childEnv, {
     providerId: persisted.provider, sessionId: sessionName,
     subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+    officialOAuth: CLAUDE_OFFICIAL_VIA_PROXY,
   });
   // Wire-model resolution lives in providers.resolveSessionWireModel (shared
   // with buildChatSpawnArgs) so the two spawn paths cannot drift apart.

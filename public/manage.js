@@ -4861,9 +4861,47 @@ async function saveProxySetting() {
   }
 }
 
+// ── Route claude-official (OAuth) through the proxy — default OFF ──
+async function loadOfficialOAuthSetting() {
+  const cb = document.getElementById('cc-oauth-enabled');
+  const hint = document.getElementById('cc-oauth-hint');
+  if (!cb) return;
+  try {
+    const res = await fetch('/api/settings/official-oauth' + tokenQS('?'));
+    const d = await res.json();
+    cb.checked = !!d.enabled;
+    cb.disabled = false;
+    if (hint) hint.textContent = '· ' + (d.enabled ? '已开启 ⚠️' : '已关闭');
+  } catch (_) {}
+}
+
+async function saveOfficialOAuthSetting() {
+  const cb = document.getElementById('cc-oauth-enabled');
+  const msg = document.getElementById('cc-oauth-msg');
+  if (!cb) return;
+  if (cb.checked && !confirm('开启后会在官方客户端之外重放你的订阅 OAuth token，可能违反 Anthropic 服务条款并有账号风险。确定开启？')) {
+    cb.checked = false; return;
+  }
+  const enabled = cb.checked;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (_urlToken) headers['X-Access-Token'] = _urlToken;
+    const res = await fetch('/api/settings/official-oauth', { method: 'POST', headers, body: JSON.stringify({ enabled }) });
+    const d = await res.json();
+    if (!res.ok || d.error) throw new Error(d.error || ('HTTP ' + res.status));
+    cb.checked = !!d.enabled;
+    const hint = document.getElementById('cc-oauth-hint');
+    if (hint) hint.textContent = '· ' + (d.enabled ? '已开启 ⚠️' : '已关闭');
+    if (msg) { msg.textContent = (d.enabled ? '已开启' : '已关闭') + '（下一轮 spawn 生效）'; msg.className = 'status-text ok'; }
+  } catch (e) {
+    if (msg) { msg.textContent = '错误: ' + e.message; msg.className = 'status-text err'; }
+  }
+}
+
 async function loadTunnelSettings() {
   loadAccessToken();
   loadProxySetting();
+  loadOfficialOAuthSetting();
   try {
     const res = await fetch('/api/settings/tunnel' + tokenQS('?'));
     const st = await res.json();
