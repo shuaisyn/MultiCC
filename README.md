@@ -5,26 +5,27 @@
 <h1 align="center">MultiCC</h1>
 
 <p align="center">
-  <strong>Self-hosted control plane for AI coding agents. <br>Run Claude Code & Codex from browser, phone, or IM — all at once.</strong>
+  <strong>Many AI coding CLI sessions. Many clients. Any device.</strong>
 </p>
 
 <p align="center">
-  <a href="#what-is-multicc">What</a> &bull;
-  <a href="#vs-the-ecosystem">vs. Ecosystem</a> &bull;
+  <a href="#what-is-multicc">What it is</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#multi-provider-support">Providers</a> &bull;
+  <a href="#session-orchestration">Orchestration</a> &bull;
   <a href="#features">Features</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
-  <a href="#configuration">Config</a> &bull;
+  <a href="#configuration">Configuration</a> &bull;
   <a href="#api-reference">API</a> &bull;
   <a href="#faq">FAQ</a>
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/github/v/release/lsjwzh/MultiCC?label=latest%20release" alt="Latest Release" />
   <img src="https://img.shields.io/badge/node-%3E%3D20.19-brightgreen" alt="Node.js >=20.19" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="Platform" />
   <img src="https://img.shields.io/badge/flutter-Android%20%7C%20iOS-02569B" alt="Flutter app" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
-  <a href="https://github.com/lsjwzh/MultiCC/stargazers"><img src="https://img.shields.io/github/stars/lsjwzh/MultiCC?style=social" alt="Stars" /></a>
 </p>
 
 ---
@@ -429,7 +430,23 @@ A single operational surface for everything:
 
 ## Quick Start
 
-### One-Command Install
+### Stable Release (recommended)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/v1.0.0/install.sh | bash
+```
+
+This installs the latest **stable release**. The script auto-detects your OS,
+checks prerequisites, clones the repo, installs dependencies, configures an
+access token, and optionally installs as a background service (macOS `launchd`).
+
+Running `./multicc update` later checks for new releases and upgrades you
+when one becomes available.
+
+### Development Snapshot (daily `main`)
+
+> ⚠️ This pulls the current `main` branch — it may include untested changes.
+> Prefer the stable release above unless you explicitly want the bleeding edge.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/main/install.sh | bash
