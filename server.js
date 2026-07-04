@@ -82,6 +82,7 @@ const artifacts = require('./src/artifacts');
 const providers = require('./src/providers');
 const tokenGlobal = require('./src/token-global');
 const { mountCodexProxy } = require('./src/codex-proxy');
+const { mountClaudeProxy } = require('./src/claude-proxy');
 const app = express();
 
 // ── Access token authentication (cookie-based login) ──
@@ -340,6 +341,10 @@ const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
+// Default-on toggle for the per-session/per-role claude proxy (src/claude-proxy.js).
+// `let`: hot-reloadable at runtime via POST /api/settings/proxy (persists to .env).
+// Set CLAUDE_PROXY_ENABLED=0 in .env to bypass and route claude directly to the provider.
+let CLAUDE_PROXY_ENABLED = String(process.env.CLAUDE_PROXY_ENABLED ?? '1') !== '0';
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
 // Read the user's default model from ~/.claude/settings.json on every spawn so
@@ -1572,6 +1577,11 @@ function createSession(id) {
     for (const k of providers.CLAUDE_ROUTING_KEYS) {
       if (!(k in termEnv)) termEnv[k] = '';
     }
+    // Route interactive tmux claude through the per-session/per-role proxy too.
+    providers.applyClaudeProxyEnv(termEnv, {
+      providerId: persisted.provider, sessionId: id,
+      subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+    });
   }
 
   // For Claude: pre-allocate a stable session UUID so chat-mode `--resume` works.
@@ -1732,6 +1742,11 @@ function createSession(id) {
 }
 
 // ── REST API ──
+// Claude Code per-session/per-role routing proxy (src/claude-proxy.js). Mounted
+// BEFORE express.json() on purpose: it streams the raw request body (no 100kb
+// limit, no double-parse) and inspects the `model` field to route each
+// /v1/messages request — main loop vs Task-tool subagent — to different providers.
+mountClaudeProxy(app, { getProvider: providers.getProvider });
 app.use(express.json());
 
 // Codex Responses↔Chat 协议转换代理（国产服务商 DeepSeek/GLM/Qwen/MiniMax）。
@@ -2451,6 +2466,30 @@ app.patch('/api/sessions/:id', (req, res) => {
     if (s.streaming) chatStream.close(s.id);
     const pname = v.value ? (providers.getProviderSummary(s.cli === 'codex' ? 'codex' : 'claude', v.value)?.name || v.value) : '默认登录';
     appendEvent(s.dirId, 'session_provider_changed', `${s.label || s.id} → ${pname}`, s.id);
+  }
+  if (req.body.subagent !== undefined) {
+    // Per-session Task-tool subagent provider+model, routed via the claude-proxy
+    // (effective only for provider-backed claude sessions). null / '' / {} clears it.
+    const sa = req.body.subagent;
+    if (sa === null || sa === '' || (typeof sa === 'object' && Object.keys(sa).length === 0)) {
+      s.subagent = null;
+    } else if (typeof sa === 'object') {
+      const subApp = (s.cli === 'codex') ? 'codex' : 'claude';
+      const v = validProviderId(subApp, (sa.providerId || '').toString().trim());
+      if (!v.ok) return res.status(400).json({ error: 'invalid subagent provider' });
+      const model = (sa.model || '').toString().trim();
+      if (!model) return res.status(400).json({ error: 'subagent model required' });
+      s.subagent = { providerId: v.value, model };
+    } else {
+      return res.status(400).json({ error: 'invalid subagent' });
+    }
+    // A warm streaming process must relaunch to pick up CLAUDE_CODE_SUBAGENT_MODEL.
+    if (s.streaming) chatStream.close(s.id);
+    const subApp2 = (s.cli === 'codex') ? 'codex' : 'claude';
+    const saName = s.subagent
+      ? `${providers.getProviderSummary(subApp2, s.subagent.providerId)?.name || s.subagent.providerId} / ${s.subagent.model}`
+      : '默认(随主)';
+    appendEvent(s.dirId, 'session_subagent_changed', `${s.label || s.id} 子任务 → ${saName}`, s.id);
   }
   savePersistedSessions();
   res.json({ ...s, effectiveModel: effectiveSessionModel(s), effectiveEffort: effectiveSessionEffort(s) });
@@ -3782,6 +3821,20 @@ app.post('/api/settings/access-token', (req, res) => {
   res.json({ ok: true, hasToken: !!token });
 });
 
+// ── Claude Code per-session/per-role proxy global toggle (live, persisted) ──
+app.get('/api/settings/proxy', (req, res) => {
+  res.json({ enabled: CLAUDE_PROXY_ENABLED });
+});
+app.post('/api/settings/proxy', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: '仅可在本机修改' });
+  if (typeof (req.body && req.body.enabled) !== 'boolean') return res.status(400).json({ error: 'enabled 必须是布尔' });
+  CLAUDE_PROXY_ENABLED = req.body.enabled;                                  // hot-reload: spawns read this live
+  process.env.CLAUDE_PROXY_ENABLED = req.body.enabled ? '1' : '0';
+  writeEnvFile({ CLAUDE_PROXY_ENABLED: req.body.enabled ? '1' : '0' });     // persists across restarts
+  console.log(`[multicc/proxy] claude proxy ${req.body.enabled ? 'enabled' : 'disabled'} via UI`);
+  res.json({ ok: true, enabled: CLAUDE_PROXY_ENABLED });
+});
+
 // macOS system power settings
 app.get('/api/settings/power', (req, res) => {
   if (!macosPower.isAvailable()) {
@@ -4155,6 +4208,10 @@ const auxQueue = {
       // can't silently redirect the `haiku` alias and break every aux task.
       const auxSession = { cli: 'claude', provider: auxConfig.providerId || null };
       const built = providers.buildChildEnv(process.env, auxSession, { TERM: 'dumb', NO_COLOR: '1' });
+      providers.applyClaudeProxyEnv(built.env, {
+        providerId: auxConfig.providerId || null, sessionId: 'aux',
+        port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+      });
       // Model precedence: explicit aux config wins; else if the provider routes
       // elsewhere (custom base_url) let its own ANTHROPIC_MODEL decide (omit
       // --model); else fall back to haiku on the default login.
@@ -6094,6 +6151,10 @@ function runChatTurn(sessionName, text, opts = {}) {
       MULTICC_DIR_ID: persisted.dirId || '',
       MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
     });
+    providers.applyClaudeProxyEnv(childEnv, {
+      providerId: persisted.provider, sessionId: sessionName,
+      subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
+    });
     const proc = spawn(provider.cmd, spawnArgs, {
       cwd: cs.cwd,
       env: childEnv,
@@ -6506,6 +6567,12 @@ function runChatTurnStreaming(sessionName, cs, persisted, promptText, rolePrompt
     MULTICC_SESSION_ID: sessionName,
     MULTICC_DIR_ID: persisted.dirId || '',
     MULTICC_BASE_URL: `http://127.0.0.1:${PORT}`,
+  });
+  // Route through the local claude-proxy (per-session + per-role). Only takes
+  // effect for provider-backed sessions; default-login sessions bypass.
+  providers.applyClaudeProxyEnv(childEnv, {
+    providerId: persisted.provider, sessionId: sessionName,
+    subagent: persisted.subagent, port: PORT, enabled: CLAUDE_PROXY_ENABLED,
   });
   // Wire-model resolution lives in providers.resolveSessionWireModel (shared
   // with buildChatSpawnArgs) so the two spawn paths cannot drift apart.

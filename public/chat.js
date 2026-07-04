@@ -2235,7 +2235,7 @@ function modelDisplayName(model, providerId) {
   return modelShortName(model);
 }
 
-function showAIConfigPicker({ provider, model, effort }) {
+function showAIConfigPicker({ provider, model, effort, subagent }) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -2251,6 +2251,14 @@ function showAIConfigPicker({ provider, model, effort }) {
       <input id="ai-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:12px;display:none;">
       <label id="ai-effort-label" style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">${_sessionCli === 'codex' ? 'Reasoning Level' : 'Effort'}</label>
       <select id="ai-effort" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;"></select>
+      <div style="height:1px;background:#30363d;margin:4px 0 14px;"></div>
+      <div style="font-size:13px;font-weight:600;margin-bottom:2px;">子任务 (subagent)</div>
+      <div style="font-size:11px;color:#8b949e;line-height:1.45;margin-bottom:10px;">Task 工具派生的子 agent 走的 provider+model（经 claude-proxy 路由，与主进程隔离）。留空=随主。</div>
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">子任务 Provider</label>
+      <select id="ai-sub-provider" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:10px;"></select>
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:5px;">子任务 Model</label>
+      <select id="ai-sub-model" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:6px;"></select>
+      <input id="ai-sub-model-custom" type="text" placeholder="模型 ID" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:8px 10px;outline:none;margin-bottom:14px;display:none;">
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button id="ai-cancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;padding:6px 14px;cursor:pointer;">取消</button>
         <button id="ai-ok" style="background:#238636;border:1px solid #2ea043;border-radius:6px;color:#fff;font-size:13px;padding:6px 14px;cursor:pointer;">保存</button>
@@ -2285,6 +2293,42 @@ function showAIConfigPicker({ provider, model, effort }) {
     }
     effortSel.value = effortOptions.some(o => o.value === effort) ? effort : 'medium';
 
+    // ── 子任务 (subagent) provider+model cascade — reuses the main helpers ──
+    const subProviderSel = box.querySelector('#ai-sub-provider');
+    const subModelSel = box.querySelector('#ai-sub-model');
+    const subCustom = box.querySelector('#ai-sub-model-custom');
+    const subDef = document.createElement('option');
+    subDef.value = ''; subDef.textContent = '默认（随主）';
+    subProviderSel.appendChild(subDef);
+    for (const p of _providerList) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + (p.isOfficial ? ' · 订阅' : (p.baseUrl ? ' · ' + p.baseUrl.replace(/^https?:\/\//, '') : ''));
+      subProviderSel.appendChild(opt);
+    }
+    const initSub = subagent && subagent.providerId ? subagent : null;
+    subProviderSel.value = initSub ? initSub.providerId : '';
+    function syncSubCustom() { subCustom.style.display = subModelSel.value === '__custom__' ? '' : 'none'; }
+    function rebuildSubModels(pid, pref) {
+      pref = normalizeModelForProvider(pid, pref || '');
+      const choices = buildModelChoices(pid);
+      subModelSel.innerHTML = '';
+      for (const v of choices) { const o = document.createElement('option'); o.value = v; o.textContent = modelChoiceLabel(v, pid); subModelSel.appendChild(o); }
+      const isKnown = choices.includes(pref);
+      subModelSel.value = isKnown ? pref : '__custom__';
+      subCustom.value = isKnown ? '' : pref;
+      syncSubCustom();
+    }
+    function refreshSubUI() {
+      const pid = subProviderSel.value;
+      subModelSel.disabled = !pid; subCustom.disabled = !pid;
+      if (pid) rebuildSubModels(pid, initSub ? initSub.model : '');
+      else { subModelSel.innerHTML = '<option value="">（随主）</option>'; subModelSel.value = ''; syncSubCustom(); }
+    }
+    refreshSubUI();
+    subProviderSel.onchange = refreshSubUI;
+    subModelSel.onchange = () => { syncSubCustom(); if (subModelSel.value === '__custom__') subCustom.focus(); };
+
     function rebuildModels(nextProvider, preferredModel) {
       // For alias-mapped relays a stored wire id (claude-opus-4-8) maps back to
       // its tier so the tier option pre-selects.
@@ -2313,10 +2357,13 @@ function showAIConfigPicker({ provider, model, effort }) {
     const close = (r) => { overlay.remove(); resolve(r); };
     box.querySelector('#ai-ok').onclick = () => {
       const pickedModel = modelSel.value === '__custom__' ? custom.value.trim() : modelSel.value;
+      const subPid = subProviderSel.value;
+      const subModel = subPid ? (subModelSel.value === '__custom__' ? subCustom.value.trim() : subModelSel.value) : '';
       close({
         provider: providerSel.value,
         model: pickedModel,
         effort: effortSel.value,
+        subagent: subPid && subModel ? { providerId: subPid, model: subModel } : null,
       });
     };
     box.querySelector('#ai-cancel').onclick = () => close(null);
@@ -2338,6 +2385,7 @@ async function loadSessionModel() {
     // Provider switch applies to every cli (claude & codex both have providers).
     _sessionCli = info.cli || 'claude';
     _sessionProvider = info.provider || '';
+    _sessionSubagent = info.subagent || null;
     if (_sessionProvider) await ensureProviderList(_sessionCli === 'codex' ? 'codex' : 'claude');
     updateProviderBtn();
     _sessionModel = info.model || '';
@@ -2368,17 +2416,19 @@ modelBtn?.addEventListener('click', async () => {
     provider: _sessionProvider,
     model: _sessionModel,
     effort: _sessionEffectiveEffort || _sessionEffort || 'medium',
+    subagent: _sessionSubagent,
   });
   if (picked === null) return;
   try {
     const res = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: picked.provider, model: picked.model, effort: picked.effort }),
+      body: JSON.stringify({ provider: picked.provider, model: picked.model, effort: picked.effort, subagent: picked.subagent }),
     });
     const data = await res.json();
     if (!res.ok) { addSystemMsg('AI 配置保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionProvider = data.provider || '';
+    _sessionSubagent = data.subagent || null;
     _sessionModel = data.model || '';
     _sessionEffectiveModel = data.effectiveModel || data.model || '';
     _sessionEffort = data.effort || '';
@@ -2414,6 +2464,7 @@ effortBtn?.addEventListener('click', async () => {
 /* ── Per-session provider switch (cc-switch) ── */
 const providerBtn = document.getElementById('provider-btn');
 let _sessionProvider = '';       // provider id ('' = default login)
+let _sessionSubagent = null;     // {providerId, model} for Task-tool subagent (claude-proxy), null = 随主
 let _sessionProviderDisplayName = '';  // 实际生效 provider 的显示名（init 兜底；_sessionProvider 为空或 _providerList 未加载时用）
 let _sessionCli = 'claude';
 let _providerList = [];           // cached [{id,appType,name,baseUrl,model,isOfficial}]
