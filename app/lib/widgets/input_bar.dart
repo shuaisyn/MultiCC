@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import '../providers/chat_provider.dart';
 import '../services/chat_service.dart';
 import '../services/settings_service.dart';
+import '../screens/voice_call_screen.dart';
 
 // Goal precheck dimension keys → short chip labels (web/app kept in sync).
 const Map<String, String> _goalDimShort = {
@@ -111,6 +112,12 @@ class _InputBarState extends State<InputBar> {
   }
 
   // ── Voice recording ──
+
+  void _openVoiceCall() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
+    );
+  }
 
   Future<void> _toggleRecording() async {
     if (_isRecording) {
@@ -742,6 +749,14 @@ class _InputBarState extends State<InputBar> {
                   onTap: (isConnected && !isStreaming) ? () => _showGoalSheet(provider) : null,
                   icon: Icons.track_changes_rounded,
                   color: const Color(0xFF8a909b),
+                ),
+                const SizedBox(width: 4),
+
+                // Voice call-mode button — opens the 豆包式 full-duplex call screen.
+                _SmallButton(
+                  onTap: isConnected ? _openVoiceCall : null,
+                  icon: Icons.phone_in_talk_rounded,
+                  color: const Color(0xFF22ab9c),
                 ),
                 const SizedBox(width: 4),
 

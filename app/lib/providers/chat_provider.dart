@@ -31,6 +31,12 @@ class ChatProvider extends ChangeNotifier {
 
   bool get isStreaming => _service.isStreaming;
 
+  /// Raw chat event stream (broadcast) — exposed so the voice call-mode
+  /// service can monitor task progress (content_block_delta / result / notify)
+  /// without going through the message-rendering layer. Safe to add listeners:
+  /// ChatService uses a broadcast StreamController.
+  Stream<ChatEvent> get chatEvents => _service.events;
+
   String? _sessionId;
   String get sessionId => _sessionId ?? '';
 
