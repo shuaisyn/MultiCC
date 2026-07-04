@@ -5719,3 +5719,72 @@ document.addEventListener('click', (e) => {
   input.type = show ? 'text' : 'password';
   btn.textContent = show ? '🙈' : '👁';
 });
+
+// ── Version check ────────────────────────────────────────────────────────
+window._versionCheckTimer = null;
+window._versionCheckRunning = false;
+
+window.checkVersion = function () {
+  if (window._versionCheckRunning) return;
+  window._versionCheckRunning = true;
+
+  const icon = document.getElementById('ver-icon');
+  const current = document.getElementById('ver-current');
+  const hint = document.getElementById('ver-hint');
+  const badge = document.getElementById('ver-badge');
+
+  if (icon) icon.textContent = '⏳';
+  if (hint) hint.textContent = '检查中…';
+  if (badge) badge.style.display = 'none';
+
+  fetch('/api/version-check')
+    .then(r => r.json())
+    .then(data => {
+      window._versionCheckRunning = false;
+      if (icon) icon.textContent = data.updateAvailable ? '🆕' : '📦';
+      if (current) current.textContent = 'v' + (data.current || '—');
+      if (badge) {
+        if (data.updateAvailable) {
+          badge.style.display = 'inline-block';
+          badge.textContent = 'v' + data.latestVersion;
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+      if (hint) {
+        if (data.updateAvailable) {
+          hint.textContent = '有新版 v' + data.latestVersion + ' 可用！';
+          hint.style.color = 'var(--accent)';
+        } else if (data.apiError) {
+          hint.textContent = '已是最新（离线）';
+          hint.style.color = '';
+        } else {
+          hint.textContent = '已是最新';
+          hint.style.color = '';
+        }
+      }
+    })
+    .catch(() => {
+      window._versionCheckRunning = false;
+      if (icon) icon.textContent = '📦';
+      if (hint) { hint.textContent = '检查失败'; hint.style.color = ''; }
+    });
+};
+
+// Check on first load (deferred 3s so the page renders first).
+setTimeout(() => { window.checkVersion(); }, 3000);
+
+// Also check hourly. Use a floating interval (realigns on each check).
+window._versionCheckTimer = setInterval(() => {
+  if (document.hidden) return; // skip when tab is in background
+  window.checkVersion();
+}, 60 * 60 * 1000); // every 60 minutes
+
+// Re-check when tab becomes visible after being hidden for >1h.
+let _lastVisibleCheck = Date.now();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - _lastVisibleCheck > 60 * 60 * 1000) {
+    _lastVisibleCheck = Date.now();
+    window.checkVersion();
+  }
+});
