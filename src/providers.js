@@ -843,12 +843,23 @@ async function probeRelayModels(baseEnv, candidates, cliCmd) {
 // there is nothing to forward to. Bypass in that case exactly like the
 // no-provider case (found 2026-07-05: a live session had this set and every
 // turn was 502ing silently through the proxy).
-function applyClaudeProxyEnv(env, { providerId, sessionId, subagent, port, enabled }) {
+// `officialOAuth` (opt-in, default off): when true, a provider that has no
+// ANTHROPIC_BASE_URL — i.e. a "Claude Official"/OAuth-subscription entry — is
+// ALSO routed through the proxy instead of bypassed. The proxy then replays the
+// Keychain OAuth token to api.anthropic.com, which is what lets an official
+// session route its subagents to cheaper providers. See src/claude-proxy.js.
+function applyClaudeProxyEnv(env, { providerId, sessionId, subagent, port, enabled, officialOAuth }) {
   if (!enabled) return;
   if (!providerId || !sessionId || !port) return;
   const p = getProvider('claude', providerId);
   const cfg = p ? parseConfig(p.settingsConfig) : {};
-  if (!cfg.env || !cfg.env.ANTHROPIC_BASE_URL) return;
+  const hasBase = !!(cfg.env && cfg.env.ANTHROPIC_BASE_URL);
+  // No custom baseUrl → normally bypass (nothing to forward to). Exception: the
+  // canonical `claude-official` provider when the opt-in OAuth toggle is on —
+  // route it too so the proxy can replay the Keychain OAuth token. Other
+  // empty-baseUrl providers still bypass (they are not the subscription login).
+  const isOfficial = providerId === 'claude-official';
+  if (!hasBase && !(officialOAuth && isOfficial)) return;
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}/claude-proxy/${providerId}/${sessionId}`;
   env.ANTHROPIC_AUTH_TOKEN = `multicc-${sessionId}`;
   delete env.ANTHROPIC_API_KEY; // real creds stay in the store; proxy resolves them
