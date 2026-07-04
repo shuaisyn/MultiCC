@@ -588,17 +588,16 @@ const MULTICC_IMG_HINT = [
   '     返回里的 callbackUrl 交给外部系统，让它在完成时 POST 结果到该 URL（body 放 {"data":"..."}）。',
   '  登记成功后，正常结束本轮即可——条件满足/回调到达时 multicc 会自动续接，无需用户手动催。',
   '',
-  '【后台长任务，丢了别管 ——【硬性规则，优先级高于任何角色设定】】在 multicc 的 chat 会话里，凡是「跑完/等到再继续」的等待型后台操作，一律禁止用以下方式：① 裸 `&`/nohup；② Claude Code 自带 Bash 工具的 `run_in_background:true`（这是最常见的违规！包括用它去轮询/守候一个或多个文件、状态、子会话结果）；③ Monitor / BashOutput 轮询；④ `tail -f | grep` 等待标记。原因：chat 会话里这些后台进程和监听器会在本轮结束/上下文重置时被环境连同任务一起回收，进程被静默杀掉（OOM、退出码 137，不写日志）后你的等待永远不会被唤醒——表现就是「消息到此断掉、不会自动恢复，直到用户来催」（你正在看的这条提示就是因为有人这么做了）。正确做法：改用 multicc 的 run-detached 接口（由 multicc 服务以 setsid 启动，独立于本轮甚至服务重启，跑完自动把「退出码+输出尾巴」作为下一条消息发回给你续接）；或在命令本身够快时前台同步跑（给足 timeout 一次拿结果）。',
-  `     curl -s $MULTICC_BASE_URL/api/sessions/$MULTICC_SESSION_ID/run-detached -H 'Content-Type: application/json' \\`,
-  `       -d '{"command":"<要后台跑的完整shell命令>","label":"<简短任务名>"}'`,
-  '     可选字段：cwd（默认你的工作目录）、intervalSec（轮询间隔秒，默认 10）、maxChecks（最多检查次数，默认 360≈1 小时）、daemon（设为 true 表示这是常驻服务如 dev server / API 服务，永不退出——此时不注册轮询等待，不会产生「[轮询超时]」误报，启动后用 GET /api/detached/<taskId> 查状态即可）。返回里有 taskId 与 logPath；用 GET $MULTICC_BASE_URL/api/detached/<taskId> 可随时查实时状态与日志尾巴。',
-  '  登记后正常结束本轮即可，任务完成时 multicc 会自动续接。若需中途向用户报进度，配合下面「边做边报」用 GET /api/detached/<taskId> tail 日志即可，不要前台死等。',
-  '  ⚠️ 常驻服务（dev server / API / 任何不退出的进程）必须加 "daemon":true，否则轮询永远等不到 done 文件、必然超时报「[轮询超时]」误报。',
-  '  ⚠️ 典型违规场景（这些都必须用 run-detached，不能用 Bash run_in_background）：等构建/打包/部署/长测试跑完；轮询某文件出现某关键字；**等多个子会话/兄弟会话把结果写进各自文件后再汇总**（比如 dispatch 出去几个会话后守着它们的 chat_history json）；等第三方接口/部署状态变化。判断标准很简单：只要这一步是「我先发起、然后要等它在未来某刻完成、完成后我才继续」，就用 run-detached 或前台同步跑，绝不用 run_in_background 守。run-detached 同样支持轮询（intervalSec/maxChecks）和自定义 pollCmd，能覆盖上面所有场景，且跨轮不丢、自动续接。',
-  '  🚫【绝对禁令，无例外】不要给 Bash 工具传 `run_in_background: true`。在 chat 会话里这个参数起的后台进程会被回收，等于白跑。需要后台 → run-detached；需要尽快拿结果 → 前台同步跑（给足 timeout）。这条不是建议而是禁令：multicc 会在每一轮结束后检查你是否用了 `run_in_background`，一旦发现就会自动给你发一条纠正消息把你拉回正轨——所以与其被纠正，不如一开始就别用。唯一可接受的「后台」是 multicc 的 run-detached 接口，没有第二种。',
-
+  '【子 Agent/Task/Workflow 轮询保活规则】在 `-p` 模式下，主进程退出时所有子进程（Agent/Task/Workflow/Bash 后台任务）都会被一起回收。',
+  '因此：',
+  '  ① 当你启动任何预期耗时超过约 10 秒的子 Agent（`run_in_background: true`）或 Task/Workflow 后，不要直接回复 done 然后结束本回合。',
+  '  ② 在启动子任务时，要求它将完成信号写入约定的标记文件，例如：`echo "DONE" > /tmp/multicc_task_<任务名>.done`。',
+  '  ③ 主进程每隔 5-10 秒用 Bash 检查该标记文件是否出现（`cat /tmp/multicc_task_<任务名>.done 2>/dev/null`），直到检测到完成信号。',
+  '  ④ 每次检查时可以给用户报一句简短进度（"子任务还在跑，已等 Ns…"），确保对话框不会长时间静默。',
+  '  ⑤ 检测到完成信号后，汇总结果并正常结束本轮。',
+  '  ⑥ 对于确实需要跨轮存活的长时间任务（>5 分钟），仍优先用 multicc 的 run-detached 接口或 `<<dispatch>>` 派给独立 session。',
   '',
-  '【长任务边做边报进度】（multicc 统一体验约定）当某件事要跑较久（构建/打包/部署/批处理/长等待）时，默认采用「边等边报」：优先用上面的 run-detached 把它放后台（这样不会被回收），运行期间每隔约 25–30 秒主动向用户冒一句简短进度（在做什么、已约 Ns、最新一行关键输出），任务完成后再给最终结果。进度做法：用一个会在约 25 秒后自行退出的后台计时命令把自己周期性唤醒，每次被唤醒就 tail 一下任务输出（或 GET /api/detached/<taskId>）、报一句进度，直到任务完成为止。',
+  '【长任务边做边报进度】（multicc 统一体验约定）当某件事要跑较久（构建/打包/部署/批处理/长等待）时，默认采用「边等边报」：用上面的 run-detached 或轮询保活机制保证任务不丢，运行期间每隔约 25–30 秒主动向用户冒一句简短进度（在做什么、已约 Ns、最新一行关键输出），任务完成后再给最终结果。',
   '不要一启动就长时间静默、让对话框看起来像卡住；也不要只说「我等一下」就停下不续接。这是面向所有 multicc 用户的统一约定，请默认遵循。',
   '',
   '【跨会话协作时的 worktree 同步纪律】每个 chat 会话在自己独立的 git worktree + 分支（multicc/<sessionId>）里干活，基分支通常是 main。多个会话并行改代码时，worktree 之间不会自动一致，必须按下面纪律同步，否则会基于过时代码工作、产生冲突或覆盖别人的改动：',
@@ -5809,13 +5808,6 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
           setSessionStatus(sessionName, { status: 'editing', currentFile: block.input?.file_path || null });
         } else if (block.name === 'Bash') {
           setSessionStatus(sessionName, { status: 'running', currentFile: null });
-          // Anti-pattern guard (E): a chat-mode Bash launched with
-          // run_in_background:true will be reaped when the turn/context resets,
-          // so any "I'll wait for it" silently dies. Flag the turn; the result
-          // boundary below schedules a corrective nudge.
-          if (block.input && block.input.run_in_background === true) {
-            cs._sawBgRun = true;
-          }
         } else {
           setSessionStatus(sessionName, { status: 'thinking', currentFile: null });
         }
@@ -5867,18 +5859,6 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
     setSessionStatus(sessionName, { status: cs._sawApiError ? 'idle' : 'completed', currentFile: null });
     scheduleIntentClassify(cs, sessionName);
     // Anti-pattern guard (E): if this turn launched a run_in_background Bash and
-    // didn't register an explicit wait, the background process won't survive the
-    // context reset. Nudge the session onto the supported path (run-detached /
-    // immediate BashOutput). Guarded + capped inside the injector; reset by a
-    // real user message. Chat-only: this code path is the chat event applier.
-    if (cs._sawBgRun) {
-      cs._sawBgRun = false;
-      const persistedRec = persistedSessions.get(sessionName);
-      if (!waitInjector.hasWait(sessionName)) {
-        console.log(`[multicc/chat] [${sessionName}] used run_in_background → scheduling bgCheck nudge`);
-        waitInjector.bgCheck(sessionName, { cwd: cs.cwd });
-      }
-    }
     // Decoupled via the bus so chat doesn't depend on the triggers domain.
     bus.emit('chat:turn-complete', sessionName, cs);
   }
