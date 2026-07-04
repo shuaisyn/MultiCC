@@ -5,7 +5,11 @@
 <h1 align="center">MultiCC</h1>
 
 <p align="center">
-  <strong>Many AI coding CLI sessions. Many clients. Any device.</strong>
+  <strong>Run Claude Code & Codex 24/7. Control them from your phone or WeChat. Cut token costs with cheap-model subagents.</strong>
+</p>
+
+<p align="center">
+  <em>Main agent on Opus, subagents on DeepSeek/GLM/Qwen — the same repo, in parallel, at a fraction of the cost.</em>
 </p>
 
 <p align="center">
@@ -127,6 +131,7 @@ Only projects that explicitly support **both** Claude Code and Codex are include
 | **Drives Codex** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Per-session provider isolation** | ❌ (global) | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Per-session model selection** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Per-role subagent routing (cheap model for Task tool)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Provider-aware model options** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Import providers from cc-switch** | N/A | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Codex provider isolation (CODEX_HOME)** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -249,6 +254,7 @@ MultiCC is the only project in this list that is a **self-hosted server** rather
 4. **Scheduled & autonomous work.** Cron jobs with persistent context, wait/poll auto-resume, run-detached background tasks — agents continue without human nudges.
 5. **Voice.** S2S real-time voice (VAD → ASR → LLM → TTS → barge-in) and classic STT with vocabulary learning. No other harness offers voice.
 6. **Per-session provider isolation.** One session on Claude Max, another on DeepSeek, no env bleed. Other tools switch globally or don't manage providers.
+7. **Per-role subagent routing — run the main loop on a frontier model, push the Task tool to a cheap one.** Claude Code's subagents are in-process sidechains that natively share the main Anthropic client — every other harness is stuck with that limit. MultiCC ships a local reverse proxy (`claude-proxy`) that inspects each `/v1/messages` request and routes the subagent to a *different* provider+model of your choice (`CLAUDE_CODE_SUBAGENT_MODEL=ccfw:<provider>:<model>`). Result: keep Opus/Fable for the hard thinking, offload exploration/grep/test/iteration to DeepSeek, GLM, Qwen, or Haiku — same repo, parallel worktrees, dramatically lower spend.
 
 ### Where MultiCC is weaker
 
@@ -283,6 +289,12 @@ Each session picks its own CLI (`claude` or `codex`) and an optional provider �
 - Providers are managed from `/manage` or the provider API — create, edit, import from `cc-switch`, set per-CLI defaults.
 - **Per-session model selection**: each session can override the provider's default model; the chat UI shows a model picker with provider-specific options.
 - **Provider-aware model options**: custom providers expose their own model lists (e.g., DeepSeek, GLM, Qwen) via `modelOptions`.
+- **Per-role subagent routing (cost optimization)**: each Claude session can set a separate `subagent = { providerId, model }`. The main loop runs on your frontier model (Opus/Fable/Sonnet); Task-tool subagents — exploration, grep, file reads, test iteration — are routed through the local `claude-proxy` to a cheaper provider+model of your choice. Configure per session via the chat UI or the session API. Native Claude Code only lets subagents inherit the main client; MultiCC is the only harness that routes them independently.
+
+  | Role | Suggested model | Why |
+  |------|-----------------|-----|
+  | Main loop | Opus / Fable / Sonnet | Hard reasoning, planning, edits |
+  | Subagent (Task tool) | DeepSeek-V3 / GLM / Qwen / Haiku | Cheap, fast, good enough for grep/read/test |
 
 ### Session orchestration
 
