@@ -342,8 +342,9 @@ const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?
   .map(s => s.trim())
   .filter(Boolean);
 // Default-on toggle for the per-session/per-role claude proxy (src/claude-proxy.js).
-// Set CLAUDE_PROXY_ENABLED=0 to bypass and route claude directly to the provider.
-const CLAUDE_PROXY_ENABLED = String(process.env.CLAUDE_PROXY_ENABLED ?? '1') !== '0';
+// `let`: hot-reloadable at runtime via POST /api/settings/proxy (persists to .env).
+// Set CLAUDE_PROXY_ENABLED=0 in .env to bypass and route claude directly to the provider.
+let CLAUDE_PROXY_ENABLED = String(process.env.CLAUDE_PROXY_ENABLED ?? '1') !== '0';
 console.log(`[multicc] Using claude: ${CLAUDE_CMD}`);
 
 // Read the user's default model from ~/.claude/settings.json on every spawn so
@@ -3819,6 +3820,20 @@ app.post('/api/settings/access-token', (req, res) => {
   ACCESS_TOKEN = token; // hot-reload: signToken/isAuthenticated read this live
   console.log(`[multicc/auth] ACCESS_TOKEN ${token ? 'updated' : 'cleared'} via localhost UI`);
   res.json({ ok: true, hasToken: !!token });
+});
+
+// ── Claude Code per-session/per-role proxy global toggle (live, persisted) ──
+app.get('/api/settings/proxy', (req, res) => {
+  res.json({ enabled: CLAUDE_PROXY_ENABLED });
+});
+app.post('/api/settings/proxy', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: '仅可在本机修改' });
+  if (typeof (req.body && req.body.enabled) !== 'boolean') return res.status(400).json({ error: 'enabled 必须是布尔' });
+  CLAUDE_PROXY_ENABLED = req.body.enabled;                                  // hot-reload: spawns read this live
+  process.env.CLAUDE_PROXY_ENABLED = req.body.enabled ? '1' : '0';
+  writeEnvFile({ CLAUDE_PROXY_ENABLED: req.body.enabled ? '1' : '0' });     // persists across restarts
+  console.log(`[multicc/proxy] claude proxy ${req.body.enabled ? 'enabled' : 'disabled'} via UI`);
+  res.json({ ok: true, enabled: CLAUDE_PROXY_ENABLED });
 });
 
 // macOS system power settings
