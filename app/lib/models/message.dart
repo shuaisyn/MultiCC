@@ -382,6 +382,7 @@ class DirectoryPushState {
   final bool hasRemote;
   final int ahead;
   final int behind;
+  final int dirty;
   final String? remote;
   final String? remoteBranch;
 
@@ -390,6 +391,7 @@ class DirectoryPushState {
     this.hasRemote = false,
     this.ahead = 0,
     this.behind = 0,
+    this.dirty = 0,
     this.remote,
     this.remoteBranch,
   });
@@ -400,6 +402,7 @@ class DirectoryPushState {
       hasRemote: json['hasRemote'] == true,
       ahead: (json['ahead'] as num?)?.toInt() ?? 0,
       behind: (json['behind'] as num?)?.toInt() ?? 0,
+      dirty: (json['dirty'] as num?)?.toInt() ?? 0,
       remote: json['remote']?.toString(),
       remoteBranch: json['remoteBranch']?.toString(),
     );

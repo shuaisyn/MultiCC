@@ -19,17 +19,24 @@ async function countRange(cwd, range) {
 
 async function computePushState(dirPath, requestedBranch) {
   if (await gitTry(dirPath, ['rev-parse', '--is-inside-work-tree']) !== 'true') {
-    return { available: false, hasRemote: false, ahead: 0, behind: 0, reason: 'not-a-git-repository' };
+    return { available: false, hasRemote: false, ahead: 0, behind: 0, dirty: 0, reason: 'not-a-git-repository' };
   }
+
+  // Uncommitted files on the main working tree (dir.path). Surfaced on the
+  // directory card so users commit/discard before merging session worktree
+  // branches back into a dirty main — which would otherwise tangle the merge
+  // with unrelated local edits. --porcelain is one git call; count its lines.
+  const statusOut = await gitTry(dirPath, ['status', '--porcelain']);
+  const dirty = statusOut ? statusOut.split('\n').filter(Boolean).length : 0;
 
   const branch = requestedBranch || await gitTry(dirPath, ['symbolic-ref', '--short', 'HEAD']);
   if (!branch || !(await refExists(dirPath, `refs/heads/${branch}`))) {
-    return { available: false, hasRemote: false, ahead: 0, behind: 0, reason: 'no-branch' };
+    return { available: false, hasRemote: false, ahead: 0, behind: 0, dirty, reason: 'no-branch' };
   }
 
   const remotes = (await gitTry(dirPath, ['remote'])).split('\n').filter(Boolean);
   if (remotes.length === 0) {
-    return { available: true, hasRemote: false, branch, ahead: 0, behind: 0, reason: 'no-remote' };
+    return { available: true, hasRemote: false, branch, ahead: 0, behind: 0, dirty, reason: 'no-remote' };
   }
 
   const upstream = await gitTry(dirPath, [
@@ -57,6 +64,7 @@ async function computePushState(dirPath, requestedBranch) {
     remoteBranchExists,
     ahead,
     behind,
+    dirty,
   };
 }
 

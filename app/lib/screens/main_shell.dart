@@ -1657,6 +1657,35 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                                 ),
                                 overflow: TextOverflow.ellipsis,
                               ),
+                              if ((widget.directory.pushState?.dirty ?? 0) > 0)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 5),
+                                  child: InkWell(
+                                    onTap: () => _showUncommittedFiles(context),
+                                    borderRadius: BorderRadius.circular(999),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0x1AE3B341),
+                                        border: Border.all(
+                                          color: const Color(0x73E3B341),
+                                        ),
+                                        borderRadius: BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        '⚠ ${widget.directory.pushState!.dirty} 未提交',
+                                        style: const TextStyle(
+                                          color: Color(0xFFE3B341),
+                                          fontSize: 10,
+                                          fontFamily: 'monospace',
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -1697,6 +1726,9 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                           ),
                           onSelected: (v) {
                             switch (v) {
+                              case 'uncommitted':
+                                _showUncommittedFiles(context);
+                                break;
                               case 'rename':
                                 _confirmRenameDirectory(context);
                                 break;
@@ -1705,20 +1737,31 @@ class _DirectoryCardState extends State<_DirectoryCard> {
                                 break;
                             }
                           },
-                          itemBuilder: (_) => [
-                            _dirMenuItem(
+                          itemBuilder: (_) {
+                            final items = <PopupMenuEntry<String>>[];
+                            final dirty = widget.directory.pushState?.dirty ?? 0;
+                            if (dirty > 0) {
+                              items.add(_dirMenuItem(
+                                'uncommitted',
+                                Icons.warning_amber_rounded,
+                                '⚠ $dirty 个未提交文件',
+                              ));
+                              items.add(const PopupMenuDivider());
+                            }
+                            items.add(_dirMenuItem(
                               'rename',
                               Icons.drive_file_rename_outline_rounded,
                               t('rename'),
-                            ),
-                            const PopupMenuDivider(),
-                            _dirMenuItem(
+                            ));
+                            items.add(const PopupMenuDivider());
+                            items.add(_dirMenuItem(
                               'delete',
                               Icons.delete_outline_rounded,
                               t('deleteDirectory'),
                               danger: true,
-                            ),
-                          ],
+                            ));
+                            return items;
+                          },
                         ),
                       ],
                     ),
@@ -2274,6 +2317,110 @@ class _DirectoryCardState extends State<_DirectoryCard> {
         ),
       );
     }
+  }
+
+  /// Show the directory's uncommitted files in a dialog, with a quick
+  /// "commit all" affordance. A dirty main tangles session worktree merges
+  /// with unrelated local edits, so this lets the user clear it first.
+  Future<void> _showUncommittedFiles(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final svc = widget.mgr.service;
+    final dir = widget.directory;
+    List<Map<String, dynamic>> files = [];
+    String? loadError;
+
+    Future<void> load() async {
+      try {
+        final r = await svc.fetchUncommitted(dir.id);
+        final list = r['files'];
+        files = list is List
+            ? list
+                .whereType<Map>()
+                .map((m) => Map<String, dynamic>.from(m))
+                .toList()
+            : [];
+        loadError = r['error']?.toString();
+      } catch (e) {
+        loadError = '$e';
+      }
+    }
+
+    await load();
+    if (!context.mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => _UncommittedFilesDialog(
+        dirName: dir.name,
+        dirPath: dir.path,
+        files: files,
+        loadError: loadError,
+        onCommit: () async {
+          final msg = await showDialog<String>(
+            context: dialogCtx,
+            builder: (bctx) {
+              final c = TextEditingController();
+              return AlertDialog(
+                backgroundColor: const Color(0xFF0f1115),
+                title: const Text(
+                  '提交信息',
+                  style: TextStyle(color: Color(0xFFf2f4f7)),
+                ),
+                content: TextField(
+                  controller: c,
+                  autofocus: true,
+                  style: const TextStyle(
+                    color: Color(0xFFe7eaee),
+                    fontSize: 14,
+                  ),
+                  decoration: _inputDec(hint: '留空使用自动信息'),
+                  onSubmitted: (v) => Navigator.pop(bctx, v),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(bctx, null),
+                    child: const Text(
+                      '取消',
+                      style: TextStyle(color: Color(0xFF8a909b)),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(bctx, c.text),
+                    child: const Text(
+                      '提交',
+                      style: TextStyle(color: Color(0xFF6aa3ff)),
+                    ),
+                  ),
+                ],
+              );
+            },
+          );
+          if (msg == null) return false;
+          final r = await svc.commitAll(dir.id, message: msg);
+          if (!dialogCtx.mounted) return false;
+          if (r['ok'] == true && r['committed'] == true) {
+            messenger.showSnackBar(
+              const SnackBar(content: Text('已提交所有未提交改动')),
+            );
+            return true;
+          } else if (r['ok'] == true) {
+            messenger.showSnackBar(
+              const SnackBar(content: Text('没有需要提交的改动')),
+            );
+            return true;
+          } else {
+            messenger.showSnackBar(
+              SnackBar(
+                content: Text('提交失败：${r['error'] ?? 'unknown'}'),
+                backgroundColor: AppColors.danger,
+              ),
+            );
+            return false;
+          }
+        },
+      ),
+    );
+    await widget.mgr.loadDashboard();
   }
 
   Future<void> _confirmDeleteDirectory(BuildContext context) async {
@@ -4239,6 +4386,144 @@ class _CreateSessionDialogState extends State<_CreateSessionDialog> {
           onPressed: _submit,
           child: const Text('创建'),
         ),
+      ],
+    );
+  }
+}
+
+/// Dialog listing a directory's uncommitted files with a "commit all" action.
+/// Mirrors the web "⚠ 未提交文件" modal — surfaces dirty main working-tree
+/// files so they can be committed before tangling a session worktree merge.
+class _UncommittedFilesDialog extends StatefulWidget {
+  final String dirName;
+  final String dirPath;
+  final List<Map<String, dynamic>> files;
+  final String? loadError;
+  // Returns true if the dialog should close (commit succeeded / nothing to do).
+  final Future<bool> Function() onCommit;
+
+  const _UncommittedFilesDialog({
+    required this.dirName,
+    required this.dirPath,
+    required this.files,
+    required this.onCommit,
+    this.loadError,
+  });
+
+  @override
+  State<_UncommittedFilesDialog> createState() =>
+      _UncommittedFilesDialogState();
+}
+
+class _UncommittedFilesDialogState extends State<_UncommittedFilesDialog> {
+  bool _committing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasError = widget.loadError != null && widget.files.isEmpty;
+    return AlertDialog(
+      backgroundColor: const Color(0xFF0f1115),
+      title: Text(
+        '⚠ ${widget.dirName} · 未提交文件',
+        style: const TextStyle(color: Color(0xFFf2f4f7)),
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.dirPath,
+              style: const TextStyle(
+                color: Color(0xFF8a909b),
+                fontSize: 12,
+                fontFamily: 'monospace',
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (hasError)
+              Text(
+                '加载失败：${widget.loadError}',
+                style: const TextStyle(color: Color(0xFFff6b63), fontSize: 13),
+              )
+            else if (widget.files.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: Text(
+                    '没有未提交文件 ✓',
+                    style: TextStyle(color: Color(0xFF8a909b)),
+                  ),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: widget.files.length,
+                  itemBuilder: (_, i) {
+                    final f = widget.files[i];
+                    final status = (f['status'] ?? '??').toString().trim();
+                    final p = (f['path'] ?? '').toString();
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 28,
+                            child: Text(
+                              status.isEmpty ? '??' : status,
+                              style: const TextStyle(
+                                color: Color(0xFF8a909b),
+                                fontSize: 12,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              p,
+                              style: const TextStyle(
+                                color: Color(0xFFe7eaee),
+                                fontSize: 13,
+                                fontFamily: 'monospace',
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭', style: TextStyle(color: Color(0xFF8a909b))),
+        ),
+        if (widget.files.isNotEmpty)
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFE3B341),
+              foregroundColor: const Color(0xFF0f1115),
+            ),
+            onPressed: _committing
+                ? null
+                : () async {
+                    setState(() => _committing = true);
+                    final close = await widget.onCommit();
+                    if (!mounted) return;
+                    setState(() => _committing = false);
+                    if (close && context.mounted) Navigator.pop(context);
+                  },
+            child: Text(_committing ? '提交中…' : '全部提交'),
+          ),
       ],
     );
   }

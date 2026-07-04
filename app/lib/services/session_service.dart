@@ -505,6 +505,41 @@ class SessionService {
     return map;
   }
 
+  /// List uncommitted files in a directory's main working tree (dir.path), so
+  /// the UI can warn before a session worktree merge tangles with dirty main.
+  /// Returns `{files: [{status, path}, ...]}`.
+  Future<Map<String, dynamic>> fetchUncommitted(String id) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/directories/$id/uncommitted')), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['error'] ??= _tryParseError(res.body) ?? '${res.statusCode}';
+    }
+    return map;
+  }
+
+  /// Quick-commit-all on the directory's main working tree. Used by the "未提交"
+  /// warning affordance to clear a dirty main before merging session branches.
+  /// `message` optional; server falls back to an auto message when empty.
+  Future<Map<String, dynamic>> commitAll(String id, {String? message}) async {
+    final res = await http
+        .post(
+          Uri.parse(_url('/api/directories/$id/commit')),
+          headers: _headers,
+          body: jsonEncode({'message': message ?? ''}),
+        )
+        .timeout(const Duration(seconds: 30));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['ok'] = false;
+      map['error'] ??= _tryParseError(res.body) ?? '${res.statusCode}';
+    }
+    return map;
+  }
+
   Future<void> deleteDirectory(String id, {bool force = true}) async {
     final qs = force ? '?force=1' : '';
     final res = await http

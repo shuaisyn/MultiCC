@@ -835,6 +835,12 @@ function showDirMenu(ev, dirId) {
   const dir = (_cachedDirectories || []).find(d => d.id === dirId);
   const ps = dir?.pushState || {};
   const items = [];
+  // Dirty main working tree — surface a quick way to inspect/commit uncommitted
+  // files before they tangle a session worktree merge.
+  if (typeof ps.dirty === 'number' && ps.dirty > 0) {
+    items.push({ label: `⚠ ${ps.dirty} 个未提交文件`, onclick: () => showUncommittedFiles(dirId) });
+    items.push({ sep: true });
+  }
   // Git push moved off the header into this menu (P2: declutter the dir header).
   if (ps.available !== false && ps.hasRemote) {
     const label = ps.ahead > 0
@@ -1332,16 +1338,23 @@ function renderDirectoryBlock(dir, dirSessions) {
   // action lives inside showDirMenu now (P2: declutter the header).
   const ps = dir.pushState || {};
   const pushPending = ps.available !== false && ps.hasRemote && ps.ahead > 0;
-
+  // Dirty main working tree — warns the user that merging session branches into
+  // a dirty main will tangle unrelated local edits into the merge. Clicking the
+  // badge opens a file list + quick-commit affordance.
+  const dirtyCount = (typeof ps.dirty === 'number' && ps.dirty > 0) ? ps.dirty : 0;
+  const dirtyBadge = dirtyCount > 0
+    ? `<span class="dir-dirty-badge" title="主分支有 ${dirtyCount} 个未提交文件，合并前请先提交" onclick="event.stopPropagation(); showUncommittedFiles('${escapeHtml(id)}')">⚠ ${dirtyCount}未提交</span>`
+    : '';
   const headerActions = `
         <button class="btn add-new btn-sm" title="${escapeHtml(tt('createSession'))}" onclick="event.stopPropagation(); showNewSessionMenu(event, '${escapeHtml(id)}')">${escapeHtml(tt('createSession'))}</button>
         <button class="btn-icon" title="项目备忘 (multicc.memo.md)" onclick="event.stopPropagation(); openMemo('${escapeHtml(id)}')">📝</button>
-        <button class="btn-icon${pushPending ? ' has-pending' : ''}" title="更多操作${pushPending ? `（有 ${ps.ahead} 个提交待 push）` : ''}" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>`;
+        <button class="btn-icon${pushPending ? ' has-pending' : ''}" title="更多操作${pushPending ? `（有 ${ps.ahead} 个提交待 push）` : ''}${dirtyCount > 0 ? `（${dirtyCount} 个未提交文件）` : ''}" onclick="event.stopPropagation(); showDirMenu(event, '${escapeHtml(id)}')">⋯</button>`;
 
   const headerMain = `
         <div class="dir-main">
           <span class="dir-name">${escapeHtml(dir.name)}</span>
           <span class="dir-path" title="${escapeHtml(dir.path)}">${escapeHtml(shortenPath(dir.path, maxPath))}</span>
+          ${dirtyBadge}
           <div class="dir-meta">
             <span><strong>${total}</strong> ${escapeHtml(tt('sessions'))}</span>
             ${active > 0 ? `<span class="sep">·</span><span class="active-count"><strong>${active}</strong> ${escapeHtml(tt('active'))}</span>` : ''}
@@ -1463,6 +1476,87 @@ async function pushDirectory(id) {
     await loadDashboard();
   } catch (error) {
     showToast(`Push 失败：${error.message}`, true);
+  }
+}
+
+// ── Uncommitted-files warning (dirty main working tree) ──
+// A dirty main tangles session worktree merges with unrelated local edits, so
+// the directory card surfaces a ⚠ badge; this opens a file list + quick-commit.
+const UNCOMMITTED_MODAL_HTML = `
+<div class="modal-overlay" id="uncommitted-modal" onclick="if(event.target===this) closeUncommittedFiles()">
+  <div class="modal" style="max-width:680px">
+    <div class="modal-header">
+      <h3>⚠ 未提交文件</h3>
+      <button class="btn-icon" onclick="closeUncommittedFiles()">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:60vh;overflow:auto">
+      <div id="uncommitted-list">加载中…</div>
+    </div>
+    <div class="modal-footer" style="display:flex;gap:8px;align-items:center;justify-content:space-between">
+      <span id="uncommitted-summary" style="color:var(--muted);font-size:13px"></span>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="closeUncommittedFiles()">关闭</button>
+        <button class="btn add-new" id="uncommitted-commit-btn" onclick="commitAllUncommitted()">全部提交</button>
+      </div>
+    </div>
+  </div>
+</div>`;
+let _uncommittedDirId = null;
+function showUncommittedFiles(dirId) {
+  _uncommittedDirId = dirId;
+  const dir = (_cachedDirectories || []).find(d => d.id === dirId);
+  const overlay = document.createElement('div');
+  overlay.innerHTML = UNCOMMITTED_MODAL_HTML;
+  document.body.appendChild(overlay.firstElementChild);
+  const listEl = document.getElementById('uncommitted-list');
+  const summaryEl = document.getElementById('uncommitted-summary');
+  const commitBtn = document.getElementById('uncommitted-commit-btn');
+  const header = document.querySelector('#uncommitted-modal .modal-header h3');
+  if (dir && header) header.textContent = `⚠ ${dir.name} · 未提交文件`;
+  if (dir && summaryEl) summaryEl.textContent = dir.path;
+  if (commitBtn) commitBtn.style.display = 'none';
+  fetch(`/api/directories/${dirId}/uncommitted${tokenQS('?')}`)
+    .then(r => r.json())
+    .then(data => {
+      if (!data.files || data.files.length === 0) {
+        listEl.innerHTML = `<div style="color:var(--muted);padding:24px;text-align:center">没有未提交文件 ✓</div>`;
+        return;
+      }
+      commitBtn.style.display = '';
+      const badge = m => `<span class="git-status-tag" style="display:inline-block;width:28px;text-align:center;font-family:var(--mono);font-size:12px;color:var(--muted)">${m}</span>`;
+      listEl.innerHTML = `<div style="font-family:var(--mono);font-size:13px;display:flex;flex-direction:column;gap:2px">${
+        data.files.map(f => `<div style="display:flex;gap:8px;align-items:center;padding:4px 6px;border-radius:4px" onmouseover="this.style.background='var(--panel-2)'" onmouseout="this.style.background=''">${badge(escapeHtml(f.status.trim() || '??'))}<span style="word-break:break-all">${escapeHtml(f.path)}</span></div>`).join('')
+      }</div>`;
+      if (summaryEl) summaryEl.textContent = `${data.files.length} 个未提交文件`;
+    })
+    .catch(err => { listEl.innerHTML = `<div style="color:var(--danger)">加载失败：${escapeHtml(err.message)}</div>`; });
+}
+function closeUncommittedFiles() {
+  _uncommittedDirId = null;
+  const m = document.getElementById('uncommitted-modal');
+  if (m) m.remove();
+}
+async function commitAllUncommitted() {
+  const dirId = _uncommittedDirId;
+  if (!dirId) return;
+  const msg = await showPrompt('提交信息（留空使用自动信息）', '', { okText: '提交' });
+  if (msg === null) return; // cancelled
+  const btn = document.getElementById('uncommitted-commit-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+  try {
+    const res = await fetch(`/api/directories/${dirId}/commit${tokenQS('?')}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    showToast(data.committed ? `已提交 ${data.pushState?.dirty === 0 ? '所有' : ''}未提交改动` : '没有需要提交的改动');
+    closeUncommittedFiles();
+    await loadDashboard();
+  } catch (error) {
+    showToast(`提交失败：${error.message}`, true);
+    if (btn) { btn.disabled = false; btn.textContent = '全部提交'; }
   }
 }
 

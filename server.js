@@ -2090,6 +2090,47 @@ app.post('/api/directories/:id/push', async (req, res) => {
   }
 });
 
+// List uncommitted files in a directory's main working tree (dir.path), so the
+// UI can warn before a session worktree merge would tangle with dirty main.
+app.get('/api/directories/:id/uncommitted', async (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  try {
+    const out = (await gitRunQueued(d.path, ['status', '--porcelain'])).trim();
+    const files = out ? out.split('\n').filter(Boolean).map(line => ({
+      // xy status (e.g. " M", "??", "A ") + path. --porcelain never quotes
+      // paths unless they contain special chars, so split once from index 2.
+      status: line.slice(0, 2),
+      path: line.slice(3),
+    })) : [];
+    res.json({ files });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Quick-commit-all on the directory's main working tree. Used by the "未提交"
+// warning affordance to clear a dirty main before merging session branches.
+// Body: { message?: string }. Falls back to an auto message.
+app.post('/api/directories/:id/commit', async (req, res) => {
+  const d = directories.get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'directory not found' });
+  try {
+    const ps = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path), { force: true });
+    if (ps.dirty === 0) return res.json({ ok: true, committed: false, pushState: ps });
+    const message = (req.body && req.body.message ? String(req.body.message) : '').trim()
+      || `multicc: 提交未跟踪改动（${new Date().toISOString().slice(0, 19).replace('T', ' ')}）`;
+    await gitRunQueued(d.path, ['add', '-A']);
+    await gitRunQueued(d.path, ['commit', '-m', message]);
+    gitPush.invalidate(d.path, d.baseBranch || gitBaseBranch(d.path));
+    const after = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path), { force: true });
+    appendEvent(d.id, 'committed', `提交 ${after.ahead > ps.ahead ? after.ahead - ps.ahead : ps.dirty} 个未提交改动`);
+    res.json({ ok: true, committed: true, pushState: after });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/directories', (req, res) => {
   const name = (req.body.name || '').trim();
   const rawPath = (req.body.path || '').trim();
