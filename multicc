@@ -127,84 +127,181 @@ do_update() {
     return 1
   fi
 
-  local branch before after stashed=0
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  before="$(git rev-parse HEAD 2>/dev/null)"
-
-  # The running server constantly rewrites runtime-state files, so the working
-  # tree is almost never clean. Instead of aborting, stash local changes (tracked
-  # + untracked), fast-forward, then restore them — no manual commit/stash needed.
-  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    echo "Working tree has local changes — stashing them before update..."
-    if ! git stash push --include-untracked -m "multicc-auto-update" >/dev/null 2>&1; then
-      echo "git stash failed — resolve your working tree manually, then retry."
-      return 1
-    fi
-    stashed=1
+  # ── Resolve the release channel ──────────────────────────────────────
+  # .multicc_channel is written by install.sh.  If absent we default to "dev"
+  # for backwards-compatibility with older installations that pre-date this
+  # file (they were all cloned from main).
+  local channel="dev"
+  if [ -f ".multicc_channel" ]; then
+    channel="$(grep '^# channel:' .multicc_channel 2>/dev/null | awk '{print $3}' || echo "dev")"
   fi
 
-  echo "Updating MultiCC (branch: $branch)..."
+  # ── Fetch remote tags & latest release info ──────────────────────────
+  echo "Checking for updates..."
 
-  # Fetch latest from remote.
-  git fetch origin "$branch" 2>/dev/null
+  git fetch origin --tags 2>/dev/null || true
 
-  # Check if a fast-forward is possible. If the local branch has diverged
-  # from origin (e.g. after a server-side history rewrite / force-push),
-  # fall back to a hard reset to origin's tip. This ensures existing users
-  # can always update even when the commit history was rewritten.
-  local local_tip origin_tip merge_base
-  local_tip="$(git rev-parse HEAD 2>/dev/null)"
-  origin_tip="$(git rev-parse "origin/$branch" 2>/dev/null)"
-  merge_base="$(git merge-base "$local_tip" "$origin_tip" 2>/dev/null)"
+  local latest_tag latest_version local_version
+  latest_tag=""
+  latest_version="0.0.0"
 
-  if [ "$merge_base" = "$local_tip" ]; then
-    # Local is an ancestor of origin — fast-forward is safe.
-    if ! git pull --ff-only origin "$branch"; then
-      echo "git pull failed (network issue) — retry later."
-      [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
+  # Query the GitHub Releases API for the latest release (stable channel).
+  # Fall back to the highest semver tag if the API is unreachable.
+  local api_resp
+  api_resp="$(curl -sf --connect-timeout 10 --max-time 15 \
+    "https://api.github.com/repos/lsjwzh/MultiCC/releases/latest" 2>/dev/null)" || true
+  if [ -n "$api_resp" ]; then
+    latest_tag="$(echo "$api_resp" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [ -z "$latest_tag" ]; then
+      latest_tag="$(echo "$api_resp" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')"
+    fi
+  fi
+
+  # Fallback: highest semver-like tag from git
+  if [ -z "$latest_tag" ]; then
+    latest_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null | sort -V | tail -1)" || true
+  fi
+  if [ -n "$latest_tag" ]; then
+    latest_version="$(echo "$latest_tag" | sed 's/^v//')"
+  fi
+
+  # Read the locally installed version.
+  # For stable channel: prefer the currently-checked-out tag (if on one).
+  # For dev channel: use package.json version.
+  local_version=""
+  if [ "$channel" = "stable" ]; then
+    local_version="$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//')" || true
+  fi
+  if [ -z "$local_version" ]; then
+    local_version="$(node -e "try{process.stdout.write(require('./package.json').version||'0.0.0')}catch(e){process.stdout.write('0.0.0')}" 2>/dev/null)" || local_version="0.0.0"
+  fi
+
+  echo "  Local:    v${local_version}   (channel: ${channel})"
+  echo "  Latest:   ${latest_tag:-none}"
+
+  # ── Version comparison ───────────────────────────────────────────────
+  compare_versions() {
+    # Returns: 0 (true) if $1 < $2, 1 (false) if $1 >= $2
+    [ "$1" = "$2" ] && return 1
+    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ] && return 0
+    return 1
+  }
+
+  if [ "$channel" = "stable" ]; then
+    # Stable channel: only update when a newer release tag exists.
+    if [ -z "$latest_tag" ]; then
+      echo "No release tags found — nothing to update."
+      return 0
+    fi
+    if compare_versions "$local_version" "$latest_version"; then
+      echo "Newer release available: ${latest_tag} → updating..."
+    else
+      echo "Already on the latest release (${latest_tag})."
+      return 0
+    fi
+    # Update: checkout the tag.
+    if ! git checkout "$latest_tag" 2>/dev/null; then
+      echo "Could not checkout ${latest_tag} — the local tree may have conflicts."
+      echo "Run: git fetch origin --tags && git checkout ${latest_tag}"
       return 1
     fi
-  elif [ "$merge_base" = "$origin_tip" ]; then
-    # Local is ahead of origin — nothing to pull.
-    echo "Local branch is ahead of origin — nothing to update."
-    [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
-    return 0
+    echo "Switched to ${latest_tag}."
   else
-    # Diverged histories (force-push on the server side).
-    # Hard-reset to origin to sync with the rewritten history.
-    echo "Remote history was rewritten — resetting to origin/$branch..."
-    echo "  (local: ${local_tip:0:7} → origin: ${origin_tip:0:7})"
-    git reset --hard "origin/$branch"
-    # Stashed changes are likely obsolete after reset; drop them.
-    if [ "$stashed" = 1 ]; then
-      echo "  Note: local changes were stashed but may no longer apply after reset."
-      echo "  Run 'git stash list' to see them, or 'git stash drop' to discard."
+    # Dev channel (main): pull the latest main.
+    # Warn if a newer release exists that the user might prefer.
+    local branch
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+
+    if compare_versions "$local_version" "$latest_version"; then
+      echo ""
+      echo "  ⚠️  A newer stable release (${latest_tag}) is available."
+      echo "     You are on the '${branch}' development branch."
+      echo "     To switch to stable:  git checkout ${latest_tag}"
+      echo ""
+    elif [ "$local_version" != "0.0.0" ] && [ "$latest_version" != "0.0.0" ]; then
+      echo "  Local version (v${local_version}) >= latest release (${latest_tag})"
+    fi
+
+    # Proceed with the existing git-pull-on-main logic (preserved below).
+    local before after stashed=0 merge_base local_tip origin_tip
+    before="$(git rev-parse HEAD 2>/dev/null)"
+
+    # The running server constantly rewrites runtime-state files, so the working
+    # tree is almost never clean. Instead of aborting, stash local changes (tracked
+    # + untracked), fast-forward, then restore them — no manual commit/stash needed.
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+      echo "Working tree has local changes — stashing them before update..."
+      if ! git stash push --include-untracked -m "multicc-auto-update" >/dev/null 2>&1; then
+        echo "git stash failed — resolve your working tree manually, then retry."
+        return 1
+      fi
+      stashed=1
+    fi
+
+    echo "Updating MultiCC (branch: $branch)..."
+
+    # Fetch latest from remote.
+    git fetch origin "$branch" 2>/dev/null
+
+    # Check if a fast-forward is possible. If the local branch has diverged
+    # from origin (e.g. after a server-side history rewrite / force-push),
+    # fall back to a hard reset to origin's tip. This ensures existing users
+    # can always update even when the commit history was rewritten.
+    local_tip="$(git rev-parse HEAD 2>/dev/null)"
+    origin_tip="$(git rev-parse "origin/$branch" 2>/dev/null)"
+    merge_base="$(git merge-base "$local_tip" "$origin_tip" 2>/dev/null)"
+
+    if [ "$merge_base" = "$local_tip" ]; then
+      # Local is an ancestor of origin — fast-forward is safe.
+      if ! git pull --ff-only origin "$branch"; then
+        echo "git pull failed (network issue) — retry later."
+        [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
+        return 1
+      fi
+    elif [ "$merge_base" = "$origin_tip" ]; then
+      # Local is ahead of origin — nothing to pull.
+      echo "Local branch is ahead of origin — nothing to update."
+      [ "$stashed" = 1 ] && git stash pop >/dev/null 2>&1
+      return 0
+    else
+      # Diverged histories (force-push on the server side).
+      # Hard-reset to origin to sync with the rewritten history.
+      echo "Remote history was rewritten — resetting to origin/$branch..."
+      echo "  (local: ${local_tip:0:7} → origin: ${origin_tip:0:7})"
+      git reset --hard "origin/$branch"
+      # Stashed changes are likely obsolete after reset; drop them.
+      if [ "$stashed" = 1 ]; then
+        echo "  Note: local changes were stashed but may no longer apply after reset."
+        echo "  Run 'git stash list' to see them, or 'git stash drop' to discard."
+      fi
+    fi
+
+    # Restore the stashed local changes on top of the freshly pulled code
+    # (only for the fast-forward path; the hard-reset path handled stash above).
+    if [ "$stashed" = 1 ] && [ "$merge_base" = "$local_tip" ]; then
+      if ! git stash pop >/dev/null 2>&1; then
+        echo "⚠️  Update pulled successfully, but your local changes conflict with it."
+        echo "   Your changes are safe in 'git stash' (run: git stash list / git stash pop)."
+        echo "   Resolve the conflict, then restart with './multicc restart'."
+        return 1
+      fi
+    fi
+
+    after="$(git rev-parse HEAD 2>/dev/null)"
+    if [ "$before" = "$after" ]; then
+      echo "Already up to date — nothing to restart."
+      return 0
     fi
   fi
 
-  # Restore the stashed local changes on top of the freshly pulled code
-  # (only for the fast-forward path; the hard-reset path handled stash above).
-  if [ "$stashed" = 1 ] && [ "$merge_base" = "$local_tip" ]; then
-    if ! git stash pop >/dev/null 2>&1; then
-      echo "⚠️  Update pulled successfully, but your local changes conflict with it."
-      echo "   Your changes are safe in 'git stash' (run: git stash list / git stash pop)."
-      echo "   Resolve the conflict, then restart with './multicc restart'."
-      return 1
-    fi
-  fi
-
-  after="$(git rev-parse HEAD 2>/dev/null)"
-  if [ "$before" = "$after" ]; then
-    echo "Already up to date — nothing to restart."
-    return 0
-  fi
-
-  # Reinstall deps only when the dependency manifests actually changed
-  if git diff --name-only "$before" "$after" | grep -qE '^package(-lock)?\.json$'; then
-    echo "Dependencies changed — running npm install..."
-    if ! npm install 2>&1; then
-      echo "npm install failed — fix the error above, then re-run './multicc update'."
-      return 1
+  # ── Reinstall deps when manifests changed (both channels) ─────────────
+  if [ -n "${after:-}" ] && [ "$before" != "${after:-}" ]; then
+    if git diff --name-only "$before" "${after:-}" | grep -qE '^package(-lock)?\.json$'; then
+      echo "Dependencies changed — running npm install..."
+      if ! npm install 2>&1; then
+        echo "npm install failed — fix the error above, then re-run './multicc update'."
+        return 1
+      fi
     fi
   fi
 

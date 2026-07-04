@@ -81,13 +81,27 @@ set_env_var() {
 }
 
 banner() {
+  local channel_label
+  if [ "$BRANCH" = "main" ]; then
+    channel_label="dev channel"
+  else
+    channel_label="v${INSTALLER_VERSION}"
+  fi
   echo ""
   echo "${C_BOLD}${C_MAGENTA}╔══════════════════════════════════════════════════════╗${C_RESET}"
-  echo "${C_BOLD}${C_MAGENTA}║${C_RESET}  MultiCC — One-Click Installer"
+  echo "${C_BOLD}${C_MAGENTA}║${C_RESET}  MultiCC — One-Click Installer  v${INSTALLER_VERSION}  ${channel_label}"
   echo "${C_BOLD}${C_MAGENTA}║${C_RESET}  Multi-Client Claude Code — drive one Claude Code CLI"
   echo "${C_BOLD}${C_MAGENTA}║${C_RESET}  from browser, phone, or WeChat, all at once."
   echo "${C_BOLD}${C_MAGENTA}╚══════════════════════════════════════════════════════╝${C_RESET}"
   echo ""
+
+  if [ "$CHANNEL" = "dev" ] || { [ -z "$CHANNEL" ] && [ "$BRANCH" = "main" ]; }; then
+    warn "You are on the development channel (main)."
+    echo "       This may contain unfinished changes."
+    echo "       For the latest stable release, run:"
+    echo "       curl -sSL https://raw.githubusercontent.com/lsjwzh/MultiCC/v${INSTALLER_VERSION}/install.sh | bash"
+    echo ""
+  fi
 }
 
 # MultiCC version — keep in sync with package.json when cutting a release
@@ -152,6 +166,19 @@ REPO_URL="https://github.com/lsjwzh/MultiCC.git"
 case "$PORT" in
   ''|*[!0-9]*) err "Invalid --port: '$PORT' (must be a number, e.g. 3000)"; exit 1 ;;
 esac
+
+# Decide whether this is a stable (tag) or dev (branch) install.
+# We record the decision in .multicc_channel so ./multicc update knows which
+# stream to follow later.  This must be set BEFORE banner() so the banner can
+# display a dev-channel warning when appropriate.
+CHANNEL=""
+if [ "$BRANCH" != "main" ] && echo "$BRANCH" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+  CHANNEL="stable"
+elif [ "$BRANCH" != "main" ]; then
+  CHANNEL="dev"
+else
+  CHANNEL="dev"
+fi
 
 banner
 
@@ -298,6 +325,7 @@ else
 fi
 
 # ── Determine install directory ───────────────────────────────────────────
+
 if [ "$NO_CLONE" = true ]; then
   INSTALL_DIR="${INSTALL_DIR:-$PWD}"
   step "Using current directory (--no-clone)"
@@ -309,6 +337,7 @@ if [ "$NO_CLONE" = true ]; then
 else
   INSTALL_DIR="${INSTALL_DIR:-$PWD/MultiCC}"
   step "Preparing install directory"
+
   if [ -d "$INSTALL_DIR/.git" ]; then
     ok "Directory $INSTALL_DIR already exists (git repo)"
     echo "     Updating from branch $BRANCH..."
@@ -328,6 +357,16 @@ else
       exit 1
     fi
   fi
+fi
+
+# Persist the channel decision for ./multicc update.
+if [ -n "$CHANNEL" ] && [ -d "$INSTALL_DIR/.git" ]; then
+  cat > "$INSTALL_DIR/.multicc_channel" << CHANNEL_EOF
+# MultiCC release channel — managed by install.sh
+# channel: $CHANNEL
+# installed: $INSTALLER_VERSION
+CHANNEL_EOF
+  info "Release channel: $CHANNEL (v${INSTALLER_VERSION})"
 fi
 
 cd "$INSTALL_DIR"
