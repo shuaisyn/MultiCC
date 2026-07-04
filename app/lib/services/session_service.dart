@@ -163,21 +163,32 @@ class SessionService {
   }
 
   /// Switch provider, model and effort/reasoning level together.
+  /// Optionally also set/clear the per-session subagent override in the same
+  /// atomic PATCH (subagent = null + clearSubagent = true → server stores null
+  /// = 随主).
   Future<void> updateSessionAIConfig(
     String id, {
     required String provider,
     required String model,
     required String effort,
+    SessionSubagent? subagent,
+    bool clearSubagent = false,
   }) async {
+    final body = <String, dynamic>{
+      'provider': provider,
+      'model': model,
+      'effort': effort,
+    };
+    if (clearSubagent) {
+      body['subagent'] = null;
+    } else if (subagent != null && !subagent.isEmpty) {
+      body['subagent'] = subagent.toJson();
+    }
     final res = await http
         .patch(
           Uri.parse(_url('/api/sessions/$id')),
           headers: _headers,
-          body: jsonEncode({
-            'provider': provider,
-            'model': model,
-            'effort': effort,
-          }),
+          body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 10));
     if (res.statusCode >= 400) {

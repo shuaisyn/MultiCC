@@ -210,6 +210,29 @@ String effortShortNameForCli(SessionCli cli, String? effort) {
   return v;
 }
 
+/// Per-session Task-tool subagent override (claude-proxy routing).
+/// {providerId, model} routes subagent requests to a different provider+model;
+/// null/empty = 随主 (follow the main provider). Mirrors server `session.subagent`.
+class SessionSubagent {
+  final String? providerId;
+  final String? model;
+  const SessionSubagent({this.providerId, this.model});
+
+  factory SessionSubagent.fromJson(dynamic j) => j is Map
+      ? SessionSubagent(
+          providerId: j['providerId']?.toString(),
+          model: j['model']?.toString(),
+        )
+      : const SessionSubagent();
+
+  Map<String, dynamic> toJson() => {
+        'providerId': providerId ?? '',
+        'model': model ?? '',
+      };
+
+  bool get isEmpty => (providerId == null || providerId == '') && (model == null || model == '');
+}
+
 class Session {
   final String id;
   final String? dirId;
@@ -225,6 +248,7 @@ class Session {
   effectiveEffort; // concrete effort / reasoning level used for display
   final String? rolePrompt;
   final String? provider; // cc-switch provider id; null = default login
+  final SessionSubagent? subagent; // Task-tool subagent provider+model override (claude-proxy)
   final String cwd;
   final DateTime createdAt;
   final bool active;
@@ -246,6 +270,7 @@ class Session {
     this.effectiveEffort,
     this.rolePrompt,
     this.provider,
+    this.subagent,
     this.cwd = '',
     required this.createdAt,
     this.active = false,
@@ -269,6 +294,7 @@ class Session {
       effectiveEffort: json['effectiveEffort']?.toString(),
       rolePrompt: json['rolePrompt']?.toString(),
       provider: json['provider']?.toString(),
+      subagent: json['subagent'] == null ? null : SessionSubagent.fromJson(json['subagent']),
       cwd: (json['cwd'] ?? '').toString(),
       createdAt: json['createdAt'] != null
           ? DateTime.tryParse(json['createdAt'].toString()) ?? DateTime.now()
