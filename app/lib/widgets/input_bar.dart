@@ -674,10 +674,13 @@ class _InputBarState extends State<InputBar> {
         break;
       }
     }
-    final subagentModelLabel =
-        (activeSess?.subagent?.model != null && activeSess!.subagent!.model!.isNotEmpty)
-            ? activeSess.subagent!.model
-            : null;
+    // Prefer the resolved real wire id (effectiveModel) over the stored tier
+    // alias, so the pill shows what actually hits the server (e.g. glm-5.2, not opus).
+    final sub = activeSess?.subagent;
+    final subReal = (sub?.effectiveModel != null && sub!.effectiveModel!.isNotEmpty)
+        ? sub.effectiveModel
+        : ((sub?.model != null && sub!.model!.isNotEmpty) ? sub.model : null);
+    final subagentModelLabel = subReal;
     final isStreaming = provider.isStreaming;
     final isConnected = provider.connectionState == ChatConnectionState.connected;
     final canSend = (_hasText || _attachments.isNotEmpty) && isConnected && !isStreaming;

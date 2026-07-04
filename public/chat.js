@@ -2922,7 +2922,10 @@ const subagentPill = document.getElementById('subagent-pill');
 function updateSubagentPill() {
   const el = document.getElementById('subagent-pill-label');
   if (!el) return;
-  el.textContent = (_sessionSubagent && _sessionSubagent.model) ? _sessionSubagent.model : '随主';
+  // Show the REAL wire model id that hits the server (effectiveModel), not the
+  // stored tier alias (opus/sonnet/…). Falls back to the raw model, then 随主.
+  const m = _sessionSubagent && (_sessionSubagent.effectiveModel || _sessionSubagent.model);
+  el.textContent = m || '随主';
 }
 subagentPill?.addEventListener('click', () => { modelBtn?.click(); });
 
