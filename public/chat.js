@@ -2380,7 +2380,7 @@ async function loadSessionModel() {
     // Role prompt applies to every cli; load it first, then the claude-only model.
     _sessionRole = info.rolePrompt || '';
     updateRoleBtn();
-    _sessionMemory = info.memory || '';
+    _sessionMemory = memoryToText(info.memory);
     updateMemoryBtn();
     // Provider switch applies to every cli (claude & codex both have providers).
     _sessionCli = info.cli || 'claude';
@@ -2735,6 +2735,20 @@ roleBtn?.addEventListener('click', async () => {
 const memoryBtn = document.getElementById('memory-btn');
 let _sessionMemory = '';
 
+// The server stores session memory as structured entries [{type,text,ts}], but
+// the web treats _sessionMemory as plain text (button state via .trim(), the
+// editor textarea). Normalize any server payload (array | legacy string | null)
+// to text so callers never crash on .trim() — a non-string here used to throw
+// inside loadSessionModel() and silently abort it before later UI (e.g. the
+// subagent pill) could render.
+function memoryToText(m) {
+  if (Array.isArray(m)) {
+    return m.map(e => (e && typeof e.text === 'string') ? e.text : (typeof e === 'string' ? e : ''))
+      .filter(Boolean).join('\n');
+  }
+  return typeof m === 'string' ? m : '';
+}
+
 function updateMemoryBtn() {
   if (!memoryBtn) return;
   const set = !!(_sessionMemory && _sessionMemory.trim());
@@ -2792,7 +2806,7 @@ memoryBtn?.addEventListener('click', async () => {
   // Re-fetch latest memory (aux AI may have updated it since last load).
   try {
     const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}`));
-    if (r.ok) { const info = await r.json(); _sessionMemory = info.memory || ''; updateMemoryBtn(); }
+    if (r.ok) { const info = await r.json(); _sessionMemory = memoryToText(info.memory); updateMemoryBtn(); }
   } catch (_) {}
   const next = await showMemoryEditor(_sessionMemory);
   if (next === null) return;
@@ -2813,7 +2827,7 @@ memoryBtn?.addEventListener('click', async () => {
 });
 
 // Live update when the aux AI distills new memory for this session.
-function applyMemoryEvent(memory) { _sessionMemory = memory || ''; updateMemoryBtn(); }
+function applyMemoryEvent(memory) { _sessionMemory = memoryToText(memory); updateMemoryBtn(); }
 
 /* ── Per-session streaming + auto-continue (claude only) ── */
 const streamBtn = document.getElementById('stream-btn');
