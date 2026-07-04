@@ -167,9 +167,14 @@ function createHandler({ getProvider }) {
       return res.end(JSON.stringify({ error: `ccfw: provider '${routeProviderId}' has no baseUrl` }));
     }
 
-    // tier alias → real model for this provider (defensive)
-    if (!ccfw && TIERS.includes(String(model).toLowerCase()) && creds.aliasMap[String(model).toLowerCase()]) {
-      outBody = rewriteModel(outBody, creds.aliasMap[String(model).toLowerCase()]);
+    // tier alias → real model for the routed provider. The main route rarely
+    // needs this (the CLI usually resolves tiers via ANTHROPIC_DEFAULT_*_MODEL
+    // before sending), but the subagent/ccfw route carries the tier UNRESOLVED
+    // — the CLI only ever sees the opaque `ccfw:<pid>:opus` string — so map it
+    // here for both, otherwise an alias-mapped relay gets 'opus' and rejects it.
+    const tierKey = String(ccfw ? ccfw.realModel : model).toLowerCase();
+    if (TIERS.includes(tierKey) && creds.aliasMap[tierKey]) {
+      outBody = rewriteModel(outBody, creds.aliasMap[tierKey]);
     }
 
     // forward

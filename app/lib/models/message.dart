@@ -216,12 +216,16 @@ String effortShortNameForCli(SessionCli cli, String? effort) {
 class SessionSubagent {
   final String? providerId;
   final String? model;
-  const SessionSubagent({this.providerId, this.model});
+  // Real wire model id the proxy forwards upstream (tier alias resolved, e.g.
+  // opus → glm-5.2). Server-computed; display-only, so not sent back on save.
+  final String? effectiveModel;
+  const SessionSubagent({this.providerId, this.model, this.effectiveModel});
 
   factory SessionSubagent.fromJson(dynamic j) => j is Map
       ? SessionSubagent(
           providerId: j['providerId']?.toString(),
           model: j['model']?.toString(),
+          effectiveModel: j['effectiveModel']?.toString(),
         )
       : const SessionSubagent();
 

@@ -399,6 +399,29 @@ function effectiveSessionModel(session) {
   return session.reportedModel || null;
 }
 
+// Resolve a subagent {providerId, model} to the REAL wire model id the proxy
+// forwards upstream: a Claude tier (opus/sonnet/haiku/fable) maps to the
+// sub-provider's aliasMap target (e.g. opus → glm-5.2), mirroring
+// effectiveSessionModel + the claude-proxy tier resolution. Falls back to the
+// raw model (Claude-official ids are already real). null when unset.
+function effectiveSubagentModel(sa) {
+  if (!sa || !sa.providerId || !sa.model) return null;
+  try {
+    const am = providers.getProviderSummary('claude', sa.providerId)?.aliasMap;
+    const entry = am && am[sa.model];
+    if (entry && entry.model) return entry.model;
+  } catch (_) { /* fall through */ }
+  return sa.model;
+}
+
+// Serialize a session's subagent override for the frontend: the raw
+// {providerId, model} the picker stored PLUS `effectiveModel`, the real wire id
+// that actually hits the server (for the pill/chip). null = 随主 (follow main).
+function serializeSubagent(sa) {
+  if (!sa || !sa.providerId || !sa.model) return null;
+  return { providerId: sa.providerId, model: sa.model, effectiveModel: effectiveSubagentModel(sa) };
+}
+
 // Remember the model the CLI actually reported at runtime (stream-json system
 // init `model` / assistant `message.model`). This is the only source of truth
 // for relay providers (custom base URL, no explicit ANTHROPIC_MODEL) where the
@@ -1773,6 +1796,7 @@ app.get('/api/sessions', (req, res) => {
         effectiveEffort: effectiveSessionEffort(p),
         rolePrompt: p.rolePrompt || null,
         provider: p.provider || null,  // cc-switch provider id; null = default login
+        subagent: serializeSubagent(p.subagent),  // Task-tool subagent override; null = 随主
         autoCommit: !!p.autoCommit,
         autoDispatch: !!p.autoDispatch,
         cwd,
@@ -2256,6 +2280,7 @@ app.get('/api/directories/:id/sessions', (req, res) => {
         cliSessionId: s.cliSessionId || null, label: s.label || null,
         model: s.model || null, effort: s.effort || null, effectiveEffort: effectiveSessionEffort(s), rolePrompt: s.rolePrompt || null,
         provider: s.provider || null,  // cc-switch provider id; null = default login
+        subagent: serializeSubagent(s.subagent),  // Task-tool subagent override; null = 随主
         createdAt: s.createdAt,
         branch: s.branch || null,
         worktreePath: s.worktreePath || null,
@@ -2492,7 +2517,7 @@ app.patch('/api/sessions/:id', (req, res) => {
     appendEvent(s.dirId, 'session_subagent_changed', `${s.label || s.id} 子任务 → ${saName}`, s.id);
   }
   savePersistedSessions();
-  res.json({ ...s, effectiveModel: effectiveSessionModel(s), effectiveEffort: effectiveSessionEffort(s) });
+  res.json({ ...s, subagent: serializeSubagent(s.subagent), effectiveModel: effectiveSessionModel(s), effectiveEffort: effectiveSessionEffort(s) });
 });
 
 // ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
@@ -2670,14 +2695,15 @@ app.get('/api/sessions/:id', (req, res) => {
   const autoCommit = !!persisted?.autoCommit;
   const autoDispatch = !!persisted?.autoDispatch;
   const provider = persisted?.provider || null;  // cc-switch provider id; null = default login
+  const subagent = serializeSubagent(persisted?.subagent);  // Task-tool subagent override; null = 随主
   const activeChat = persisted?.kind === 'chat' ? chatSessions.get(id) : null;
   const lastActivity = persisted?.kind === 'chat' ? chatLastActivity(id, activeChat) : null;
   if (active) {
-    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
+    res.json({ id: active.id, cwd: active.cwd, createdAt: active.createdAt, lastActivity: active.lastActivity, clients: active.clients.size, active: true, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, subagent, streaming, autoContinue, autoCommit, autoDispatch });
   } else if (persisted?.kind === 'chat') {
-    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
+    res.json({ id: persisted.id, cwd: cwdForSession(persisted), createdAt: persisted.createdAt, lastActivity, clients: activeChat ? activeChat.clients.size : 0, active: !!(activeChat && (activeChat.clients.size > 0 || activeChat.isStreaming)), mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, subagent, streaming, autoContinue, autoCommit, autoDispatch });
   } else {
-    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, streaming, autoContinue, autoCommit, autoDispatch });
+    res.json({ id: persisted.id, cwd: persisted.cwd, createdAt: persisted.createdAt, lastActivity: null, clients: 0, active: false, mergeState, cli, model, effectiveModel, effort, effectiveEffort, rolePrompt, memory, provider, subagent, streaming, autoContinue, autoCommit, autoDispatch });
   }
 });
 
