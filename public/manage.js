@@ -2474,7 +2474,16 @@ function openSessionModal(id) {
 }
 
 function closeSessionModal() {
+  const closingSessionId = _currentSessionModalId;
   sessionModal.classList.remove('visible');
+  // Auto-open the directory detail when closing a session modal,
+  // so the user lands back in the dir view without an extra click.
+  if (closingSessionId) {
+    const s = _cachedSessions.find(sess => sess.id === closingSessionId);
+    if (s && s.dirId) {
+      openDirectoryDetail(s.dirId);
+    }
+  }
   // Do NOT clear src or remove iframe — just hide modal;
   // iframes stay cached for hot restart.
   // The title/subtitle will be overwritten on next open.
