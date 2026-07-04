@@ -53,7 +53,8 @@ function resolveCreds(provider) {
   }
   return {
     baseUrl: env.ANTHROPIC_BASE_URL || '',
-    token: env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '',
+    authToken: env.ANTHROPIC_AUTH_TOKEN || '',
+    apiKey: env.ANTHROPIC_API_KEY || '',
     aliasMap,
     name: provider.name,
   };
@@ -116,10 +117,16 @@ function createHandler({ getProvider }) {
       return res.end(JSON.stringify({ error: 'ccfw: missing providerId in path' }));
     }
 
-    // buffer the request body (JSON; small enough to read fully)
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    const bodyBuf = Buffer.concat(chunks);
+    // buffer the request body. Mounted before express.json(), so the stream is
+    // intact; fall back to req.body if a caller mounted us after a body parser.
+    let bodyBuf;
+    if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+      bodyBuf = Buffer.from(JSON.stringify(req.body), 'utf8');
+    } else {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      bodyBuf = Buffer.concat(chunks);
+    }
 
     let model = '';
     try { model = JSON.parse(bodyBuf.toString('utf8')).model || ''; } catch (_) {}
@@ -151,13 +158,16 @@ function createHandler({ getProvider }) {
     const base = new URL(creds.baseUrl);
     const basepath = base.pathname.replace(/\/+$/, '');
     const fullPath = basepath + apiPath + query;
+    // Forward auth matching how the provider expects it: AUTH_TOKEN →
+    // Authorization: Bearer only (e.g. Zhipu GLM 401s if x-api-key is also set),
+    // API_KEY → x-api-key only. Strip the incoming virtual token first.
     const headers = { ...req.headers };
     delete headers.host;
     delete headers['content-length'];
-    if (creds.token) {
-      headers['x-api-key'] = creds.token;
-      headers['authorization'] = 'Bearer ' + creds.token;
-    }
+    delete headers['x-api-key'];
+    delete headers['authorization'];
+    if (creds.authToken) headers['authorization'] = 'Bearer ' + creds.authToken;
+    if (creds.apiKey) headers['x-api-key'] = creds.apiKey;
     const lib = base.protocol === 'https:' ? https : http;
     console.log(`[ccfw] sess=${sessionId || '-'} role=${role} provider=${creds.name || routeProviderId} model=${ccfw ? ccfw.realModel : (model || '(n/a)')} -> ${base.origin}${fullPath}`);
 
