@@ -2386,6 +2386,7 @@ async function loadSessionModel() {
     _sessionCli = info.cli || 'claude';
     _sessionProvider = info.provider || '';
     _sessionSubagent = info.subagent || null;
+    updateSubagentPill();
     if (_sessionProvider) await ensureProviderList(_sessionCli === 'codex' ? 'codex' : 'claude');
     updateProviderBtn();
     _sessionModel = info.model || '';
@@ -2429,6 +2430,7 @@ modelBtn?.addEventListener('click', async () => {
     if (!res.ok) { addSystemMsg('AI 配置保存失败：' + (data.error || `HTTP ${res.status}`)); return; }
     _sessionProvider = data.provider || '';
     _sessionSubagent = data.subagent || null;
+    updateSubagentPill();
     _sessionModel = data.model || '';
     _sessionEffectiveModel = data.effectiveModel || data.model || '';
     _sessionEffort = data.effort || '';
@@ -2914,6 +2916,15 @@ let _sessionAutoDispatch = false;
 function updateAutoDispatchCheck() {
   if (autoDispatchCheck) autoDispatchCheck.checked = _sessionAutoDispatch;
 }
+
+/* ── Subagent pill: shows the current sub-task model; click opens AI config ── */
+const subagentPill = document.getElementById('subagent-pill');
+function updateSubagentPill() {
+  const el = document.getElementById('subagent-pill-label');
+  if (!el) return;
+  el.textContent = (_sessionSubagent && _sessionSubagent.model) ? _sessionSubagent.model : '随主';
+}
+subagentPill?.addEventListener('click', () => { modelBtn?.click(); });
 
 autoDispatchCheck?.addEventListener('change', async () => {
   const newVal = autoDispatchCheck.checked;

@@ -475,7 +475,7 @@
     <button class="nav-item" data-view="voice" onclick="setView('voice')"><span class="ic">🎙</span> 语音 Voice</button>
     <button class="nav-item" data-view="goal" onclick="setView('goal')"><span class="ic">🎯</span> Goal 预检</button>
     <button class="nav-item" data-view="provider" onclick="setView('provider')"><span class="ic">⇄</span> Provider</button>
-    <button class="nav-item" id="macos-power-nav" data-view="power" onclick="setView('power')" style="display:none;"><span class="ic">⌁</span> macOS 电源</button>
+    <button class="nav-item" data-view="global" onclick="setView('global')"><span class="ic">⚙</span> 全局配置</button>
     <button class="nav-item" data-view="push" onclick="setView('push')"><span class="ic">🔔</span> 推送 Push</button>
     <button class="nav-item" data-view="tunnel" onclick="setView('tunnel')"><span class="ic">🌐</span> 外网穿透</button>
     <button class="nav-item" data-view="bridges" onclick="setView('bridges')"><span class="ic">🌉</span> 消息桥接 Bridges</button>
@@ -693,10 +693,26 @@
         </section>
 
         <!-- ─── macOS Power (hidden on other platforms) ─── -->
-        <section class="view" id="macos-power-section" data-view="power" style="display:none;">
-          <div class="sec-head"><h2>macOS 电源设置</h2><div class="line"></div></div>
+        <section class="view" data-view="global">
+          <div class="sec-head"><h2>全局配置</h2><div class="line"></div></div>
+
+          <!-- Claude Code 代理路由 -->
           <div class="settings-card">
-            <div class="sc-header">关盖运行</div>
+            <div class="sc-header">Claude Code 代理路由 <span id="cc-proxy-hint" style="font-size:11px;font-weight:400;color:var(--faint);"></span></div>
+            <div class="sc-body">
+              <div style="font-size:12px;color:var(--faint);line-height:1.6;margin-bottom:8px;">
+                让 Claude Code 的主进程与 Task 工具派生的 <b>子任务 (subagent)</b> 走不同 provider/model——原生 Claude Code 做不到（subagent 是进程内 sidechain，共享主进程的单一客户端）。开启后，每个会话可在 chat 的 AI 配置里单独指定「子任务 provider+model」（chat 输入框上方有「子任务」指示条，点击即改）。
+                <br><b>· 开启：</b>所有配了 provider 的会话，请求经本地代理 (127.0.0.1) 中转再打到真实 provider；真实 token 不进子进程（更安全）；子任务可独立路由。代价是多一跳 localhost 转发（开销可忽略），代理是所有 provider 请求的单点（出问题会影响全部 provider 会话，可随时在此关闭）。
+                <br><b>· 关闭：</b>claude 直连各自 provider，子任务与主进程同 provider/model；更简单稳妥，但失去子任务独立路由能力。默认登录会话（未配 provider）无论开关都直连，不受影响。
+              </div>
+              <div class="setting-row"><label>启用代理路由</label><input id="cc-proxy-enabled" type="checkbox" style="width:auto;" onchange="saveProxySetting()" /></div>
+            </div>
+            <div class="sc-footer"><span class="status-text" id="cc-proxy-msg"></span></div>
+          </div>
+
+          <!-- macOS 电源（仅 macOS 可见；非 macOS 自动隐藏） -->
+          <div class="settings-card" id="macos-power-card" style="display:none;">
+            <div class="sc-header">关盖运行 <span style="font-size:11px;font-weight:400;color:var(--faint);">· macOS</span></div>
             <div class="sc-body">
               <label class="toggle-label">
                 <input id="macos-lid-sleep-toggle" type="checkbox" onchange="saveMacosPowerSettings()" />
@@ -763,20 +779,6 @@
               <div class="setting-row"><label>访问密码</label><input id="tnl-token" type="text" placeholder="未设置" autocomplete="off" /></div>
             </div>
             <div class="sc-footer"><button class="btn btn-green" id="tnl-token-save" onclick="saveAccessToken()">保存</button><span class="status-text" id="tnl-token-msg"></span></div>
-          </div>
-
-          <!-- Claude Code 代理路由 -->
-          <div class="settings-card">
-            <div class="sc-header">Claude Code 代理路由 <span id="cc-proxy-hint" style="font-size:11px;font-weight:400;color:var(--faint);"></span></div>
-            <div class="sc-body">
-              <div style="font-size:12px;color:var(--faint);line-height:1.6;margin-bottom:8px;">
-                让 Claude Code 的主进程与 Task 工具派生的 <b>子任务 (subagent)</b> 走不同 provider/model——原生 Claude Code 做不到（subagent 是进程内 sidechain，共享主进程的单一客户端）。开启后，每个会话可在 chat 的 AI 配置里单独指定「子任务 provider+model」。
-                <br><b>· 开启：</b>所有配了 provider 的会话，请求经本地代理 (127.0.0.1) 中转再打到真实 provider；真实 token 不进子进程（更安全）；子任务可独立路由。代价是多一跳 localhost 转发（开销可忽略），代理是所有 provider 请求的单点（出问题会影响全部 provider 会话，可随时在此关闭）。
-                <br><b>· 关闭：</b>claude 直连各自 provider，子任务与主进程同 provider/model；更简单稳妥，但失去子任务独立路由能力。默认登录会话（未配 provider）无论开关都直连，不受影响。
-              </div>
-              <div class="setting-row"><label>启用代理路由</label><input id="cc-proxy-enabled" type="checkbox" style="width:auto;" onchange="saveProxySetting()" /></div>
-            </div>
-            <div class="sc-footer"><span class="status-text" id="cc-proxy-msg"></span></div>
           </div>
 
           <!-- 花生壳 -->
