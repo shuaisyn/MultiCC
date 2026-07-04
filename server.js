@@ -4497,6 +4497,90 @@ app.get('/api/providers/stats', (req, res) => {
   }
 });
 
+// Version check — query GitHub Releases API for the latest stable tag and
+// compare it with the locally installed version (package.json).  Called by the
+// manage UI sidebar; also usable by the multicc update script.
+app.get('/api/version-check', async (req, res) => {
+  try {
+    const pkg = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, 'package.json'), 'utf8'));
+    const current = pkg.version || '0.0.0';
+
+    // Read the channel from .multicc_channel (written by install.sh).
+    let channel = 'dev';
+    try {
+      const ch = require('fs').readFileSync(require('path').join(__dirname, '.multicc_channel'), 'utf8');
+      const m = ch.match(/^# channel:\s*(\S+)/m);
+      if (m) channel = m[1];
+    } catch (_) { /* file may not exist (pre-channel installs) */ }
+
+    let latest = null;
+    let latestVersion = null;
+    let apiError = false;
+
+    // 1) Try the GitHub Releases API (15s timeout, no auth needed for public repos).
+    try {
+      const https = require('https');
+      const apiResp = await new Promise((resolve, reject) => {
+        const r = https.get(
+          'https://api.github.com/repos/lsjwzh/MultiCC/releases/latest',
+          { headers: { 'User-Agent': 'multicc-version-check/1.0', 'Accept': 'application/vnd.github+json' }, timeout: 15000 },
+          (resp) => {
+            let body = '';
+            resp.on('data', d => body += d);
+            resp.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+          }
+        );
+        r.on('timeout', () => { r.destroy(); reject(new Error('timeout')); });
+        r.on('error', reject);
+      });
+      latest = apiResp.tag_name || null;
+      if (latest) latestVersion = latest.replace(/^v/, '');
+    } catch (_) { apiError = true; }
+
+    // 2) Fallback: use git ls-remote to get the latest semver tag.
+    if (!latest) {
+      try {
+        const cp = require('child_process');
+        const tags = cp.execSync("git ls-remote --tags https://github.com/lsjwzh/MultiCC.git 'refs/tags/v*'", { timeout: 15000, encoding: 'utf8' })
+          .split('\n')
+          .filter(Boolean)
+          .map(l => l.match(/refs\/tags\/(v\d+\.\d+\.\d+)/))
+          .filter(Boolean)
+          .map(m => m[1]);
+        if (tags.length) {
+          // sort semver and pick the highest
+          const sorted = cp.execSync('sort -V', { input: tags.join('\n'), encoding: 'utf8' }).trim().split('\n');
+          latest = sorted[sorted.length - 1];
+          latestVersion = latest.replace(/^v/, '');
+        }
+      } catch (_) { /* all paths failed */ }
+    }
+
+    const updateAvailable = latestVersion ? (compareSemver(current, latestVersion) < 0) : false;
+
+    res.json({
+      current,
+      channel,
+      latest: latest || null,
+      latestVersion: latestVersion || null,
+      updateAvailable,
+      apiError
+    });
+  } catch (e) {
+    res.json({ current: '0.0.0', channel: 'dev', latest: null, latestVersion: null, updateAvailable: false, apiError: true });
+  }
+});
+
+// Simple semver comparator (returns <0 if a < b, 0 if equal, >0 if a > b).
+function compareSemver(a, b) {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] || 0, nb = pb[i] || 0;
+    if (na !== nb) return na - nb;
+  }
+  return 0;
+}
+
 // Global Claude Code token usage, read from the claude CLI transcripts under
 // ~/.claude/projects (ground truth, covers ALL usage — not just multicc turns).
 // Independent of the per-provider stats above; grouped by model + day. Cached
