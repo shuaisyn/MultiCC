@@ -7247,6 +7247,15 @@ function handleChatWs(ws, req, urlObj) {
   const sessionTokenUsage = tokenUsage[sessionName] || null;
   if (replayMessages.length > 0 || sessionTokenUsage) {
     ws.send(JSON.stringify({ type: 'chat_history', messages: replayMessages, tokenUsage: sessionTokenUsage }));
+    // If chat_history already includes the in-progress assistant message
+    // (appended just above), skip the streamReplay so the client doesn't
+    // receive duplicate events that would create a second bubble.
+    if (replayMessages.length > 0) {
+      const lastMsg = replayMessages[replayMessages.length - 1];
+      if (lastMsg.role === 'assistant' && cs.isStreaming && cs.streamReplay.length > 0) {
+        cs.streamReplay = [];
+      }
+    }
   }
 
   // If a stream is in progress, replay buffered events so reconnected client catches up
