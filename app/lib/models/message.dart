@@ -81,6 +81,11 @@ class ChatMessage {
   double? cost;
   MessageUsage? usage;
 
+  /// Stable history id assigned by the server (e.g. "mxxxxxx-n"). null while
+  /// the message is still streaming / not yet persisted. Used for per-message
+  /// delete and for tagging live bubbles via the chat_msg_meta WS event.
+  String? id;
+
   /// Wall-clock time from user submit to AI reply completion (ms).
   /// Stamped by the server (cs.turnStartedAt → result) and persisted in
   /// chat_history; shown under each assistant bubble as "任务耗时".
@@ -94,6 +99,7 @@ class ChatMessage {
     this.isStreaming = false,
     this.cost,
     this.usage,
+    this.id,
     this.durationMs,
   }) : toolCalls = toolCalls ?? [],
        timestamp = timestamp ?? DateTime.now();
@@ -110,6 +116,7 @@ class ChatMessage {
       usage = json['usage'] is Map
           ? MessageUsage.fromJson(json['usage'] as Map<String, dynamic>)
           : null,
+      id = (json['id']?.toString().isNotEmpty ?? false) ? json['id'].toString() : null,
       durationMs = (json['durationMs'] as num?)?.toInt();
 
   static List<ToolCall> _parseHistoryTools(dynamic tools) {
