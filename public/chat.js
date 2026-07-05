@@ -494,6 +494,11 @@ let _usedTokens = 0;
 let _costText = '';  // latest cost summary string, kept separate from the context readout
 let _sessionTokens = { input: 0, output: 0 };  // per-session cumulative token usage
 let _turnStartMs = 0;  // wall-clock when the current turn was sent (live reply timing)
+// Per-turn main/sub role breakdown (from claude-proxy onUsage, via
+// role_token_stats WS). The CLI's result event merges main + all subagents into
+// one usage block even across different providers; this separates them so
+// "本轮" can show 主 A / 辅 B. Null when no subagent ran this turn.
+let _roleTokens = { main: null, sub: null, subByProvider: [] };
 // Provider-level time-window token stats (updated after each turn)
 let _providerId = null;
 let _providerName = null;
@@ -804,6 +809,16 @@ function handleEvent(msg) {
     case 'provider_token_stats':
       if (msg.windows) {
         _providerTokenWindows = msg.windows;
+        updateContextBar();
+      }
+      break;
+
+    case 'role_token_stats':
+      // Per-turn main/sub breakdown from the claude-proxy (the only place that
+      // knows each request's real route). Drives the "本轮 主 A / 辅 B" split
+      // that the merged CLI result event can't provide.
+      if (msg.role) {
+        _roleTokens = { main: msg.role.main || null, sub: msg.role.sub || null, subByProvider: msg.role.subByProvider || [] };
         updateContextBar();
       }
       break;
@@ -1587,6 +1602,20 @@ function updateContextBar(usage, modelUsage) {
     const totalK = (_contextWindow / 1000).toFixed(0);
     parts.push(`<span style="font-size:11px;color:${color}">本轮 ${usedK}k/${totalK}k (${pct.toFixed(1)}%)</span>`);
     parts.push(`<span style="display:inline-block;width:60px;height:5px;background:#21262d;border-radius:3px;margin-left:4px;vertical-align:middle;"><span style="display:block;width:${pct}%;height:100%;background:${color};border-radius:3px;"></span></span>`);
+    // Per-role split for THIS turn: 主 (main loop) / 辅 (Task-tool subagents),
+    // each billed to its actual provider — the CLI's merged result usage can't
+    // recover this. Only shown when a subagent actually ran (else the single
+    // 本轮 number above already reflects the main loop alone).
+    if (_roleTokens.sub) {
+      const sumB = (b) => b ? (b.inputTokens || 0) + (b.outputTokens || 0) + (b.cacheWrite || 0) + (b.cacheRead || 0) : 0;
+      const mainT = sumB(_roleTokens.main);
+      const subT = sumB(_roleTokens.sub);
+      // Tooltip: per-sub-provider detail (provider · model · tokens)
+      const tip = (_roleTokens.subByProvider || []).map((p) =>
+        `${p.name || p.providerId} · ${p.model || '?'}: in ${fmt(p.inputTokens||0)} / out ${fmt(p.outputTokens||0)}`
+      ).join('\n');
+      parts.push(`<span style="margin-left:8px;font-size:11px;color:var(--faint)" title="${escHtml(tip)}">主 ${fmt(mainT)} · 辅 ${fmt(subT)}</span>`);
+    }
   }
   if (parts.length) costBar.innerHTML = parts.join('');
 }
