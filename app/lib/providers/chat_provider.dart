@@ -233,6 +233,44 @@ class ChatProvider extends ChangeNotifier {
         _maybeNotify('错误', evt.payload.toString());
         notifyListeners();
         break;
+
+      case 'chat_msg_meta': {
+        // Server saved a message and assigned its history id. Tag the newest
+        // still-un-id'd bubble of that role so its delete button goes live
+        // (matches web: tag last bubble of role that has no msgId yet).
+        final p = evt.payload as Map<String, dynamic>;
+        final id = p['id']?.toString();
+        final role = p['role']?.toString();
+        if (id != null && id.isNotEmpty && role != null) {
+          final wantUser = role == 'user';
+          for (var i = _messages.length - 1; i >= 0; i--) {
+            final m = _messages[i];
+            final isUser = m.role == MessageRole.user;
+            if (isUser == wantUser) {
+              if (m.id == null || m.id!.isEmpty) {
+                m.id = id;
+                notifyListeners();
+              }
+              break;
+            }
+          }
+        }
+        break;
+      }
+
+      case 'chat_msg_deleted': {
+        // Broadcast after a successful delete from any client. Idempotent:
+        // the initiator already removed it locally; this just syncs other
+        // clients (and is a no-op if the id is already gone).
+        final p = evt.payload as Map<String, dynamic>;
+        final id = p['id']?.toString();
+        if (id != null && id.isNotEmpty) {
+          final before = _messages.length;
+          _messages.removeWhere((m) => m.id == id);
+          if (_messages.length != before) notifyListeners();
+        }
+        break;
+      }
     }
   }
 

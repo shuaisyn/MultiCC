@@ -31,6 +31,7 @@
   "confirm": "Confirm",
   "create": "Create",
   "close": "Close",
+  "copy": "Copy",
   "copyLink": "Copy Link",
 
   "renameDirectory": "Rename",
@@ -169,6 +170,14 @@
   "memSaveFailed": "Save failed",
   "memLegacyTitle": "Legacy auto-distilled memory (read-only)",
   "memLegacyHint": "Earlier auto-distilled JSON memory entries, still injected per turn. Copy into a .md file above and ignore.",
+
+  "msgDeleteAction": "Delete this message",
+  "msgDeleteTitle": "Delete message",
+  "msgDeleteConfirm": "Removes from chat history only; cannot be undone. Does not affect model context — the model may still remember the content.",
+  "msgDeleted": "Message deleted",
+  "msgDeleteFailed": "Delete failed: {error}",
+  "msgCopyAction": "Copy content",
+  "msgCopied": "Copied",
 
   "shareSession": "Share Session",
   "shareDesc": "Recipient opens the link in a browser.",
