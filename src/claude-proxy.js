@@ -58,6 +58,117 @@ function maybeCapture(meta, headers, bodyBuf) {
 const CCFW_PREFIX = 'ccfw:';
 const TIERS = ['sonnet', 'opus', 'haiku', 'fable'];
 
+// ── SSE usage tee ───────────────────────────────────────────────────────────
+// The proxy pipes the upstream SSE response byte-for-byte to the client; we
+// additionally tee a copy into a tiny state machine that extracts the per-
+// request usage block, so per-role/per-provider accounting can hook the one
+// place that knows the real route. Never mutates the forwarded bytes, never
+// blocks the pipe (data handler is sync + cheap).
+//
+// Anthropic streaming SSE emits:
+//   event: message_start   → data.message.usage = {input_tokens,
+//                                                   cache_creation_input_tokens,
+//                                                   cache_read_input_tokens, ...}
+//   event: message_delta   → data.usage = {output_tokens, ...} (cumulative,
+//                                                   final delta carries totals)
+//   event: message_stop    → end of one message
+// For a non-SSE JSON response (e.g. an error or non-stream request), the whole
+// body is one JSON object whose top-level `.usage` carries the same fields.
+function newUsageTee() {
+  return {
+    buf: '',            // incomplete SSE tail across chunks
+    usage: { inputTokens: 0, outputTokens: 0, cacheWrite: 0, cacheRead: 0 },
+    got: false,         // any usage field observed at all
+    contentType: '',    // from response headers
+    isSSE: false,
+  };
+}
+
+function _mergeUsageInto(tee, u) {
+  if (!u || typeof u !== 'object') return;
+  let touched = false;
+  // output_tokens in message_delta is cumulative across deltas for that field;
+  // we take the max seen value rather than summing, so the final delta (which
+  // carries the total) wins and earlier partials don't double-count.
+  if (typeof u.output_tokens === 'number' && u.output_tokens > tee.usage.outputTokens) {
+    tee.usage.outputTokens = u.output_tokens; touched = true;
+  }
+  // input / cache fields come from message_start as the turn's totals; sum is
+  // safe (they appear once per message).
+  if (typeof u.input_tokens === 'number' && u.input_tokens) {
+    tee.usage.inputTokens += u.input_tokens; touched = true;
+  }
+  if (typeof u.cache_creation_input_tokens === 'number' && u.cache_creation_input_tokens) {
+    tee.usage.cacheWrite += u.cache_creation_input_tokens; touched = true;
+  }
+  if (typeof u.cache_read_input_tokens === 'number' && u.cache_read_input_tokens) {
+    tee.usage.cacheRead += u.cache_read_input_tokens; touched = true;
+  }
+  if (touched) tee.got = true;
+}
+
+// Feed one chunk of the upstream response body to the tee. Handles both SSE
+// (text/event-stream) and buffered JSON.
+function _feedChunk(tee, chunk) {
+  if (!tee.contentType) return;            // headers not classified yet
+  const s = chunk.toString('utf8');
+  if (tee.isSSE) {
+    tee.buf += s;
+    let nl;
+    // Process complete `data: ...` lines; keep any trailing partial line.
+    while ((nl = tee.buf.indexOf('\n')) >= 0) {
+      let line = tee.buf.slice(0, nl);
+      tee.buf = tee.buf.slice(nl + 1);
+      line = line.replace(/\r$/, '');
+      const ds = line.indexOf('data:');
+      if (ds < 0) continue;                // event:/comment/blank — skip
+      const payload = line.slice(ds + 5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let d;
+      try { d = JSON.parse(payload); } catch (_) { continue; }
+      // message_start: usage lives at d.message.usage
+      if (d.type === 'message_start' && d.message && d.message.usage) {
+        _mergeUsageInto(tee, d.message.usage);
+      }
+      // message_delta: usage lives at d.usage (top-level)
+      else if (d.type === 'message_delta' && d.usage) {
+        _mergeUsageInto(tee, d.usage);
+      }
+    }
+  } else {
+    // Buffer the whole non-SSE body and parse once at end.
+    tee.buf += s;
+  }
+}
+
+// Called on upstream response end. Returns the final usage object (or null if
+// none observed) and clears the buffer.
+function _finalizeTee(tee) {
+  let usage = null;
+  if (tee.got) {
+    usage = { ...tee.usage };
+  } else if (!tee.isSSE && tee.buf) {
+    // Non-SSE JSON: try to parse top-level .usage once.
+    try {
+      const d = JSON.parse(tee.buf);
+      if (d && d.usage) {
+        const u = d.usage;
+        const norm = {
+          inputTokens: u.input_tokens || 0,
+          outputTokens: u.output_tokens || 0,
+          cacheWrite: u.cache_creation_input_tokens || 0,
+          cacheRead: u.cache_read_input_tokens || 0,
+        };
+        if (norm.inputTokens + norm.outputTokens + norm.cacheWrite + norm.cacheRead > 0) {
+          usage = norm;
+        }
+      }
+    } catch (_) {}
+  }
+  tee.buf = '';
+  return usage;
+}
+
 // ── claude-official OAuth passthrough (opt-in via CLAUDE_OFFICIAL_VIA_PROXY) ──
 // A "Claude Official" provider has no baseUrl/token in the store — it relies on
 // the CLI's built-in claude.ai OAuth subscription, whose token lives in the
@@ -176,9 +287,18 @@ function rewriteModel(bodyBuf, newModel) {
 /**
  * Build a request handler. Works mounted on express (`app.use('/claude-proxy', h)`)
  * or on a plain http server — it normalizes the /claude-proxy prefix itself.
- * @param {{ getProvider:(appType:string,id:string)=>any }} opts
+ *
+ * @param {{ getProvider:(appType:string,id:string)=>any, onUsage?:(info)=>void }} opts
+ *        opts.onUsage: optional billing callback fired once per upstream
+ *        response with { sessionId, role, providerId, providerName, model,
+ *        isStream, usage:{inputTokens,outputTokens,cacheWrite,cacheRead} }.
+ *        The proxy is the ONLY place that knows both the real route (main vs
+ *        sub) and the real upstream provider for each /v1/messages request, so
+ *        per-role/per-provider accounting must hook here. The callback is fired
+ *        AFTER the response body is fully consumed, never blocks the SSE pipe
+ *        (we tee a copy while piping), and never mutates the forwarded bytes.
  */
-function createHandler({ getProvider }) {
+function createHandler({ getProvider, onUsage }) {
   return async (req, res) => {
     const { providerId, sessionId, apiPath, query } = parseProxyUrl(req.url || '');
 
@@ -324,6 +444,17 @@ function createHandler({ getProvider }) {
       const ok = statusCode >= 200 && statusCode < 300;
       console.log(`[ccfw] <- sess=${sessionId || '-'} role=${role} provider=${creds.name || routeProviderId} status=${statusCode}`);
       res.writeHead(statusCode || 502, upRes.headers);
+
+      // Tee the upstream body: forward every byte to the client unchanged, while
+      // feeding a copy to the usage state machine for per-role/per-provider
+      // accounting. Only 2xx responses carry a usage block worth billing; error
+      // bodies are small JSON we only buffer for diagnostics.
+      const tee = ok ? newUsageTee() : null;
+      if (tee) {
+        const ct = String(upRes.headers['content-type'] || '');
+        tee.contentType = ct;
+        tee.isSSE = ct.indexOf('text/event-stream') >= 0;
+      }
       if (!ok) {
         // Non-2xx responses are small JSON (not SSE), so buffering a short
         // snippet for diagnostics is cheap and doesn't touch the 2xx/SSE path.
@@ -334,8 +465,31 @@ function createHandler({ getProvider }) {
         upRes.on('end', () => {
           if (snippet) console.log(`[ccfw] !! sess=${sessionId || '-'} role=${role} status=${statusCode} body=${snippet.replace(/\s+/g, ' ')}`);
         });
+        upRes.pipe(res);
+      } else {
+        upRes.on('data', (chunk) => { _feedChunk(tee, chunk); });
+        upRes.on('end', () => {
+          const usage = _finalizeTee(tee);
+          if (usage && typeof onUsage === 'function') {
+            try {
+              onUsage({
+                sessionId, role,
+                providerId: routeProviderId,
+                providerName: creds.name || routeProviderId,
+                // The real wire model the upstream saw (post-rewrite, post tier
+                // resolution) — ccfw.realModel for the sub route, else the
+                // request's model field.
+                model: ccfw ? ccfw.realModel : (model || ''),
+                isStream: tee.isSSE,
+                usage,
+              });
+            } catch (e) {
+              console.log(`[ccfw] onUsage callback error: ${e.message}`);
+            }
+          }
+        });
+        upRes.pipe(res);
       }
-      upRes.pipe(res);
     });
     up.on('error', (e) => {
       console.log(`[ccfw] upstream error: ${e.message}`);
