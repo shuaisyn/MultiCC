@@ -6109,14 +6109,19 @@ function emitTurnOutcome(sessionName, { status, notifyState, message, alert }) {
   // session summary (from a prior intent_classify).
   if (message === '任务完成') {
     const cs = chatSessions.get(sessionName);
-    const taskName = cs?.currentTaskName || '';
-    if (taskName) {
-      message = `任务完成：${taskName}`;
+    // Prefer the closed-loop task goal (noun-phrase, model-generated); fall
+    // back to the legacy currentTaskName, then to the last session summary.
+    const goal = cs?.currentTask?.goal || cs?.currentTaskName || '';
+    // Mark the closed-loop task done so ensureCurrentTask starts a fresh task
+    // next turn (rather than continuing a finished one).
+    if (cs?.currentTask) cs.currentTask.phase = 'done';
+    if (goal) {
+      message = `任务完成：${goal}`;
     } else {
       const sm = sessionSummaries.get(sessionId);
       const raw = sm?.summary || '';
-      // Strip any status label prefix plus optional " — subAction" suffix
-      const clean = raw.replace(/^(正在处理：|处理中：|任务完成：)/, '').replace(/\s*—\s*.+$/, '').trim();
+      // Strip any status label prefix plus optional " · subAction" / " — subAction" suffix
+      const clean = raw.replace(/^(正在处理：|处理中：|任务完成：)/, '').replace(/\s*[·—]\s*.+$/, '').trim();
       if (clean) message = `任务完成：${clean}`;
     }
   }
