@@ -6068,13 +6068,9 @@ function startProgressSummary(cs, sessionName) {
     const taskName = cs.currentTaskName || '未知任务';
     auxQueue.enqueue({
       type: 'progress_summary',
-      prompt: `当前闭环任务目标：「${taskName}」
+      prompt: `当前整体任务：「${taskName}」
 
-请用一句话概括这个任务当前进展到哪个阶段、刚做了什么，格式为「{阶段}：{进展}」。
-- 阶段必须是以下之一：规划中 / 实现中 / 验证中 / 收尾中
-- 进展要带上与任务目标的关系，例如「实现中：已改发送按钮 color，正在处理深色模式适配」「验证中：跑了 build 通过，正在查深色模式渲染」
-- 禁止只输出「修改CSS样式」「运行单元测试」这种脱离目标的动词片段
-- 总长不超过 25 个汉字，只输出这一句，不要解释、不要前缀、不要引号
+用不超过15个汉字概括AI助手当前正在执行的具体操作步骤（动词开头，如"修改CSS样式"、"运行单元测试"、"编写API接口"、"排查报错原因"）。只描述当前步骤，不要重复整体任务名。只输出概括内容，不要解释、不要前缀。
 
 回复内容：
 ${tail}`,
@@ -6082,10 +6078,10 @@ ${tail}`,
     }).then(result => {
       if (result.cancelled) return;
       if (!cs.isStreaming) return; // turn finished while we were asking
-      const subAction = (result.text || '').trim().replace(/^["'"']|["'"']$/g, '').slice(0, 40);
+      const subAction = (result.text || '').trim().replace(/^["'"']|["'"']$/g, '').slice(0, 30);
       if (subAction && subAction !== '-' && subAction !== '—') {
         const taskName = cs.currentTaskName || '新任务';
-        const label = `处理中：${taskName} · ${subAction}`;
+        const label = `处理中：${taskName} — ${subAction}`;
         emitRunningNotify(sessionName, label);
         console.log(`[multicc/aux] Progress summary for ${sessionName}: ${label}`);
       }

@@ -1596,12 +1596,6 @@ function renderSessionRow(s) {
   const wbFile = (wb && wb.currentFile) ? wb.currentFile.split('/').pop() : '';
   const sm = _workspaceSummaries.get(s.id);
   const summary = sm && sm.summary ? sm.summary : '';
-  // Status icon for the summary line: makes "状态 + 任务简介" visible at a glance.
-  // statusCls ∈ active(waiting/running) / waiting / completed / '' (idle).
-  const summaryIco = statusCls === 'active' ? '🔵'
-    : statusCls === 'waiting' ? '⏳'
-    : statusCls === 'completed' ? '✅'
-    : '🗒';
   const runtimeText = sessionRunTimeText(s.id);
 
   const openBtn = s.kind === 'chat'
@@ -1623,7 +1617,7 @@ function renderSessionRow(s) {
           ${model ? `<span class="sep">·</span><span class="model" title="模型：${escapeHtml(s.effectiveModel || '')}">${escapeHtml(model)}</span>` : ''}
         </div>
         <div class="sess-file" id="sess-file-${escapeHtml(s.id)}"${wbFile ? '' : ' style="display:none"'}>${wbFile ? '✎ ' + escapeHtml(wbFile) : ''}</div>
-        <div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${summary ? '最近任务：' + escapeHtml(summary) : ''}"${summary ? '' : ' style="display:none"'}>${summary ? summaryIco + ' ' + escapeHtml(summary) : ''}</div>
+        <div class="sess-summary" id="sess-summary-${escapeHtml(s.id)}" title="${summary ? '最近任务：' + escapeHtml(summary) : ''}"${summary ? '' : ' style="display:none"'}>${summary ? '🗒 ' + escapeHtml(summary) : ''}</div>
         <div class="sess-runtime" id="sess-runtime-${escapeHtml(s.id)}"${runtimeText ? '' : ' style="display:none"'}>${escapeHtml(runtimeText)}</div>
       </div>
       <span class="lean-actions">
