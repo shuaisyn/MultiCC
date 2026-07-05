@@ -6321,8 +6321,13 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
     if (evt.is_error === true || (evt.subtype && evt.subtype !== 'success' && /error|abort|timeout/i.test(evt.subtype))) {
       cs._sawApiError = true;
     }
+    // Hoisted out of the if-block below: forward() at the end of this branch
+    // also needs it. Block-scoping it inside the if made the forward line throw
+    // ReferenceError (swallowed by handleLine's catch), so live clients never
+    // received the result event — token/timing footers only appeared after a
+    // reload replayed chat_history.
+    const usage = evt.usage || {};
     if (cs.currentAssistantText || cs.currentToolCalls.length) {
-      const usage = evt.usage || {};
       appendChatMessage(sessionName, {
         role: 'assistant', content: cs.currentAssistantText,
         tools: cs.currentToolCalls.length ? cs.currentToolCalls : undefined,
