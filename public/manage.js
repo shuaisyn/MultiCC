@@ -3038,7 +3038,16 @@ function updateSessionSummaryDom(sessionId) {
   if (!el) return;
   const s = _workspaceSummaries.get(sessionId);
   const text = s && s.summary ? s.summary : '';
-  el.textContent = text ? '🗒 ' + text : '';
+  // Derive the status icon the same way renderSessionCard does, so the live
+  // update keeps "状态 + 任务简介" instead of falling back to a flat 🗒.
+  const wb = _workspaceStatus.get(sessionId);
+  let cls = '';
+  if (wb && wb.status) { const info = wbStatusInfo(wb.status); cls = info.cls; }
+  const monStatus = _sessionStatus.get(sessionId);
+  if (monStatus === 'waiting') cls = 'waiting';
+  else if (monStatus === 'completed') cls = 'completed';
+  const ico = cls === 'active' ? '🔵' : cls === 'waiting' ? '⏳' : cls === 'completed' ? '✅' : '🗒';
+  el.textContent = text ? ico + ' ' + text : '';
   el.title = text ? `最近任务：${text}` : '';
   el.style.display = text ? '' : 'none';
 }
