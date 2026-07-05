@@ -269,6 +269,67 @@ class SessionService {
     }
   }
 
+  // ── Folder-based memory library (own + shared .md files) ───────────────────
+  // Mirrors the web openMemoryEditor(): GET returns {own:{dir,primary,files},
+  // shared:{dir,files}, legacy}; each file in `files` is {name, content}.
+
+  Future<Map<String, dynamic>> fetchSessionMemoryFiles(String id) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/sessions/$id/memory')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+  }
+
+  /// Create or overwrite one memory file. Returns the refreshed file list
+  /// (each {name, content}) the server echoes back.
+  Future<List<Map<String, dynamic>>> putMemoryFile(
+    String id, {
+    required String scope,
+    required String name,
+    required String content,
+  }) async {
+    final res = await http
+        .put(
+          Uri.parse(_url('/api/sessions/$id/memory')),
+          headers: _headers,
+          body: jsonEncode({'scope': scope, 'name': name, 'content': content}),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final list = (data['files'] as List? ?? []);
+    return list.map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
+  /// Delete one memory file. Returns the refreshed file list.
+  Future<List<Map<String, dynamic>>> deleteMemoryFile(
+    String id, {
+    required String scope,
+    required String name,
+  }) async {
+    final res = await http
+        .delete(
+          Uri.parse(_url('/api/sessions/$id/memory')),
+          headers: _headers,
+          body: jsonEncode({'scope': scope, 'name': name}),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
+    final list = (data['files'] as List? ?? []);
+    return list.map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
   /// List all active shares for a session.
   Future<List<Map<String, dynamic>>> listShares(String id) async {
     final res = await http

@@ -21,6 +21,7 @@ import '../widgets/input_bar.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/thinking_indicator.dart';
 import 'memo_screen.dart';
+import 'memory_screen.dart';
 import 'file_browser_screen.dart';
 import 'settings_screen.dart';
 import 'share_messages_screen.dart';
@@ -1290,97 +1291,16 @@ Future<void> _editMemoryFromSession(
   String sessionId,
 ) async {
   final mgr = Provider.of<SessionManager>(context, listen: false);
-  final messenger = ScaffoldMessenger.of(context);
-  String current = '';
-  try {
-    current = await mgr.fetchSessionMemory(sessionId);
-  } catch (_) {}
-  if (!context.mounted) return;
-  final picked = await _showMemoryEditor(context, current: current);
-  if (picked == null) return; // cancelled
-  try {
-    await mgr.updateSessionMemory(sessionId, picked);
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(picked.trim().isEmpty ? '✓ 已清空会话记忆' : '✓ 会话记忆已更新'),
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => MemoryScreen(
+        settings: mgr.settings,
+        sessionId: sessionId,
       ),
-    );
-  } catch (e) {
-    messenger.showSnackBar(SnackBar(content: Text('记忆保存失败：$e')));
-  }
-}
-
-Future<String?> _showMemoryEditor(
-  BuildContext context, {
-  required String current,
-}) {
-  final ctrl = TextEditingController(text: current);
-  return showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: const Color(0xFF14171c),
-      title: const Text(
-        '🧠 会话记忆',
-        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 16),
-      ),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '辅助 AI 在清理历史时自动提炼的「关键问题 + 解决方式」，会随每轮对话注入给模型。可手动编辑或清空。',
-              style: TextStyle(color: Color(0xFF8a909b), fontSize: 12),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: ctrl,
-              maxLines: 12,
-              minLines: 6,
-              style: const TextStyle(
-                color: Color(0xFFc9d1d9),
-                fontSize: 13,
-                fontFamily: 'monospace',
-              ),
-              decoration: const InputDecoration(
-                hintText:
-                    '（还没有积累记忆。聊一段后 Clear 历史，或历史超长自动滚动时，辅助 AI 会在这里记下关键问题与解决方式。）',
-                hintStyle: TextStyle(color: Color(0xFF5b616c), fontSize: 12),
-                filled: true,
-                fillColor: Color(0xFF0d1117),
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              '留空＝清除全部记忆。',
-              style: TextStyle(color: Color(0xFF6e7681), fontSize: 11),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b))),
-        ),
-        TextButton(
-          onPressed: () {
-            if (ctrl.text.length > 8000) {
-              ScaffoldMessenger.of(
-                ctx,
-              ).showSnackBar(const SnackBar(content: Text('记忆过长（上限 8000 字）')));
-              return;
-            }
-            Navigator.pop(ctx, ctrl.text);
-          },
-          child: const Text('保存', style: TextStyle(color: Color(0xFF22ab9c))),
-        ),
-      ],
     ),
   );
 }
+
 
 // Share a session externally. Mirrors the web share dialog: create link with
 // access type + optional password + expiry, list existing shares with type
