@@ -5956,10 +5956,7 @@ function livenessProbe() {
       }
       const patch = { lastProbeSig: curSig, lastProbeSigAt: now, staleProbes };
       // ② + ③: needs staleProbes >= threshold AND never-cleanly-closed lifecycle.
-      // ④ degraded: when aux is unhealthy, stretch the cooldown — nudging won't
-      // get a smart response anyway and the banner already tells the user.
-      const cooldown = auxQueue.isUnhealthy() ? 15 * 60 * 1000 : LIVENESS_NUDGE_COOLDOWN_MS;
-      const cooled = st.lastNudgeAt && (now - st.lastNudgeAt) < cooldown;
+      const cooled = st.lastNudgeAt && (now - st.lastNudgeAt) < LIVENESS_NUDGE_COOLDOWN_MS;
       if (staleProbes >= LIVENESS_STALE_PROBES && !cooled) {
         const goal = st.goal || '当前任务';
         const stallMin = Math.round((now - (st.lastSummaryAt || st.lastTurnEndedAt || now)) / 60000);
@@ -6115,7 +6112,6 @@ ${prior.length ? `【已有的会话记忆条目（请与新内容合并去重�
 ${text.slice(0, 12000)}
 
 请直接输出合并后的所有记忆条目（每行一条），不要解释、不要加标题。`;
-  if (auxQueue.isUnhealthy()) return;  // ④ degraded: skip memory distill; next history-clear retries
   auxQueue.enqueue({ type: 'memory_distill', prompt, meta: { sessionId } })
     .then(result => {
       let raw = (result && result.text || '').trim();
@@ -6360,24 +6356,6 @@ function scheduleIntentClassify(cs, sessionName) {
     const taskId = crypto.randomUUID();
     cs.pendingClassifyTaskId = taskId;
 
-    // ④ Degraded mode: aux is unhealthy. We can't ask the AI whether the turn
-    // ended completed or waiting, so assume completed (the CLI finished). Use the
-    // closed-loop goal for the label. State may be inaccurate — the red banner
-    // already warns the user. Skip the aux call entirely; when aux heals, normal
-    // classification resumes on the next turn.
-    if (auxQueue.isUnhealthy()) {
-      const goal = cs.currentTask?.goal || cs.currentTaskName || '';
-      const msg = goal ? `任务完成：${goal}` : '任务完成';
-      setTaskState(sessionName, { lastTurnEndedAt: Date.now(), endedAt: Date.now(), lifecycle: 'completed' }, { save: false });
-      setSessionSummary(sessionId, goal || '');
-      if (!cs.isStreaming) setSessionStatus(sessionName, { status: 'completed' });
-      chatBroadcast(sessionName, { type: 'notify', state: 'completed', message: msg });
-      const dirId = persistedSessions.get(sessionName)?.dirId;
-      if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId, state: 'completed', message: msg });
-      console.log(`[multicc/aux] Intent classify DEGRADED (aux unhealthy) for ${sessionName}: completed · ${goal}`);
-      return;
-    }
-
     // Gather recent user messages to help the AI understand the overall task
     const recentUserMsgs = getRecentUserMessages(sessionName, 3);
     const userContext = recentUserMsgs.length > 0
@@ -6510,7 +6488,6 @@ ${(userText || '').slice(0, 500)}
 
 请直接输出任务目标：`;
   const turnSeq = cs.currentTask.turnSeq;
-  if (auxQueue.isUnhealthy()) return;  // ④ degraded: keep the brief fallback goal
   auxQueue.enqueue({ type: 'task_goal', prompt, meta: { sessionName } })
     .then(result => {
       // Only accept if the session hasn't moved on to a new task/turn.
@@ -6654,13 +6631,6 @@ function startProgressSummary(cs, sessionName) {
 
     const tail = text.slice(-1500);
     const taskName = (cs.currentTask && cs.currentTask.goal) || cs.currentTaskName || '未知任务';
-    if (auxQueue.isUnhealthy()) {
-      // ④ degraded: aux is down — show a rule-based label with no "phase: progress"
-      // detail, and keep rescheduling so we recover automatically when aux heals.
-      emitRunningNotify(sessionName, `处理中：${taskName}`);
-      if (cs.isStreaming) cs.progressSummaryTimer = setTimeout(() => startProgressSummary(cs, sessionName), PROGRESS_SUMMARY_INTERVAL_MS);
-      return;
-    }
     auxQueue.enqueue({
       type: 'progress_summary',
       prompt: `当前闭环任务目标：「${taskName}」
