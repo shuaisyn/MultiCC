@@ -6427,6 +6427,24 @@ function handleWorkspaceWs(ws, req, urlObj) {
   });
 }
 
+// Global meta bus handler: subscribes the ws to every workspace event across
+// every directory, and sends an initial fleet-wide snapshot on connect.
+function handleMetaWs(ws, req) {
+  metaClients.add(ws);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+  // Fleet snapshot: every directory's sessions + recent events, so a freshly
+  // connected meta/voice assistant sees the whole board immediately.
+  const fleet = [];
+  for (const [dirId, dir] of directories.entries()) {
+    fleet.push({ dirId, dirLabel: dir.label || null,
+                 sessions: workspaceSnapshot(dirId),
+                 events: recentEvents(dirId) });
+  }
+  ws.send(JSON.stringify({ type: 'meta_snapshot', fleet }));
+  ws.on('close', () => { metaClients.delete(ws); });
+}
+
 // ── Event log + passive inter-agent notes ──
 // Each directory has an append-only event log (events/<dirId>.jsonl) and a shared
 // pool of notes. A note left for another agent is delivered passively — prepended
@@ -8318,6 +8336,14 @@ wss.on('connection', (ws, req) => {
   // Route to the per-directory workspace status board
   if (urlObj.pathname === '/ws/workspace') {
     return handleWorkspaceWs(ws, req, urlObj);
+  }
+
+  // Route to the global meta event bus (all directories, all sessions).
+  // Subscribers receive every workspace event fleet-wide, plus an initial
+  // snapshot of every session across every directory. The voice/meta assistant
+  // subscribes here to hold the whole board.
+  if (urlObj.pathname === '/ws/meta') {
+    return handleMetaWs(ws, req);
   }
 
   // Route to aux queue monitor (read-only WebSocket for __aux__ session)
