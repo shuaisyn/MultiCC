@@ -2741,6 +2741,30 @@ app.delete('/api/sessions/:id/memory', (req, res) => {
 // Delete a single message from this session's persisted chat history.
 // Display-history only: the CLI's own transcript/context is not rewritten,
 // so the model may still "remember" the content in an ongoing conversation.
+// Debug: test classify on the last assistant message
+app.post('/api/debug/classify/:id', (req, res) => {
+  const sessionName = req.params.id;
+  if (!persistedSessions.get(sessionName)) return res.status(404).json({ error: 'session not found' });
+  const history = loadChatHistory(sessionName);
+  if (!history.length) return res.status(400).json({ error: 'no history' });
+  let lastText = '';
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m.role !== 'assistant') continue;
+    if (typeof m.content === 'string') { lastText = m.content; break; }
+    if (Array.isArray(m.content)) { lastText = m.content.filter(b => b.type === 'text').map(b => b.text).join(' '); break; }
+  }
+  if (!lastText || lastText.length < 20) return res.status(400).json({ error: 'no valid assistant text', len: lastText.length });
+  const tail = lastText.slice(-1500);
+  const cs = chatSessions.get(sessionName);
+  if (!cs) return res.status(400).json({ error: 'session not active' });
+  cs.currentAssistantText = lastText;
+  runClassifyNow(cs, sessionName, (err) => {
+    if (err) return res.json({ error: err.message });
+    res.json({ ok: true, sessionName, tailPreview: tail.slice(-300).replace(/\n/g, ' '), note: 'check server logs for classify RESULT' });
+  });
+});
+
 app.delete('/api/sessions/:id/messages/:msgId', (req, res) => {
   const sessionName = req.params.id;
   if (!persistedSessions.get(sessionName)) return res.status(404).json({ error: 'session not found' });
@@ -6753,12 +6777,16 @@ function runClassifyNow(cs, sessionName, onError) {
   auxQueue.enqueue({
     id: taskId,
     type: 'intent_classify',
-    prompt: `你是一个意图分析器。判断以下 AI 助手回复的结尾状态，同时提炼当前任务目标。请严格输出两行：
-第1行：仅一个字母——
-  C = 任务已完成，不需要任何后续动作（注意：如果回复末尾抛出反问让用户做选择、请求用户确认某个决策、使用"你定""你选择"等句式，哪怕实质任务已完成，也必须判 W 而非 C）
-  W = 正在等待用户回复、确认或决策，需要用户操作后才能继续（典型：回复末尾抛反问句"你定？""选A还是B？""先重启验证还是直接做？"、请求用户拍板、等待用户确认某个选择。**特别注意：以问号结尾的追问/反问/二选一句式也是W，例如"具体是指哪个？""是不是指……？""哪个会话没有触发？"——因为AI在等用户回答后才能继续**）
-  B = 正在等待某个后台任务/外部数据/第三方/子进程返回后才能继续，且无需用户操作（例如：Monitor 正在监控脚本进度、nohup 子进程在后台跑、等待 API/部署/构建完成、等待外部接口返回数据、"正在等 Monitor 事件""在等部署完成"）
-第2行：用不超过 20 个汉字概括当前闭环任务的目标（名词性短语，如"memo图片更换""登录页样式修复""数据库迁移脚本"）。这一行必须给出，不得为空、不要只回字母、不要写"无"或"无法概括"。如果多轮对话围绕同一个任务，请与已有目标「${priorGoal}」保持一致（可微调措辞，但不要换任务）。忽略反问/确认/推进类消息，不要把它们当任务目标。${userContext}
+    prompt: `你是一个意图分析器。判断以下 AI 助手回复的结尾状态，同时提炼当前任务目标。请严格输出两行。
+
+【判定优先级——请逐条检查，命中即停止】
+1. 如果回复末尾抛出任何反问/征求意见的句式（包括但不限于："你要不要...？""要不要我...？""需要我...吗？""可以吗？""行吗？""你觉得？""你定"/"你决定"/"你选择"），并且以问号结尾 → 必须判 W（AI 在等用户决策）
+2. 如果回复末尾在等用户回答一个具体问题（"具体是哪个？""是不是...？""哪个...？"）→ 必须判 W
+3. 否则，检查是否在等后台任务/外部数据返回 → 判 B
+4. 以上都不满足 → 判 C
+
+第1行：仅一个字母——C / W / B
+第2行：用不超过 20 个汉字概括当前闭环任务的目标（名词性短语，如"memo图片更换""登录页样式修复""数据库迁移脚本"）。这一行必须给出，不得为空。忽略反问/确认/推进类消息，不要把它们当任务目标。已有目标「${priorGoal || '无'}」，如仍围绕同一任务请保持一致。${userContext}
 
 回复内容：
 ${tail}`,
