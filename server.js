@@ -5935,6 +5935,22 @@ function setTaskState(sessionId, patch, opts = {}) {
 const LIVENESS_PROBE_INTERVAL_MS = 60 * 1000;
 const LIVENESS_STALE_PROBES = 2;          // 2 consecutive no-progress probes
 const LIVENESS_NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
+const AUX_HEALTH_PROBE_INTERVAL_MS = 5 * 60 * 1000;  // ④: probe aux recovery while unhealthy
+
+// ④ Degraded-mode recovery probe: while aux is unhealthy, every 5 min run a
+// trivial aux task. Any success → recordSuccess → unhealthy clears → normal
+// summary/liveness/resume resumes. Cheap (a 1-token reply) and self-limiting
+// (only runs while unhealthy; no-op when healthy).
+function auxHealthProbe() {
+  if (!auxQueue.isUnhealthy()) return;
+  auxQueue.enqueue({
+    type: 'health_probe',
+    prompt: '回复一个字：ok',
+    meta: { probe: true },
+  }).then(result => {
+    if (result && !result.cancelled) auxQueue.recordSuccess();
+  }).catch(() => { /* recordFail already called inside drain */ });
+}
 
 function livenessProbe() {
   const now = Date.now();
@@ -8773,5 +8789,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     setInterval(() => artifacts.cleanup(), 6 * 3600 * 1000).unref();
     // Liveness probe (⑤): nudge sessions whose task stalled after the turn ended.
     setInterval(() => livenessProbe(), LIVENESS_PROBE_INTERVAL_MS).unref();
+    // ④: probe aux recovery every 5 min while unhealthy (no-op when healthy).
+    setInterval(() => auxHealthProbe(), AUX_HEALTH_PROBE_INTERVAL_MS).unref();
   });
 })();
