@@ -3066,12 +3066,12 @@ class _MessageListState extends State<_MessageList> {
                 prev == null ||
                 msg.timestamp.difference(prev.timestamp).inMinutes.abs() >=
                     _timeSeparatorGapMinutes;
-            if (!showTime) return MessageBubble(message: msg, sessionId: provider.sessionName, settings: widget.settings);
+            if (!showTime) return MessageBubble(message: msg);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _TimeSeparator(time: msg.timestamp),
-                MessageBubble(message: msg, sessionId: provider.sessionName, settings: widget.settings),
+                MessageBubble(message: msg),
               ],
             );
           },
