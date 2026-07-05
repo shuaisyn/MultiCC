@@ -1427,7 +1427,44 @@ async function dispatchToSession(targetId, message, opts = {}) {
   // detect an immediate launch failure. Avoids a static require of the chat domain.
   const ok = services.call('chat.runTurn', chatId, message, { originDispatchId: dispatchId });
   if (ok === false) { dispatchRuns.delete(dispatchId); return { ok: false, error: `启动 ${targetId} 回合失败` }; }
+  // Track this pending dispatch on the dispatcher's currentTask so its card
+  // shows "等待 worker 回报" (waiting) instead of falling to idle while the
+  // worker runs. opts.replyTo is the dispatcher's session id.
+  if (opts.replyTo) addPendingDispatch(opts.replyTo, dispatchId, targetId);
   return { ok: true, chatId };
+}
+
+// ── Dispatch ↔ currentTask bridge (step 2, idle fix) ──────────────────────────
+// When a dispatcher sends work out to a worker and waits for回流, we track the
+// pending dispatch on the dispatcher's currentTask so setSessionStatus can keep
+// the dispatcher at 'waiting' instead of 'idle'. Best-effort: if the dispatcher
+// has no currentTask (e.g. a gateway), these are no-ops.
+function addPendingDispatch(dispatcherId, dispatchId, targetId) {
+  if (!dispatcherId) return;
+  const cs = chatSessions.get(dispatcherId);
+  if (!cs || !cs.currentTask) return;
+  cs.currentTask.pendingDispatches = cs.currentTask.pendingDispatches || [];
+  cs.currentTask.pendingDispatches.push({ dispatchId, targetId, sentAt: Date.now() });
+  // Phase: still working, but now blocked on workers. Surface as waiting.
+  if (cs.currentTask.phase !== 'done') cs.currentTask.phase = 'awaiting_workers';
+  // Nudge the dispatcher's status to waiting right away (its own turn may have
+  // just ended → it would otherwise flicker to idle before the next status tick).
+  setSessionStatus(dispatcherId, { status: 'waiting' });
+}
+function removePendingDispatch(dispatcherId, dispatchId) {
+  if (!dispatcherId) return 0;
+  const cs = chatSessions.get(dispatcherId);
+  if (!cs || !cs.currentTask || !cs.currentTask.pendingDispatches) return 0;
+  const before = cs.currentTask.pendingDispatches.length;
+  cs.currentTask.pendingDispatches = cs.currentTask.pendingDispatches
+    .filter(p => p.dispatchId !== dispatchId);
+  const remaining = cs.currentTask.pendingDispatches.length;
+  // All workers回流 → phase moves on (next turn will re-classify). Don't touch
+  // status here; the incoming回流 turn will drive status naturally.
+  if (remaining === 0 && cs.currentTask.phase === 'awaiting_workers') {
+    cs.currentTask.phase = 'implementing';
+  }
+  return before - remaining;
 }
 
 // A dispatched turn finished → route its final text back to whoever dispatched
@@ -1441,6 +1478,9 @@ function finalizeDispatch(dispatchId, sessionName, finalText) {
   const targetRec = persistedSessions.get(targetId);
   const label = (targetRec && targetRec.label) ? `${targetId}（${targetRec.label}）` : targetId;
   const replyTo = run && run.replyTo;
+  // A worker finished → drop it from the dispatcher's pending list (so the
+  // dispatcher's status can leave 'waiting' once all workers回流).
+  if (replyTo) removePendingDispatch(replyTo, dispatchId);
   if (replyTo && persistedSessions.get(replyTo)) {
     // Busy-safe: if several parallel dispatches finish at once they serialise
     // into the dispatcher one turn at a time instead of clobbering each other.
@@ -5733,8 +5773,17 @@ function setSessionStatus(sessionId, patch) {
   } else if (wasRunning) {
     runEndedAt = now;  // the run just ended at a resting state — freeze the clock
   }
+  // Dispatch idle fix: if this session has dispatched workers still awaiting
+  // 回流 (pendingDispatches), don't let it rest at idle/completed — show
+  // 'waiting' so the board reflects "等 worker 回报" instead of a misleading idle.
+  let effectiveStatus = nextStatus;
+  if (!isRunningStatus(nextStatus) && nextStatus !== 'waiting') {
+    const cs = chatSessions.get(sessionId);
+    const pending = cs?.currentTask?.pendingDispatches;
+    if (pending && pending.length > 0) effectiveStatus = 'waiting';
+  }
   const next = {
-    status: nextStatus,
+    status: effectiveStatus,
     currentFile: patch.currentFile !== undefined ? patch.currentFile : prev.currentFile,
     lastActivity: now,
     runStartedAt, runEndedAt,
@@ -5929,7 +5978,8 @@ ${tail}`,
         return;
       }
       waitInjector.resetAuto(sessionName); // done / waiting-on-user → reset D's counter
-      const doneMsg = summary ? `任务完成：${summary}` : '任务完成';
+      const goal = cs.currentTask?.goal || '';
+      const doneMsg = goal ? `任务完成：${goal}` : (summary ? `任务完成：${summary}` : '任务完成');
       const msg = state === 'waiting' ? '等待交互' : doneMsg;
       // This aux-AI verdict is the single source of truth for "is the turn done
       // or waiting?". Fan it out to every channel from here so nothing re-judges:
@@ -5946,7 +5996,7 @@ ${tail}`,
       if (dirId) {
         workspaceBroadcast(dirId, { type: 'notify', sessionId, state, message: msg });
       }
-      setSessionSummary(sessionId, summary);
+      setSessionSummary(sessionId, goal || summary);
       // Reflect on the status board — but only if no new turn has started since.
       // state is 'waiting' | 'completed'; keep 'completed' so the card rests at
       // 「已完成」 rather than reverting to 「空闲」.
@@ -6109,14 +6159,19 @@ function emitTurnOutcome(sessionName, { status, notifyState, message, alert }) {
   // session summary (from a prior intent_classify).
   if (message === '任务完成') {
     const cs = chatSessions.get(sessionName);
-    const taskName = cs?.currentTaskName || '';
-    if (taskName) {
-      message = `任务完成：${taskName}`;
+    // Prefer the closed-loop task goal (noun-phrase, model-generated); fall
+    // back to the legacy currentTaskName, then to the last session summary.
+    const goal = cs?.currentTask?.goal || cs?.currentTaskName || '';
+    // Mark the closed-loop task done so ensureCurrentTask starts a fresh task
+    // next turn (rather than continuing a finished one).
+    if (cs?.currentTask) cs.currentTask.phase = 'done';
+    if (goal) {
+      message = `任务完成：${goal}`;
     } else {
       const sm = sessionSummaries.get(sessionId);
       const raw = sm?.summary || '';
-      // Strip any status label prefix plus optional " — subAction" suffix
-      const clean = raw.replace(/^(正在处理：|处理中：|任务完成：)/, '').replace(/\s*—\s*.+$/, '').trim();
+      // Strip any status label prefix plus optional " · subAction" / " — subAction" suffix
+      const clean = raw.replace(/^(正在处理：|处理中：|任务完成：)/, '').replace(/\s*[·—]\s*.+$/, '').trim();
       if (clean) message = `任务完成：${clean}`;
     }
   }
