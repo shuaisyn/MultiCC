@@ -34,6 +34,7 @@
   "confirm": "确认",
   "create": "新建",
   "close": "关闭",
+  "copy": "复制",
   "copyLink": "复制链接",
 
   "renameDirectory": "改名",
@@ -191,6 +192,14 @@
   "memSaveFailed": "保存失败",
   "memLegacyTitle": "Legacy 自动提炼记忆（只读）",
   "memLegacyHint": "辅助 AI 早期自动提炼的 JSON 记忆条目，仍随对话注入。可复制到上面的 .md 文件后忽略。",
+
+  "msgDeleteAction": "删除这条消息",
+  "msgDeleteTitle": "删除消息",
+  "msgDeleteConfirm": "仅从聊天记录移除，不可恢复，不影响模型上下文（模型可能仍记得内容）。",
+  "msgDeleted": "已删除该消息",
+  "msgDeleteFailed": "删除失败：{error}",
+  "msgCopyAction": "复制内容",
+  "msgCopied": "已复制",
 
   "shareSession": "分享会话",
   "shareDesc": "接收方在浏览器打开链接即可。",

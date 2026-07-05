@@ -358,6 +358,24 @@ class SessionService {
     }
   }
 
+  /// Delete a single message from this session's persisted chat history.
+  /// Display-history only: the CLI's own transcript/context is not rewritten,
+  /// so the model may still "remember" the content. The server broadcasts
+  /// chat_msg_deleted afterwards, so callers may also remove it locally and
+  /// rely on the broadcast being a no-op idempotent refresh.
+  Future<void> deleteMessage(String sessionId, String msgId) async {
+    final res = await http
+        .delete(
+          Uri.parse(_url('/api/sessions/$sessionId/messages/$msgId')),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+  }
+
   Future<Map<String, dynamic>> createShare(
     String id, {
     required String access,
