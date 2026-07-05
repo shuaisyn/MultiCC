@@ -951,13 +951,8 @@ function loadDirectories() {
   return new Map();
 }
 
-function saveDirectories() {
-  try {
-    fs.writeFileSync(DIRECTORIES_FILE, JSON.stringify([...directories.values()], null, 2));
-  } catch (e) {
-    console.error('[multicc] Failed to save directories.json:', e.message);
-  }
-}
+// saveDirectories() moved into src/directory/repository.js; a delegate with the
+// same name is defined next to the directory-domain composition root below.
 
 function isNewSchema(arr) {
   return arr.some(s => s.dirId !== undefined || s.kind !== undefined);
@@ -1056,8 +1051,88 @@ function savePersistedSessions() {
 }
 
 const _state = loadPersistedState();
-const directories = _state.directories;
 const persistedSessions = _state.persistedSessions;
+
+// ── Directory domain (src/directory: controller / service / repository) ──
+// Composition root: bind the domain's ports to this file's runtime state. The
+// repository wraps the boot-loaded Map, so `directories` below keeps the same
+// shared reference handed to src/state.js — legacy call sites stay valid while
+// they are migrated over. saveDirectories() remains as a delegate for them.
+const { createDirectoryModule } = require('./src/directory');
+
+// Seed a default Agent Commander chat session for a newly-registered directory
+// (session-domain logic, exposed to the directory domain via its session port).
+function seedCommanderSession(dir) {
+  const commander = agentCommanderPrompt();
+  if (commander) {
+    const r = createSessionRecord({ dir, cli: 'claude', kind: 'chat', label: '🫡 Agent Commander' });
+    if (r.ok) {
+      r.session.rolePrompt = commander;
+      savePersistedSessions();
+      appendEvent(dir.id, 'session_role_changed', `${r.session.label || r.session.id}（默认指挥官）`, r.session.id);
+    } else {
+      console.warn(`[multicc] seed commander session failed for dir ${dir.id}: ${r.error}`);
+    }
+  } else {
+    console.warn('[multicc] Agent Commander preset not found; skipping seed session for new dir');
+  }
+}
+
+// Tear down one session record + all its runtime state (tmux, chat proc, wait
+// registrations, shares, worktree, triggers, notes, status board entry).
+// Directory deletion cascades through here for every owned session.
+function destroySessionCascade(s, d) {
+  const active = sessions.get(s.id);
+  if (active) { tmuxKillSession(s.id); sessions.delete(s.id); }
+  const chat = chatSessions.get(s.id);
+  if (chat) {
+    if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
+    chatStream.close(s.id);
+    chatSessions.delete(s.id);
+  }
+  waitInjector.cancelForSession(s.id);
+  share.removeForSession(s.id);
+  if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
+  teardownTriggers(s.id);
+  purgeNotesForSession(s.id);
+  persistedSessions.delete(s.id);
+  invalidSessions.delete(s.id);
+  workspaceStatus.delete(s.id);
+}
+
+const directoryModule = createDirectoryModule({
+  repository: { file: DIRECTORIES_FILE, map: _state.directories },
+  git: {
+    baseBranch: gitBaseBranch,
+    pushState: (p, b, o) => gitPush.directoryPushState(p, b, o),
+    push: (p, b) => gitPush.pushDirectory(p, b),
+    invalidatePushCache: (p, b) => gitPush.invalidate(p, b),
+    statusPorcelain: (p) => gitRunQueued(p, ['status', '--porcelain']),
+    stageAll: (p) => gitRunQueued(p, ['add', '-A']),
+    commit: (p, m) => gitRunQueued(p, ['commit', '-m', m]),
+    ensureReady: ensureDirGitReady,
+    unmarkReady: (id) => { gitReadyDirs.delete(id); },
+  },
+  sessions: {
+    listByDir: (dirId) => [...persistedSessions.values()].filter(s => s.dirId === dirId),
+    seedCommander: seedCommanderSession,
+    destroyCascade: destroySessionCascade,
+    persistRecords: savePersistedSessions,
+  },
+  events: { append: appendEvent },
+  fsPort: {
+    homedir: () => os.homedir(),
+    exists: (p) => fs.existsSync(p),
+    isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } },
+    mkdirp: (p) => { fs.mkdirSync(p, { recursive: true }); },
+    readDirents: (p) => fs.readdirSync(p, { withFileTypes: true })
+      .map(e => ({ name: e.name, isDirectory: e.isDirectory(), isSymbolicLink: e.isSymbolicLink() })),
+  },
+  helpers: { resolveCwd, isHomeOrAbove, realPathOf, friendlyDirReason },
+});
+const directories = directoryModule.repo.map();
+function saveDirectories() { directoryModule.repo.save(); }
+
 if (_state.needsSave) {
   saveDirectories();
   savePersistedSessions();
@@ -2132,248 +2207,12 @@ app.delete('/api/agent-resources/claude-sessions', (req, res) => {
   res.json({ ok: true, deleted, freed });
 });
 
-// ── Directory REST API ──
-// Browse / autocomplete filesystem directories for the "new directory" picker.
-// No root restriction (local dev tool, localhost + optional ACCESS_TOKEN). Given
-// ?path=, returns that directory's subdirectories; if path is a partial (parent
-// exists but the full path doesn't), returns the parent's subdirectories whose
-// name prefix-matches the trailing segment — shell-style tab completion.
-app.get('/api/fs/list', (req, res) => {
-  try {
-    let raw = (req.query.path || '').toString().trim();
-    if (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')) {
-      raw = path.join(os.homedir(), raw.slice(1));
-    }
-    let baseDir, prefix = '';
-    const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
-    if (!raw) {
-      baseDir = os.homedir();
-    } else if (isDir(raw)) {
-      baseDir = raw;
-    } else {
-      baseDir = path.dirname(raw);
-      prefix = path.basename(raw).toLowerCase();
-      if (!isDir(baseDir)) {
-        return res.json({ base: baseDir, parent: null, entries: [] });
-      }
-    }
-    let dirents;
-    try { dirents = fs.readdirSync(baseDir, { withFileTypes: true }); }
-    catch (e) { return res.status(400).json({ error: `无法读取目录：${e.message}` }); }
-    const entries = dirents
-      .filter(d => {
-        let dir = d.isDirectory();
-        if (!dir && d.isSymbolicLink()) dir = isDir(path.join(baseDir, d.name));
-        if (!dir) return false;
-        if (d.name.startsWith('.') && !prefix.startsWith('.')) return false;
-        if (prefix && !d.name.toLowerCase().startsWith(prefix)) return false;
-        return true;
-      })
-      .map(d => ({ name: d.name, path: path.join(baseDir, d.name) }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .slice(0, 200);
-    const root = path.parse(baseDir).root;
-    res.json({ base: baseDir, parent: baseDir === root ? null : path.dirname(baseDir), entries });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/directories', async (req, res) => {
-  // Annotate each directory with counts per (cli, kind). pushState is cached +
-  // serialized in git-push.js, so this Promise.all never forks more than one git
-  // at a time and most polls resolve from cache without spawning git at all.
-  const list = await Promise.all([...directories.values()].map(async d => {
-    const counts = { claude_terminal: 0, claude_chat: 0, codex_terminal: 0, codex_chat: 0 };
-    for (const s of persistedSessions.values()) {
-      if (s.dirId !== d.id) continue;
-      const k = `${s.cli || 'claude'}_${s.kind || 'terminal'}`;
-      if (counts[k] !== undefined) counts[k]++;
-    }
-    let pushState;
-    try {
-      pushState = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path));
-    } catch (error) {
-      pushState = { available: false, hasRemote: false, ahead: 0, behind: 0, reason: error.message };
-    }
-    return { ...d, counts, pushState };
-  }));
-  res.json(list);
-});
-
-app.post('/api/directories/:id/push', async (req, res) => {
-  const d = directories.get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'directory not found' });
-  try {
-    const result = await gitPush.pushDirectory(d.path, d.baseBranch || gitBaseBranch(d.path));
-    appendEvent(d.id, 'pushed', result.pushed
-      ? `${result.before.ahead} 个提交 → ${result.before.remote}/${result.before.remoteBranch}`
-      : '无待推送提交');
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-// List uncommitted files in a directory's main working tree (dir.path), so the
-// UI can warn before a session worktree merge would tangle with dirty main.
-app.get('/api/directories/:id/uncommitted', async (req, res) => {
-  const d = directories.get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'directory not found' });
-  try {
-    const out = (await gitRunQueued(d.path, ['status', '--porcelain'])).trim();
-    const files = out ? out.split('\n').filter(Boolean).map(line => ({
-      // xy status (e.g. " M", "??", "A ") + path. --porcelain never quotes
-      // paths unless they contain special chars, so split once from index 2.
-      status: line.slice(0, 2),
-      path: line.slice(3),
-    })) : [];
-    res.json({ files });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-// Quick-commit-all on the directory's main working tree. Used by the "未提交"
-// warning affordance to clear a dirty main before merging session branches.
-// Body: { message?: string }. Falls back to an auto message.
-app.post('/api/directories/:id/commit', async (req, res) => {
-  const d = directories.get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'directory not found' });
-  try {
-    const ps = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path), { force: true });
-    if (ps.dirty === 0) return res.json({ ok: true, committed: false, pushState: ps });
-    const message = (req.body && req.body.message ? String(req.body.message) : '').trim()
-      || `multicc: 提交未跟踪改动（${new Date().toISOString().slice(0, 19).replace('T', ' ')}）`;
-    await gitRunQueued(d.path, ['add', '-A']);
-    await gitRunQueued(d.path, ['commit', '-m', message]);
-    gitPush.invalidate(d.path, d.baseBranch || gitBaseBranch(d.path));
-    const after = await gitPush.directoryPushState(d.path, d.baseBranch || gitBaseBranch(d.path), { force: true });
-    appendEvent(d.id, 'committed', `提交 ${after.ahead > ps.ahead ? after.ahead - ps.ahead : ps.dirty} 个未提交改动`);
-    res.json({ ok: true, committed: true, pushState: after });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.post('/api/directories', (req, res) => {
-  const name = (req.body.name || '').trim();
-  const rawPath = (req.body.path || '').trim();
-  const wantCreate = req.body.create === true || req.body.create === 'true';
-  if (!name || !rawPath) return res.status(400).json({ error: 'name and path required' });
-  const resolvedPath = resolveCwd(os.homedir(), rawPath);
-  if (isHomeOrAbove(resolvedPath)) {
-    return res.status(400).json({ error: '不允许选择 $HOME 或更高层目录' });
-  }
-  if (!fs.existsSync(resolvedPath)) {
-    if (!wantCreate) {
-      return res.status(400).json({ error: `path does not exist: ${resolvedPath}` });
-    }
-    try { fs.mkdirSync(resolvedPath, { recursive: true }); }
-    catch (e) { return res.status(400).json({ error: `无法创建目录: ${e.message}` }); }
-  } else if (!fs.statSync(resolvedPath).isDirectory()) {
-    return res.status(400).json({ error: `路径不是目录: ${resolvedPath}` });
-  }
-  const dup = findDirByPath(resolvedPath);
-  if (dup) {
-    return res.status(400).json({ error: `该路径已被目录 "${dup.name}" 登记，不允许重复` });
-  }
-  const id = crypto.randomUUID();
-  const dir = { id, name, path: resolvedPath, createdAt: new Date().toISOString() };
-  directories.set(id, dir);
-  // Force the directory to be a usable git repo (worktree isolation depends on it).
-  const ready = ensureDirGitReady(dir);
-  if (!ready.ok) {
-    directories.delete(id);
-    return res.status(400).json({ error: friendlyDirReason(ready.reason) });
-  }
-  saveDirectories();
-  // Seed every newly-created directory with a default Agent Commander chat
-  // session, so a fleet conductor is ready out of the box. Runs only here at
-  // creation → existing directories are untouched. Best-effort: any failure is
-  // logged but never blocks directory creation.
-  try {
-    const commander = agentCommanderPrompt();
-    if (commander) {
-      const r = createSessionRecord({ dir, cli: 'claude', kind: 'chat', label: '🫡 Agent Commander' });
-      if (r.ok) {
-        r.session.rolePrompt = commander;
-        savePersistedSessions();
-        appendEvent(dir.id, 'session_role_changed', `${r.session.label || r.session.id}（默认指挥官）`, r.session.id);
-      } else {
-        console.warn(`[multicc] seed commander session failed for dir ${dir.id}: ${r.error}`);
-      }
-    } else {
-      console.warn('[multicc] Agent Commander preset not found; skipping seed session for new dir');
-    }
-  } catch (e) {
-    console.warn(`[multicc] seed commander session error for dir ${dir.id}: ${e.message}`);
-  }
-  res.json(dir);
-});
-
-app.patch('/api/directories/:id', (req, res) => {
-  const d = directories.get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'directory not found' });
-  if (req.body.name) d.name = String(req.body.name).trim();
-  if (req.body.path) {
-    const resolved = resolveCwd(os.homedir(), String(req.body.path).trim());
-    if (!fs.existsSync(resolved)) return res.status(400).json({ error: `path does not exist: ${resolved}` });
-    if (isHomeOrAbove(resolved)) {
-      return res.status(400).json({ error: '不允许选择 $HOME 或更高层目录' });
-    }
-    const dup = findDirByPath(resolved, d.id);
-    if (dup) return res.status(400).json({ error: `该路径已被目录 "${dup.name}" 登记，不允许重复` });
-    if (realPathOf(resolved) !== realPathOf(d.path)) {
-      d.path = resolved;
-      // Path changed → re-verify git readiness for the new location.
-      gitReadyDirs.delete(d.id);
-      const ready = ensureDirGitReady(d);
-      if (!ready.ok) return res.status(400).json({ error: `无法将目录初始化为 git 仓库: ${ready.reason}` });
-    }
-  }
-  if (req.body.rolePrompt !== undefined) {
-    const rp = (req.body.rolePrompt == null ? '' : String(req.body.rolePrompt));
-    if (rp.length > 40000) return res.status(400).json({ error: 'rolePrompt too long (max 40000)' });
-    // Directory-level default role; sessions without their own role inherit it.
-    d.rolePrompt = rp.trim() || null;
-  }
-  saveDirectories();
-  res.json(d);
-});
-
-app.delete('/api/directories/:id', (req, res) => {
-  const d = directories.get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'directory not found' });
-  // Refuse to delete a non-empty directory unless ?force=1 is passed
-  const owned = [...persistedSessions.values()].filter(s => s.dirId === d.id);
-  if (owned.length > 0 && req.query.force !== '1') {
-    return res.status(400).json({ error: `directory has ${owned.length} session(s); pass ?force=1 to delete them too`, sessions: owned.map(s => s.id) });
-  }
-  // Kill + remove all sessions under this dir
-  for (const s of owned) {
-    const active = sessions.get(s.id);
-    if (active) { tmuxKillSession(s.id); sessions.delete(s.id); }
-    const chat = chatSessions.get(s.id);
-    if (chat) {
-      if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
-      chatStream.close(s.id);
-      chatSessions.delete(s.id);
-    }
-    waitInjector.cancelForSession(s.id);
-    share.removeForSession(s.id);
-    if (s.worktreePath && s.branch) gitWorktreeRemove(d.path, s.worktreePath, s.branch);
-    teardownTriggers(s.id);
-    purgeNotesForSession(s.id);
-    persistedSessions.delete(s.id);
-    invalidSessions.delete(s.id);
-    workspaceStatus.delete(s.id);
-  }
-  directories.delete(d.id);
-  saveDirectories();
-  savePersistedSessions();
-  res.json({ ok: true, removedSessions: owned.length });
-});
+// ── Directory REST API (src/directory: controller / service / repository) ──
+// Routes: GET /api/fs/list · GET|POST /api/directories · PATCH|DELETE
+// /api/directories/:id · POST :id/push · GET :id/uncommitted · POST :id/commit.
+// Handlers live in src/directory/controller.js, business rules in service.js,
+// persistence in repository.js — composed next to the persistence bootstrap.
+app.use(directoryModule.router);
 
 // ── Memo: per-directory <dir.path>/multicc.memo.md (markdown, user-owned) ──
 const MEMO_FILENAME = 'multicc.memo.md';
