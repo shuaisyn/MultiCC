@@ -6062,15 +6062,21 @@ I = 异常中断（任务没做完就被打断，需要继续）
         setSessionSummary(sid, `等待交互：${goal}`);
         console.log(`[multicc/reconcile] ${sid}: waiting`);
       } else {
-        // I = interrupted → resume with a gentle prompt.
+        // I = interrupted. Only auto-inject a resume prompt if we actually know
+        // the goal — otherwise the injected message itself becomes the session's
+        // summary/goal (garbage). No-goal sessions just get a notify.
         setTaskState(sid, { lifecycle: 'interrupted' });
-        setSessionSummary(sid, `异常中断：${goal}`);
-        const resumeMsg = `服务刚重启，检测到任务「${goal}」可能未完成就中断了。请确认当前状态：是已完成？还是需要继续？如果需要继续，请接着做。`;
-        try { waitInjector.safeInject(sid, resumeMsg); } catch (_) {}
+        const hasGoal = !!(ts.goal && ts.goal.trim());
+        setSessionSummary(sid, hasGoal ? `异常中断：${goal}` : `异常中断（未命名任务）`);
+        if (hasGoal) {
+          const resumeMsg = `服务刚重启，检测到任务「${goal}」可能未完成就中断了。请确认当前状态：是已完成？还是需要继续？如果需要继续，请接着做。`;
+          try { waitInjector.safeInject(sid, resumeMsg); } catch (_) {}
+        }
         const dirId = p.dirId;
-        if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId: sid, state: 'waiting', message: `任务「${goal}」疑似中断，已发送续接提示` });
-        triggerPush(sid, 'waiting', `[Chat] 任务「${goal}」疑似中断，已自动续接`);
-        console.log(`[multicc/reconcile] ${sid}: interrupted → resumed`);
+        const nudge = hasGoal ? `任务「${goal}」疑似中断，已发送续接提示` : `某任务疑似中断（无目标记录），请人工确认`;
+        if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId: sid, state: 'waiting', message: nudge });
+        triggerPush(sid, 'waiting', `[Chat] ${nudge}`);
+        console.log(`[multicc/reconcile] ${sid}: interrupted${hasGoal ? ' → resumed' : ' (no goal, notify only)'}`);
       }
     })
     .catch(e => console.warn(`[multicc/reconcile] ${sid} failed: ${e.message}`));
@@ -6658,7 +6664,15 @@ ${(userText || '').slice(0, 500)}
       if (!cs.currentTask || cs.currentTask.turnSeq !== turnSeq) return;
       let goal = (result && result.text || '').trim().replace(/^[\s"'']+|[\s"'']+$/g, '');
       goal = goal.replace(/^(任务目标[:：]|目标[:：])\s*/, '');
-      if (goal && goal !== '-' && goal !== '—' && goal.length <= 40) {
+      // Reject garbage goals: API errors, auto-recovery banners, bare status
+      // text that the aux AI sometimes echoes when the recent context is full
+      // of errors rather than real task content. Keep the brief fallback.
+      const _g = goal.toLowerCase();
+      const _garbage = /api\s*error|insufficient\s*balance|自动恢复|异常中断|claude exited|status[_= ]?5\d\d|\b40[0-9]\b|\b50[0-9]\b/.test(_g)
+        || /\berror\b/.test(_g) && goal.length < 12;
+      if (_garbage) {
+        console.warn(`[multicc/aux] Task goal for ${sessionName} rejected as garbage: ${goal}`);
+      } else if (goal && goal !== '-' && goal !== '—' && goal.length <= 40) {
         cs.currentTask.goal = goal;
         setTaskState(sessionName, { goal });  // persist refined goal for restart reconcile
         if (cs.isStreaming) {
