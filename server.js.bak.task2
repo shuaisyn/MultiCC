@@ -5981,87 +5981,6 @@ function briefTaskDescription(text) {
   return brief || '新任务';
 }
 
-// ── Closed-loop task model (step 2) ─────────────────────────────────────────
-// Replaces the bare currentTaskName string with a currentTask object carrying
-// a stable, model-generated goal + phase + steps. The goal is a noun-phrase
-// describing the closed-loop task (e.g. "把发送按钮改成主色调蓝并适配深色模式"),
-// NOT a truncated copy of the user's latest one-shot message. Falls back to
-// briefTaskDescription synchronously so the first frame is zero-latency, then
-// refines asynchronously via the aux AI.
-function newCurrentTask(goal) {
-  return {
-    goal: goal || '新任务',
-    startedAt: Date.now(),
-    phase: 'implementing',     // planning | implementing | verifying | wrapping | done
-    steps: [],
-    pendingDispatches: [],     // dispatched worker runs awaiting回流 (see dispatch hooks)
-    turnSeq: 0,                // bumped each turn that belongs to this task
-  };
-}
-
-// Ask the aux AI for a stable, noun-phrase closed-loop goal based on the recent
-// user messages + the current one. Fire-and-forget; on resolve, if the session
-// is still on the same turn, swap goal in. Best-effort: any failure leaves the
-// synchronous briefTaskDescription fallback in place.
-function generateTaskGoal(cs, sessionName, userText) {
-  if (!cs || !cs.currentTask) return;
-  const recentUserMsgs = getRecentUserMessages(sessionName, 3);
-  const ctx = recentUserMsgs.length > 0
-    ? recentUserMsgs.map((m, i) => `${i + 1}. ${m.slice(0, 300)}`).join('\n')
-    : '（无历史）';
-  const priorGoal = cs.currentTask.goal || '';
-  const prompt = `你是任务目标提炼器。根据用户最近几轮消息，提炼出「当前正在做的这个闭环任务的目标」，要求：
-- 用不超过 25 个汉字的名词性短语描述任务目标（如"把发送按钮改成主色调蓝并适配深色模式""给目录卡片加事件时间线并默认折叠"），动词或名词开头均可，但必须是一个完整任务目标，不是某个具体动作
-- 如果最近几轮消息围绕的是同一个任务，请保持与已有目标一致（可微调措辞，但不要换任务）
-- 不要输出"修改CSS样式""运行测试"这种脱离目标的动作片段
-- 只输出目标这一句，不要解释、不要前缀、不要引号
-
-已有目标（若有，请保持一致）：${priorGoal || '（无）'}
-
-最近几轮用户消息：
-${ctx}
-
-当前这轮用户消息：
-${(userText || '').slice(0, 500)}
-
-请直接输出任务目标：`;
-  const turnSeq = cs.currentTask.turnSeq;
-  auxQueue.enqueue({ type: 'task_goal', prompt, meta: { sessionName } })
-    .then(result => {
-      // Only accept if the session hasn't moved on to a new task/turn.
-      if (!cs.currentTask || cs.currentTask.turnSeq !== turnSeq) return;
-      let goal = (result && result.text || '').trim().replace(/^[\s"'']+|[\s"'']+$/g, '');
-      goal = goal.replace(/^(任务目标[:：]|目标[:：])\s*/, '');
-      if (goal && goal !== '-' && goal !== '—' && goal.length <= 30) {
-        cs.currentTask.goal = goal;
-        if (cs.isStreaming) {
-          emitRunningNotify(sessionName, `处理中：${goal}`);
-        }
-        console.log(`[multicc/aux] Task goal for ${sessionName}: ${goal}`);
-      }
-    })
-    .catch(e => console.warn(`[multicc/aux] Task goal ${sessionName} failed: ${e.message}`));
-}
-
-// Ensure cs.currentTask exists for this turn. Continuation heuristic: prior task
-// exists, started < 10 min ago, not done → bump turnSeq, keep the goal (the async
-// generateTaskGoal prompt already asks the model to keep the goal stable across
-// turns of the same task, giving continuity cheaply without a per-turn model call
-// to decide continuity). Otherwise start a fresh task object with a synchronous
-// fallback goal that generateTaskGoal will refine async.
-function ensureCurrentTask(cs, sessionName, userText) {
-  if (!cs) return;
-  const now = Date.now();
-  const prev = cs.currentTask;
-  if (prev && prev.phase !== 'done' && prev.startedAt && (now - prev.startedAt) < 10 * 60 * 1000) {
-    prev.turnSeq = (prev.turnSeq || 0) + 1;
-    return prev;
-  }
-  cs.currentTask = newCurrentTask(briefTaskDescription(userText));
-  cs.currentTask.turnSeq = 1;
-  return cs.currentTask;
-}
-
 // Get recent user messages from chat history for task summary context.
 // Returns up to `maxCount` most recent user messages (oldest first).
 function getRecentUserMessages(sessionName, maxCount = 3) {
@@ -6146,7 +6065,7 @@ function startProgressSummary(cs, sessionName) {
     }
 
     const tail = text.slice(-1500);
-    const taskName = (cs.currentTask && cs.currentTask.goal) || cs.currentTaskName || '未知任务';
+    const taskName = cs.currentTaskName || '未知任务';
     auxQueue.enqueue({
       type: 'progress_summary',
       prompt: `当前闭环任务目标：「${taskName}」
@@ -6163,18 +6082,9 @@ ${tail}`,
     }).then(result => {
       if (result.cancelled) return;
       if (!cs.isStreaming) return; // turn finished while we were asking
-      const subAction = (result.text || '').trim().replace(/^["'']|["'']$/g, '').slice(0, 40);
-      // Parse the phase prefix (e.g. "实现中：...") back into currentTask.phase
-      // so the closed-loop task object tracks where we are, not just the latest verb.
-      if (cs.currentTask) {
-        const pm = subAction.match(/^(规划中|实现中|验证中|收尾中)/);
-        if (pm) {
-          const phaseMap = { '规划中': 'planning', '实现中': 'implementing', '验证中': 'verifying', '收尾中': 'wrapping' };
-          cs.currentTask.phase = phaseMap[pm[1]] || cs.currentTask.phase;
-        }
-      }
+      const subAction = (result.text || '').trim().replace(/^["'"']|["'"']$/g, '').slice(0, 40);
       if (subAction && subAction !== '-' && subAction !== '—') {
-        const taskName = (cs.currentTask && cs.currentTask.goal) || cs.currentTaskName || '新任务';
+        const taskName = cs.currentTaskName || '新任务';
         const label = `处理中：${taskName} · ${subAction}`;
         emitRunningNotify(sessionName, label);
         console.log(`[multicc/aux] Progress summary for ${sessionName}: ${label}`);
@@ -6651,12 +6561,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // Reset accumulators
   cs.currentAssistantText = '';
   cs.currentUserText = text;          // store user message for summary context
-  // Closed-loop task model: ensure a currentTask object for this turn. The goal
-  // starts as a synchronous brief fallback (zero-latency first frame) and is
-  // refined async by generateTaskGoal into a stable noun-phrase task goal.
-  ensureCurrentTask(cs, sessionName, text);
-  generateTaskGoal(cs, sessionName, text);
-  cs.currentTaskName = cs.currentTask ? cs.currentTask.goal : briefTaskDescription(text); // compat for legacy callers
+  cs.currentTaskName = briefTaskDescription(text); // stable task name across turn
   cs.currentToolCalls = [];
   cs.currentCost = null;
   cs.isStreaming = true;
@@ -6672,7 +6577,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // shows "what's running" the instant the turn begins — no AI call, zero
   // latency. The in-progress aux-AI summary will refine it ~45s later.
   cancelProgressSummary(cs);
-  emitRunningNotify(sessionName, `处理中：${(cs.currentTask && cs.currentTask.goal) || cs.currentTaskName || '新任务'}`);
+  emitRunningNotify(sessionName, `处理中：${cs.currentTaskName}`);
   startProgressSummary(cs, sessionName);
   // Marks this turn as initiated by an auto-trigger, so post-turn triggers
   // don't recurse on their own output (see firePostTurnTriggers).
