@@ -264,14 +264,19 @@ class ChatProvider extends ChangeNotifier {
         // clients (and is a no-op if the id is already gone).
         final p = evt.payload as Map<String, dynamic>;
         final id = p['id']?.toString();
-        if (id != null && id.isNotEmpty) {
-          final before = _messages.length;
-          _messages.removeWhere((m) => m.id == id);
-          if (_messages.length != before) notifyListeners();
-        }
+        if (id != null && id.isNotEmpty) removeMessageById(id);
         break;
       }
     }
+  }
+
+  /// Remove a message from the local transcript by its server-side history id.
+  /// Idempotent — used both by the initiating UI (immediate feedback) and the
+  /// chat_msg_deleted WS broadcast (cross-client sync).
+  void removeMessageById(String id) {
+    final before = _messages.length;
+    _messages.removeWhere((m) => m.id == id);
+    if (_messages.length != before) notifyListeners();
   }
 
   void _onMessageStart() {
