@@ -5919,6 +5919,68 @@ function setTaskState(sessionId, patch, opts = {}) {
   return next;
 }
 
+// ── Liveness probe + nudge (⑤, turn-ended branch) ──────────────────────────
+// Every 60s we ask each chat session: "is a task that should be running actually
+// stuck?" The trigger is the conjunction of:
+//   ① the turn has ended (cs.isStreaming === false)
+//   ② lifecycle is still 'running' or 'interrupted' (never cleanly closed)
+//   ③ progressSig has not changed for 2 consecutive probes (2 minutes) — i.e.
+//     nothing new has been summarized since the last probe
+// When all three hold and the nudge cooldown (5 min) has elapsed, we inject a
+// gentle "is this still going?" message into the session and notify the user.
+// We deliberately do NOT nudge sessions whose turn is still streaming — a long
+// build/test naturally produces no new summary for a while, and nudging would
+// interrupt real work.
+const LIVENESS_PROBE_INTERVAL_MS = 60 * 1000;
+const LIVENESS_STALE_PROBES = 2;          // 2 consecutive no-progress probes
+const LIVENESS_NUDGE_COOLDOWN_MS = 5 * 60 * 1000;
+
+function livenessProbe() {
+  const now = Date.now();
+  for (const [sessionName, cs] of chatSessions) {
+    try {
+      const persisted = persistedSessions.get(sessionName);
+      if (!persisted || persisted.type === 'aux' || persisted.type === 'gateway') continue;
+      const st = getTaskState(persisted);
+      // Only probe tasks that look in-flight but whose turn has ended.
+      if (st.lifecycle !== 'running' && st.lifecycle !== 'interrupted') continue;
+      if (cs.isStreaming) continue;                       // ① turn still running → skip
+      // ③ progressSig stall tracking.
+      const curSig = st.progressSig || '';
+      const lastProbeSig = st.lastProbeSig || '';
+      let staleProbes = st.staleProbes || 0;
+      if (curSig && curSig === lastProbeSig && curSig === (st.lastSummary ? progressSigOf(st.lastSummary) : curSig)) {
+        staleProbes = (st.lastProbeSigAt && (now - st.lastProbeSigAt) >= LIVENESS_PROBE_INTERVAL_MS) ? staleProbes + 1 : staleProbes;
+      } else {
+        staleProbes = 0;
+      }
+      const patch = { lastProbeSig: curSig, lastProbeSigAt: now, staleProbes };
+      // ② + ③: needs staleProbes >= threshold AND never-cleanly-closed lifecycle.
+      const cooled = st.lastNudgeAt && (now - st.lastNudgeAt) < LIVENESS_NUDGE_COOLDOWN_MS;
+      if (staleProbes >= LIVENESS_STALE_PROBES && !cooled) {
+        const goal = st.goal || '当前任务';
+        const stallMin = Math.round((now - (st.lastSummaryAt || st.lastTurnEndedAt || now)) / 60000);
+        const nudgeMsg = `检测到任务「${goal}」似乎停滞了（已约 ${stallMin} 分钟无进展且回合已结束）。请确认当前状态：是已完成？还是在等待什么？还是遇到了卡点需要继续？`;
+        patch.lastNudgeAt = now;
+        patch.staleProbes = 0;  // reset after nudging; next stall cycle starts fresh
+        setTaskState(sessionName, patch, { save: false });
+        savePersistedSessions();
+        // Inject the nudge as a new turn (busy-safe via waitInjector).
+        try { waitInjector.safeInject(sessionName, nudgeMsg); } catch (_) {}
+        // Notify the user too.
+        const dirId = persisted.dirId;
+        if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId: sessionName, state: 'waiting', message: `任务「${goal}」停滞，已自动催更` });
+        triggerPush(sessionName, 'waiting', `[Chat] 任务「${goal}」停滞，已自动催更`);
+        console.log(`[multicc/liveness] nudged ${sessionName}: goal="${goal}", stalled ${stallMin}min`);
+      } else {
+        setTaskState(sessionName, patch, { save: false });
+      }
+    } catch (e) {
+      console.warn(`[multicc/liveness] probe ${sessionName} failed: ${e.message}`);
+    }
+  }
+}
+
 // Store an aux-AI task summary for a session and push it to the workspace board.
 function setSessionSummary(sessionId, summary) {
   if (!summary) return;
@@ -8678,5 +8740,7 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
     reconcileAllTriggers();
     artifacts.cleanup();
     setInterval(() => artifacts.cleanup(), 6 * 3600 * 1000).unref();
+    // Liveness probe (⑤): nudge sessions whose task stalled after the turn ended.
+    setInterval(() => livenessProbe(), LIVENESS_PROBE_INTERVAL_MS).unref();
   });
 })();
