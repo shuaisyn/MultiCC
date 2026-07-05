@@ -376,6 +376,26 @@ class SessionService {
     }
   }
 
+  /// Fork a session at [atMessageId] (or at the latest message if null).
+  /// Returns the new session id. Mirrors the web chat's per-message fork.
+  Future<String> forkSession(String sessionId, {String? atMessageId}) async {
+    final body = <String, dynamic>{};
+    if (atMessageId != null && atMessageId.isNotEmpty) body['atMessageId'] = atMessageId;
+    final res = await http
+        .post(
+          Uri.parse(_url('/api/sessions/$sessionId/fork')),
+          headers: _headers,
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode >= 400) {
+      final err = _tryParseError(res.body);
+      throw Exception(err ?? '${res.statusCode}');
+    }
+    final d = jsonDecode(res.body) as Map<String, dynamic>;
+    return d['sessionId'] as String;
+  }
+
   Future<Map<String, dynamic>> createShare(
     String id, {
     required String access,

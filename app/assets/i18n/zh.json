@@ -198,6 +198,11 @@
   "msgDeleteConfirm": "仅从聊天记录移除，不可恢复，不影响模型上下文（模型可能仍记得内容）。",
   "msgDeleted": "已删除该消息",
   "msgDeleteFailed": "删除失败：{error}",
+  "msgForkAction": "从此处分叉会话",
+  "msgForkTitle": "分叉会话",
+  "msgForkConfirm": "新会话将继承到该点的对话上下文与会话记忆，从该点继续。原会话不受影响。",
+  "msgForked": "已分叉为新会话 {id}（在会话列表可见）",
+  "msgForkFailed": "分叉失败：{error}",
   "msgCopyAction": "复制内容",
   "msgCopied": "已复制",
 

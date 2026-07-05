@@ -75,6 +75,13 @@ Future<void> _showMessageActions(BuildContext context, ChatMessage message) asyn
                   style: const TextStyle(color: Color(0xFFf85149))),
               onTap: () => Navigator.pop(ctx, 'delete'),
             ),
+          if (canDelete)
+            ListTile(
+              leading: const Icon(Icons.call_split, color: Color(0xFF39c5cf)),
+              title: Text(I18n.of('msgForkAction'),
+                  style: const TextStyle(color: Color(0xFF39c5cf))),
+              onTap: () => Navigator.pop(ctx, 'fork'),
+            ),
         ],
       ),
     ),
@@ -84,6 +91,8 @@ Future<void> _showMessageActions(BuildContext context, ChatMessage message) asyn
     _copyMessage(context, message.content);
   } else if (action == 'delete') {
     await _confirmDeleteMessage(context, message);
+  } else if (action == 'fork') {
+    await _forkFromMessage(context, message);
   }
 }
 
@@ -147,6 +156,54 @@ void _copyMessage(BuildContext context, String text) {
       behavior: SnackBarBehavior.floating,
     ),
   );
+}
+
+/// Fork the current session at [message] — creates a new session replaying the
+/// transcript up to (and including) this message, inheriting provider/model
+/// and copying the source's distilled memory. Mirrors the web chat's per-message
+/// fork button. The new session appears in the session list (pushed via the
+/// session_created WS event); the user opens it from there.
+Future<void> _forkFromMessage(BuildContext context, ChatMessage message) async {
+  final msgId = message.id;
+  if (msgId == null || msgId.isEmpty) return;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(I18n.of('msgForkTitle')),
+      content: Text(I18n.of('msgForkConfirm')),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: Text(I18n.of('cancel')),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: Text(I18n.of('msgForkAction'),
+              style: const TextStyle(color: Color(0xFF39c5cf))),
+        ),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  final provider = context.read<ChatProvider>();
+  final settings = SettingsService.current;
+  if (settings == null) return;
+  try {
+    final newId = await SessionService(settings: settings)
+        .forkSession(provider.sessionId, atMessageId: msgId);
+    messenger.showSnackBar(SnackBar(
+      content: Text(I18n.of('msgForked', {'id': newId})),
+      duration: const Duration(milliseconds: 2400),
+      behavior: SnackBarBehavior.floating,
+    ));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+      content: Text(I18n.of('msgForkFailed', {'error': '$e'})),
+      duration: const Duration(milliseconds: 2200),
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
 }
 
 class MessageBubble extends StatelessWidget {
