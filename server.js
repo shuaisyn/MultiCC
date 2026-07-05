@@ -5552,8 +5552,18 @@ const workspaceClients = new Map();  // dirId → Set<ws>
 const sessionSummaries = new Map();  // sessionId → { summary, ts } — aux-AI "最近任务" one-liner
 // Hydrate from persisted summaries so the dashboard shows each session's last
 // known "上下文特点" immediately after a restart (was lost when memory-only).
+// Also mark any task that was 'running' right before the restart as
+// 'interrupted' — its turn never ended cleanly, so ② reconcile will re-judge it
+// (and ⑤ may nudge it). This stops the board from falsely showing idle for a
+// task that was actually mid-flight when the server died.
 for (const [sid, p] of persistedSessions) {
-  if (p && p.summary) sessionSummaries.set(sid, { summary: p.summary, ts: p.summaryTs || Date.now() });
+  if (!p) continue;
+  if (p.summary) sessionSummaries.set(sid, { summary: p.summary, ts: p.summaryTs || Date.now() });
+  const st = p.taskState;
+  if (st && st.lifecycle === 'running') {
+    st.lifecycle = 'interrupted';
+    // persistedSessions is about to be saved anyway on first change; mark dirty.
+  }
 }
 
 // Parse an aux-AI intent_classify reply: line 1 = state letter (C/W),
