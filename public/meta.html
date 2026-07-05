@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multicc · 舰队指挥台</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif;
+         background: #0d1117; color: #c9d1d9; }
+  header { padding: 12px 16px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: #8b949e; font-size: 12px; }
+  .ws-state { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid #30363d; }
+  .ws-on { color: #3fb950; border-color: #238636; }
+  .ws-off { color: #f85149; border-color: #da3633; }
+  main { display: grid; grid-template-columns: 1fr 360px; gap: 0; height: calc(100vh - 49px); }
+  .fleet { overflow-y: auto; padding: 8px; }
+  .dir-group { margin-bottom: 12px; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; }
+  .dir-head { padding: 8px 12px; background: #161b22; font-size: 12px; color: #8b949e;
+              display: flex; justify-content: space-between; cursor: pointer; }
+  .dir-head .dir-label { color: #e7eaee; font-weight: 600; }
+  .sess-list { padding: 4px 0; }
+  .sess-row { display: grid; grid-template-columns: 8px 1fr auto auto; gap: 8px; align-items: center;
+              padding: 6px 12px; border-bottom: 1px solid #161b22; cursor: pointer; }
+  .sess-row:hover { background: #161b22; }
+  .sess-row.selected { background: #1f2937; }
+  .sess-dot { width: 8px; height: 8px; border-radius: 50%; background: #484f58; }
+  .sess-dot.thinking, .sess-dot.editing, .sess-dot.running { background: #d29922; box-shadow: 0 0 6px #d29922; }
+  .sess-dot.idle { background: #484f58; }
+  .sess-dot.error { background: #f85149; }
+  .sess-dot.waiting { background: #58a6ff; }
+  .sess-name { font-size: 13px; }
+  .sess-meta { font-size: 11px; color: #8b949e; }
+  .sess-cli { font-size: 10px; padding: 1px 5px; border-radius: 8px; background: #21262d; color: #8b949e; }
+  aside { border-left: 1px solid #21262d; padding: 12px; overflow-y: auto; }
+  aside h2 { font-size: 13px; margin: 0 0 8px; color: #8b949e; font-weight: 600; }
+  .sel-info { padding: 8px 10px; background: #161b22; border-radius: 6px; margin-bottom: 12px; font-size: 12px; }
+  .sel-info .sel-name { color: #e7eaee; font-weight: 600; }
+  textarea { width: 100%; height: 80px; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+             border-radius: 6px; padding: 8px; font: inherit; resize: vertical; }
+  button { background: #238636; border: 1px solid #2ea043; color: #fff; border-radius: 6px;
+           padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #2ea043; }
+  button:disabled { opacity: .5; cursor: default; }
+  .btn-sec { background: #21262d; border-color: #30363d; color: #c9d1d9; }
+  .events { font-size: 11px; max-height: 200px; overflow-y: auto; margin-top: 8px;
+            border-top: 1px solid #21262d; padding-top: 8px; }
+  .ev { padding: 2px 0; color: #8b949e; }
+  .ev .ev-ts { color: #6e7681; }
+  .msg { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin-top: 6px; }
+  .msg.ok { background: #0d2818; color: #3fb950; }
+  .msg.err { background: #2d0d0d; color: #f85149; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🫡 舰队指挥台</h1>
+  <span class="sub" id="fleet-stat">—</span>
+  <span class="ws-state" id="ws-state">连接中…</span>
+</header>
+<main>
+  <section class="fleet" id="fleet"></section>
+  <aside>
+    <h2>向会话派活 / 发消息</h2>
+    <div class="sel-info" id="sel-info">未选择会话。点击左侧任一会话。</div>
+    <textarea id="task" placeholder="向选中的会话派一道自包含任务…&#10;例：检查 src/auth.js 的 token 刷新逻辑，报告风险点"></textarea>
+    <div style="margin-top:8px; display:flex; gap:8px;">
+      <button id="dispatch-btn" disabled>📤 派活 (dispatch)</button>
+      <button class="btn-sec" id="msg-btn" disabled>💬 发消息</button>
+      <span class="msg" id="result"></span>
+    </div>
+    <div class="events" id="events"><div style="color:#6e7681">实时事件流…</div></div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, selected = null;
+const dirMap = new Map();      // dirId → {label, sessions: Map, events: []}
+const SESSION_SOURCE_ID = new URLSearchParams(location.search).get('from') || '';
+
+function connect() {
+  const url = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws/meta';
+  ws = new WebSocket(url);
+  ws.onopen = () => { $('ws-state').textContent = '已连接'; $('ws-state').className = 'ws-state ws-on'; };
+  ws.onclose = () => { $('ws-state').textContent = '断开'; $('ws-state').className = 'ws-state ws-off';
+                       setTimeout(connect, 2000); };
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'meta_snapshot') { ingestFleet(d.fleet); render(); }
+    else { ingestEvent(d); render(); pushEvent(d); }
+  };
+}
+
+function ingestFleet(fleet) {
+  for (const f of fleet) {
+    let dir = dirMap.get(f.dirId) || { label: f.dirLabel, sessions: new Map(), events: [] };
+    dir.label = f.dirLabel || dir.label;
+    for (const s of (f.sessions || [])) dir.sessions.set(s.id, s);
+    for (const ev of (f.events || []).reverse()) if (!dir.events.find(x=>x.ts===ev.ts&&x.type===ev.type)) dir.events.unshift(ev);
+    dirMap.set(f.dirId, dir);
+  }
+}
+function ingestEvent(d) {
+  // workspace events carry dirId (stamped by metaBroadcast wrapper)
+  const dirId = d.dirId;
+  if (!dirId) return;
+  const dir = dirMap.get(dirId) || { label: null, sessions: new Map(), events: [] };
+  if (d.type === 'event') {
+    const ev = d.event;
+    dir.events.unshift(ev);
+    if (dir.events.length > 50) dir.events.pop();
+    // update session status from merge_status / status events
+    if (ev.sessionId && dir.sessions.has(ev.sessionId) && ev.type === 'session_status') {
+      Object.assign(dir.sessions.get(ev.sessionId), ev.patch || {});
+    }
+  } else if (d.type === 'snapshot') {
+    // per-dir snapshot refresh
+    for (const s of (d.sessions||[])) dir.sessions.set(s.id, s);
+  }
+  dirMap.set(dirId, dir);
+}
+function pushEvent(d) {
+  const ev = d.event || d;
+  const line = document.createElement('div'); line.className = 'ev';
+  const ts = new Date(ev.ts || Date.now()).toLocaleTimeString();
+  line.innerHTML = `<span class="ev-ts">${ts}</span> ${ev.type || d.type} ${ev.sessionId || ''}`;
+  $('events').prepend(line);
+  while ($('events').children.length > 30) $('events').lastChild.remove();
+}
+
+function statusOf(s) { return s.status || s.mergeState?.status || (s.active ? 'idle' : 'idle'); }
+function render() {
+  const fleet = $('fleet'); fleet.innerHTML = '';
+  let totalSess = 0, totalDirs = dirMap.size;
+  for (const [dirId, dir] of dirMap) {
+    const g = document.createElement('div'); g.className = 'dir-group';
+    const head = document.createElement('div'); head.className = 'dir-head';
+    head.innerHTML = `<span><span class="dir-label">${dir.label || dirId.slice(0,8)}</span> · ${dir.sessions.size} 舰</span><span>${dirId.slice(0,8)}</span>`;
+    g.appendChild(head);
+    const list = document.createElement('div'); list.className = 'sess-list';
+    for (const [sid, s] of dir.sessions) {
+      totalSess++;
+      const st = statusOf(s);
+      const row = document.createElement('div'); row.className = 'sess-row' + (selected===sid?' selected':'');
+      row.innerHTML = `
+        <span class="sess-dot ${st}"></span>
+        <span class="sess-name">${s.label || sid}</span>
+        <span class="sess-meta">${st}</span>
+        <span class="sess-cli">${s.cli||'?'}</span>`;
+      row.onclick = () => { selected = sid; render(); updateAside(); };
+      list.appendChild(row);
+    }
+    g.appendChild(list);
+    fleet.appendChild(g);
+  }
+  $('fleet-stat').textContent = `${totalDirs} 舰队 · ${totalSess} 会话`;
+}
+function updateAside() {
+  const info = $('sel-info');
+  if (!selected) { info.textContent = '未选择会话。'; $('dispatch-btn').disabled = $('msg-btn').disabled = true; return; }
+  let s = null, dirLabel = null;
+  for (const [_, dir] of dirMap) { if (dir.sessions.has(selected)) { s = dir.sessions.get(selected); dirLabel = dir.label; break; } }
+  if (!s) { info.textContent = '会话已不在 fleet。'; return; }
+  info.innerHTML = `→ <span class="sel-name">${s.label || selected}</span><br>
+    <span style="color:#8b949e">id: ${selected} · ${s.cli||'?'} · ${dirLabel||'?'}</span>`;
+  $('dispatch-btn').disabled = $('msg-btn').disabled = false;
+}
+async function postAction(path, body, okMsg) {
+  if (!selected) return;
+  $('dispatch-btn').disabled = $('msg-btn').disabled = true;
+  $('result').textContent = '…'; $('result').className = 'msg';
+  try {
+    const from = SESSION_SOURCE_ID || selected;  // dispatch needs a "from" session
+    const r = await fetch(`/api/sessions/${encodeURIComponent(from)}/${path}`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    $('result').textContent = okMsg || (d.note || '已发送'); $('result').className = 'msg ok';
+  } catch (e) { $('result').textContent = e.message; $('result').className = 'msg err'; }
+  finally { updateAside(); }
+}
+$('dispatch-btn').onclick = () => {
+  const msg = $('task').value.trim(); if (!msg) { $('result').textContent='请输入任务'; $('result').className='msg err'; return; }
+  postAction('dispatch', { target: selected, message: msg }, '任务已派发，结果将回流到本会话');
+};
+$('msg-btn').onclick = () => {
+  const msg = $('task').value.trim(); if (!msg) return;
+  postAction('notes', { toSessionId: selected, body: msg }, '留言已送达');
+};
+connect();
+</script>
+</body>
+</html>
