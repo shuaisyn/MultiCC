@@ -2881,6 +2881,248 @@ app.post('/api/sessions/:id/fork', (req, res) => {
              forkedFrom: forkMeta.forkedFrom, replayedMessages: sliced.length });
 });
 
+// ── Cross-machine handoff (Happier-parity: move a live session to another machine) ──
+// Export an encrypted bundle carrying: session metadata, chat history, the
+// session's private memory files, the provider state (env, and for codex the
+// auth.json/config.toml files), and a `git bundle` of the session's worktree
+// branch. The bundle is AES-256-GCM encrypted with a passphrase-derived key
+// (PBKDF2), so it is safe to move over email/syncthing/cloud. The import side
+// (POST /api/sessions/import) rebuilds the session on another machine.
+//
+// Limitation: the target machine must already have (or create) a directory
+// backed by the same git repo, so `git fetch` from the bundle can land the
+// branch and `git worktree add` can check it out. multicc is single-machine by
+// design; this is the file-shuffle equivalent of Happier's direct_peer handoff.
+function bundleEncrypt(passphrase, plaintextBuf) {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.pbkdf2Sync(passphrase, salt, 200000, 32, 'sha256');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(plaintextBuf), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return { salt: salt.toString('base64'), iv: iv.toString('base64'),
+           ct: ct.toString('base64'), tag: tag.toString('base64') };
+}
+
+function bundleDecrypt(passphrase, enc) {
+  const salt = Buffer.from(enc.salt, 'base64');
+  const key = crypto.pbkdf2Sync(passphrase, salt, 200000, 32, 'sha256');
+  const iv = Buffer.from(enc.iv, 'base64');
+  const tag = Buffer.from(enc.tag, 'base64');
+  const ct = Buffer.from(enc.ct, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]);
+}
+
+app.get('/api/sessions/:id/bundle', (req, res) => {
+  const s = persistedSessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'session not found' });
+  if (s.type === 'aux' || s.type === 'gateway') {
+    return res.status(400).json({ error: 'system session cannot be bundled' });
+  }
+  const passphrase = req.query.passphrase;
+  if (!passphrase || passphrase.length < 6) {
+    return res.status(400).json({ error: 'passphrase required (≥6 chars) — use ?passphrase=...' });
+  }
+  try {
+    // 1) Messages + memory files.
+    const messages = loadChatHistory(s.id);
+    const memoryFiles = {};
+    try {
+      const memDir = sessionMemoryDir(s);
+      if (fs.existsSync(memDir)) {
+        for (const entry of fs.readdirSync(memDir, { withFileTypes: true })) {
+          if (entry.isFile()) {
+            const rel = entry.name;
+            const abs = path.join(memDir, entry.name);
+            memoryFiles[rel] = fs.readFileSync(abs, 'utf8');
+          }
+        }
+      }
+    } catch (e) { /* best-effort */ }
+
+    // 2) Provider state: env (claude ANTHROPIC_*, codex CODEX_HOME pointer)
+    //    plus, for codex, the auth.json/config.toml file contents so the
+    //    target machine can reconstruct the codex home.
+    const provEnv = providers.resolveSpawnEnv(s);
+    const providerState = {
+      providerId: s.provider, providerName: provEnv.providerName,
+      env: provEnv.env || {}, codexFiles: {},
+    };
+    if (s.cli === 'codex' && s.provider) {
+      try {
+        const home = path.join(providers.CODEX_HOMES_DIR, s.provider);
+        if (fs.existsSync(home)) {
+          for (const fn of ['auth.json', 'config.toml']) {
+            const fp = path.join(home, fn);
+            if (fs.existsSync(fp)) {
+              providerState.codexFiles[fn] = fs.readFileSync(fp, 'utf8');
+            }
+          }
+        }
+      } catch (e) { /* best-effort */ }
+    }
+
+    // 3) git bundle of the session's worktree branch. `git bundle create`
+    //    writes a binary file; use execFileSync with Buffer encoding to avoid
+    //    corrupting it. Bundle the branch so the target can fetch+checkout.
+    let gitBundleB64 = null;
+    let gitBundleNote = null;
+    try {
+      if (s.worktreePath && s.branch && fs.existsSync(s.worktreePath)) {
+        const tmp = path.join(os.tmpdir(), `multicc-bundle-${s.id}-${Date.now()}.bundle`);
+        // Bundle all refs/heads/<branch> — includes the branch's full history
+        // reachable from its tip, which is what the target needs to recreate it.
+        execFileSync('git', ['-C', s.worktreePath, 'bundle', 'create', tmp,
+                             `--branch=${s.branch}`], { encoding: 'buffer', stdio: ['ignore', 'ignore', 'pipe'] });
+        gitBundleB64 = fs.readFileSync(tmp).toString('base64');
+        fs.unlinkSync(tmp);
+      } else {
+        gitBundleNote = 'no worktree/branch on disk — bundle has no git payload';
+      }
+    } catch (e) {
+      gitBundleNote = 'git bundle failed: ' + e.message;
+    }
+
+    // 4) Assemble + encrypt.
+    const payload = {
+      v: 1, exportedAt: new Date().toISOString(),
+      sessionMeta: {
+        id: s.id, cli: s.cli, kind: s.kind, label: s.label,
+        model: s.model, effort: s.effort, rolePrompt: s.rolePrompt || null,
+        branch: s.branch, worktreePath: s.worktreePath, dirId: s.dirId,
+        // dirId/branch/worktreePath are hints; target rebuilds its own paths.
+      },
+      messages, memoryFiles, providerState, gitBundleB64, gitBundleNote,
+    };
+    const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
+    const enc = bundleEncrypt(String(passphrase), plaintext);
+    appendEvent(s.dirId, 'session_bundled', `${s.label || s.id} → export`, s.id);
+    res.json({
+      ok: true, ...enc,
+      meta: { v: 1, sessionId: s.id, label: s.label, messages: messages.length,
+              hasGitBundle: !!gitBundleB64, hasMemory: Object.keys(memoryFiles).length,
+              note: gitBundleNote },
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'bundle failed: ' + e.message });
+  }
+});
+
+// Import an encrypted bundle produced by GET /api/sessions/:id/bundle and
+// rebuild the session on THIS machine. The target directory (dirId) must be a
+// git repo (we recreate the worktree from the bundle's git payload). Provider
+// credentials are NOT auto-injected: pass targetProviderId to attach the new
+// session to an already-configured provider on this machine, or omit to use the
+// default login. The bundle's provider env/codex files are kept in the session's
+// memory folder as `.handoff-provider.json` for reference/manual setup.
+app.post('/api/sessions/import', (req, res) => {
+  const b = req.body || {};
+  const { salt, iv, ct, tag } = b;
+  const passphrase = b.passphrase;
+  const dirId = b.dirId;
+  const targetProviderId = b.targetProviderId || undefined;
+  const labelOverride = (b.label || '').toString().trim() || null;
+  if (!salt || !iv || !ct || !tag) return res.status(400).json({ error: 'missing bundle fields (salt/iv/ct/tag)' });
+  if (!passphrase) return res.status(400).json({ error: 'passphrase required' });
+  const dir = directories.get(dirId);
+  if (!dir) return res.status(404).json({ error: 'target directory not found' });
+
+  let payload;
+  try {
+    const plaintext = bundleDecrypt(String(passphrase), { salt, iv, ct, tag });
+    payload = JSON.parse(plaintext.toString('utf8'));
+  } catch (e) {
+    return res.status(400).json({ error: 'decrypt failed (wrong passphrase or corrupt bundle): ' + e.message });
+  }
+  if (!payload || payload.v !== 1 || !payload.sessionMeta) {
+    return res.status(400).json({ error: 'unsupported bundle version' });
+  }
+  const meta = payload.sessionMeta;
+
+  // Create the session record — this also creates a fresh empty worktree from
+  // the dir's base branch. We then overlay the bundle's git content onto it.
+  const r = createSessionRecord({
+    dir, cli: meta.cli, kind: 'chat',
+    label: labelOverride || (meta.label ? `${meta.label} · imported` : null),
+    provider: targetProviderId === undefined ? undefined : (targetProviderId || ''),
+    model: meta.model, effort: meta.effort, rolePrompt: meta.rolePrompt,
+  });
+  if (!r.ok) return res.status(400).json({ error: r.error });
+  const newSid = r.id;
+  const newSession = r.session;
+
+  try {
+    // 1) Restore chat history.
+    if (Array.isArray(payload.messages)) {
+      chatHistories.set(newSid, payload.messages);
+      saveChatHistory(newSid);
+    }
+
+    // 2) Restore memory files.
+    if (payload.memoryFiles && typeof payload.memoryFiles === 'object') {
+      const memDir = sessionMemoryDir(newSession);
+      fs.mkdirSync(memDir, { recursive: true });
+      for (const [rel, content] of Object.entries(payload.memoryFiles)) {
+        const safe = String(rel).replace(/[^A-Za-z0-9._-]/g, '_');
+        if (!safe || safe === '.' || safe === '..') continue;
+        fs.writeFileSync(path.join(memDir, safe), content, 'utf8');
+      }
+      // Stash the source provider state for reference (creds the user must wire
+      // up on this machine — never auto-injected into the provider pool).
+      try {
+        fs.writeFileSync(path.join(memDir, '.handoff-provider.json'),
+          JSON.stringify({ sourceProviderId: meta.providerId || null,
+                           sourceProviderName: payload.providerState?.providerName || null,
+                           env: payload.providerState?.env || {},
+                           codexFiles: payload.providerState?.codexFiles || {} }, null, 2),
+          'utf8');
+      } catch (_) {}
+    }
+
+    // 3) Overlay the bundle's git content onto the freshly-created worktree.
+    //    Fetch the bundle's branch into a temp ref, then reset the worktree's
+    //    HEAD to it so the working tree matches the source session.
+    let gitRestored = false, gitNote = null;
+    if (payload.gitBundleB64 && newSession.worktreePath && newSession.branch) {
+      const tmpBundle = path.join(os.tmpdir(), `multicc-import-${newSid}-${Date.now()}.bundle`);
+      try {
+        fs.writeFileSync(tmpBundle, Buffer.from(payload.gitBundleB64, 'base64'));
+        const srcBranch = meta.branch || `multicc/${meta.id}`;
+        const incomingRef = `refs/heads/multicc-import-${newSid}`;
+        // Fetch the source branch from the bundle into a temp ref on the main repo.
+        execFileSync('git', ['-C', dir.path, 'fetch', '--no-tags', '-f', tmpBundle,
+                             `+${srcBranch}:${incomingRef}`],
+                     { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+        // Reset the worktree's branch onto the incoming commit so its working
+        // tree and history mirror the source session. Use -C worktreePath so git
+        // resolves the branch the worktree is on.
+        execFileSync('git', ['-C', newSession.worktreePath, 'reset', '--hard', incomingRef],
+                     { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+        // Drop the temp ref from the main repo (the worktree branch holds the history now).
+        try { execFileSync('git', ['-C', dir.path, 'update-ref', '-d', incomingRef],
+                           { encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] }); } catch (_) {}
+        gitRestored = true;
+      } catch (e) {
+        gitNote = 'git restore failed: ' + e.message;
+      } finally {
+        try { fs.unlinkSync(tmpBundle); } catch (_) {}
+      }
+    } else {
+      gitNote = payload.gitBundleNote || 'no git payload in bundle';
+    }
+
+    appendEvent(dir.id, 'session_imported', `${newSid} ← bundle`, newSid);
+    res.json({ ok: true, sessionId: newSid, session: newSession,
+               restored: { messages: Array.isArray(payload.messages) ? payload.messages.length : 0,
+                           memoryFiles: payload.memoryFiles ? Object.keys(payload.memoryFiles).length : 0,
+                           gitRestored, gitNote } });
+  } catch (e) {
+    res.status(500).json({ error: 'import failed (session record created): ' + e.message, sessionId: newSid });
+  }
+});
+
 // ── Share recipient endpoints (NO ACCESS_TOKEN; gated by the share token only) ──
 // The page; the inline JS reads the token from the URL and self-gates.
 app.get('/share/:token', (req, res) => {
