@@ -1076,6 +1076,10 @@ function finishStreaming() {
   // Catch-all: every terminal/transition path funnels through here, so this is
   // the one reliable place to guarantee the thinking bubble is cleared.
   hideThinking();
+  // Reset the per-step live usage accumulator — the next turn's message_start
+  // starts fresh. The finalized footer (attached at result) used the CLI's
+  // authoritative usage, so the live accumulator is no longer needed.
+  _liveStreamUsage = null;
   if (currentMsgEl) {
     const dot = currentMsgEl.querySelector('.streaming-dot');
     if (dot) dot.classList.remove('streaming-dot');
