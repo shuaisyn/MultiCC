@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../i18n.dart';
 import '../models/message.dart';
+import '../providers/chat_provider.dart';
+import '../services/session_service.dart';
 import '../services/settings_service.dart';
 import 'tool_card.dart';
 
@@ -40,6 +44,94 @@ Future<void> _handleLinkTap(BuildContext context, String? href) async {
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+}
+
+/// Long-press action sheet: copy always; delete only when the message has a
+/// server-side history id (streaming / not-yet-persisted bubbles aren't
+/// addressable — the id arrives via the chat_msg_meta WS event once saved).
+Future<void> _showMessageActions(BuildContext context, ChatMessage message) async {
+  final canDelete = (message.id ?? '').isNotEmpty;
+  final action = await showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: const Color(0xFF161b22),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+    ),
+    builder: (ctx) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.copy_outlined, color: Color(0xFF8b949e)),
+            title: Text(I18n.of('msgCopyAction'),
+                style: const TextStyle(color: Color(0xFFe6edf3))),
+            onTap: () => Navigator.pop(ctx, 'copy'),
+          ),
+          if (canDelete)
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Color(0xFFf85149)),
+              title: Text(I18n.of('msgDeleteAction'),
+                  style: const TextStyle(color: Color(0xFFf85149))),
+              onTap: () => Navigator.pop(ctx, 'delete'),
+            ),
+        ],
+      ),
+    ),
+  );
+  if (!context.mounted) return;
+  if (action == 'copy') {
+    _copyMessage(context, message.content);
+  } else if (action == 'delete') {
+    await _confirmDeleteMessage(context, message);
+  }
+}
+
+/// Confirm, then delete the message from the server's chat history.
+/// Display-history only — the CLI's own conversation context is untouched.
+/// Local removal is driven by the chat_msg_deleted WS broadcast (idempotent),
+/// with a direct provider fallback in case the socket is momentarily down.
+Future<void> _confirmDeleteMessage(BuildContext context, ChatMessage message) async {
+  final msgId = message.id;
+  if (msgId == null || msgId.isEmpty) return;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(I18n.of('msgDeleteTitle')),
+      content: Text(I18n.of('msgDeleteConfirm')),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: Text(I18n.of('cancel')),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: Text(I18n.of('msgDeleteAction'),
+              style: const TextStyle(color: Color(0xFFf85149))),
+        ),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  final provider = context.read<ChatProvider>();
+  final settings = SettingsService.current;
+  if (settings == null) return;
+  try {
+    await SessionService(settings: settings)
+        .deleteMessage(provider.sessionId, msgId);
+    provider.removeMessageById(msgId);
+    messenger.showSnackBar(SnackBar(
+      content: Text(I18n.of('msgDeleted')),
+      duration: const Duration(milliseconds: 1200),
+      behavior: SnackBarBehavior.floating,
+    ));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+      content: Text(I18n.of('msgDeleteFailed', {'error': '$e'})),
+      duration: const Duration(milliseconds: 2200),
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 }
 
@@ -83,7 +175,7 @@ class _UserBubble extends StatelessWidget {
     return Align(
       alignment: Alignment.centerRight,
       child: GestureDetector(
-        onLongPress: () => _copyMessage(context, message.content),
+        onLongPress: () => _showMessageActions(context, message),
         child: Container(
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
           margin: const EdgeInsets.symmetric(vertical: 4),
@@ -119,7 +211,7 @@ class _AssistantBubble extends StatelessWidget {
     return Align(
       alignment: Alignment.centerLeft,
       child: GestureDetector(
-        onLongPress: () => _copyMessage(context, message.content),
+        onLongPress: () => _showMessageActions(context, message),
         child: Container(
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.92),
           margin: const EdgeInsets.symmetric(vertical: 4),
