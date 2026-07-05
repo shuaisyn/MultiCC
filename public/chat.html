@@ -246,6 +246,29 @@
     .msg:hover .msg-del, .msg-del:focus { opacity: 1; }
     .msg-del:hover { color: #f85149; border-color: #f85149; }
     @media (hover: none) { .msg-del { opacity: .4; } }
+    /* Fork button — branch a session at this message (Happier-parity). */
+    .msg-fork {
+      position: absolute;
+      top: -7px;
+      left: -7px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #8b949e;
+      font-size: 12px;
+      line-height: 1;
+      padding: 0;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s;
+      z-index: 2;
+    }
+    .msg:hover .msg-fork, .msg-fork:focus { opacity: 1; }
+    .msg-fork:hover { color: #39c5cf; border-color: #39c5cf; }
+    @media (hover: none) { .msg-fork { opacity: .4; } }
+    .msg-fork:disabled { cursor: default; opacity: .6; }
     .msg.user {
       align-self: flex-end;
       background: #1f6feb;
