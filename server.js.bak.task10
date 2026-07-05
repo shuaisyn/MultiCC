@@ -1425,12 +1425,6 @@ async function dispatchToSession(targetId, message, opts = {}) {
   dispatchRuns.set(dispatchId, { targetId, chatSessionId: chatId, replyTo: opts.replyTo || null, createdAt: Date.now() });
   // Registry call (not a bus event): we need runChatTurn's boolean back to
   // detect an immediate launch failure. Avoids a static require of the chat domain.
-  if (isNetworkUnhealthy()) {
-    // ⑥A hold: API is down — queue this dispatch for recovery instead of
-    // launching a turn that will immediately fail.
-    holdSession(opts.replyTo || targetId, 'dispatch');
-    return { ok: false, error: '上游 API 异常，任务已暂挂，恢复后自动接续' };
-  }
   const ok = services.call('chat.runTurn', chatId, message, { originDispatchId: dispatchId });
   if (ok === false) { dispatchRuns.delete(dispatchId); return { ok: false, error: `启动 ${targetId} 回合失败` }; }
   // Track this pending dispatch on the dispatcher's currentTask so its card
@@ -4719,7 +4713,6 @@ const auxQueue = {
       console.error(`[multicc/aux] UNHEALTHY after ${h.consecutiveFails} consecutive failures: ${h.lastFailMsg}`);
       this.broadcastHealth();
     }
-    recordApiError(msg);  // ⑥A: also feed network-level unhealthy
     return h;
   },
   // Record a successful task. Any success clears the unhealthy flag.
@@ -4734,7 +4727,6 @@ const auxQueue = {
         this.broadcastHealth();
       }
     }
-    recordApiSuccess();  // ⑥A: aux success means the upstream API is reachable again
     return h;
   },
   isUnhealthy() { return !!(this.health && this.health.unhealthy); },
@@ -5972,123 +5964,6 @@ const AUX_HEALTH_PROBE_INTERVAL_MS = 5 * 60 * 1000;  // ④: probe aux recovery 
 // trivial aux task. Any success → recordSuccess → unhealthy clears → normal
 // summary/liveness/resume resumes. Cheap (a 1-token reply) and self-limiting
 // (only runs while unhealthy; no-op when healthy).
-// ── Network health hold (⑥A) ────────────────────────────────────────────────
-// When the upstream model API becomes unreliable (503, timeout, 402, etc.),
-// starting new turns only wastes credits and corrupts task state. Instead we
-// freeze all new-turn initiation (dispatch, auto-continue, wait-inject, nudge,
-// reconcile-resume) and wait for the API to recover. Held sessions' turn
-// context is preserved; on recovery each gets a gentle resume prompt so no
-// task is lost — just delayed until the API is back.
-//
-// Scope: "upstream API" means the model API the CLI / aux talks to. Network
-// errors from the CLI process (exit code 1 with stderr about API failures) and
-// from the aux queue (recordFail) are unified here. This does NOT cover the
-// server's own network outage (⑥B) — that's a separate, harder problem.
-
-const NETWORK_UNHEALTHY_THRESHOLD = 3;         // consecutive API failures before hold
-const NETWORK_PROBE_INTERVAL_MS = 30 * 1000;   // how often we test recovery
-const NETWORK_RECOVERY_PROBE_TIMEOUT_MS = 15000;
-
-const networkHealth = {
-  unhealthy: false,
-  sinceAt: null,
-  consecutiveFails: 0,
-  lastFailAt: null,
-  lastFailMsg: '',
-  heldSessions: new Map(),   // sessionId → { goal, heldAt, reason }
-  probeTimer: null,
-};
-
-// Call this from any code path that sees an upstream-API-style failure.
-// Aggregates across aux + main sessions; once >=THRESHOLD, triggers hold.
-function recordApiError(msg) {
-  const h = networkHealth;
-  h.consecutiveFails = (h.consecutiveFails || 0) + 1;
-  h.lastFailAt = Date.now();
-  h.lastFailMsg = String(msg || '').slice(0, 200);
-  if (h.consecutiveFails >= NETWORK_UNHEALTHY_THRESHOLD && !h.unhealthy) {
-    h.unhealthy = true;
-    h.sinceAt = Date.now();
-    console.error(`[multicc/net] UNHEALTHY after ${h.consecutiveFails} consecutive API errors: ${h.lastFailMsg}`);
-    // Broadcast to frontend so the dashboard can show a banner (reuse aux_health
-    // channel or add a dedicated one — for now log + console).
-    startNetworkProbe();
-  }
-}
-
-// Clear the unhealthy flag. Called when a probe succeeds.
-function recordApiSuccess() {
-  const h = networkHealth;
-  if (h.consecutiveFails || h.unhealthy) {
-    h.consecutiveFails = 0;
-    if (h.unhealthy) {
-      h.unhealthy = false;
-      const heldCount = h.heldSessions.size;
-      console.log(`[multicc/net] recovered — resuming ${heldCount} held session(s)`);
-      resumeHeldSessions();
-      stopNetworkProbe();
-    }
-  }
-}
-
-// Whether new turns should be blocked right now.
-function isNetworkUnhealthy() { return networkHealth.unhealthy; }
-
-// Hold a session: mark it as waiting for API recovery. Its in-progress turn
-// (if any) can finish naturally; we just prevent NEW turns from starting.
-// Callers should check isNetworkUnhealthy() BEFORE calling this — this is the
-// "actually put it on hold" step.
-function holdSession(sessionId, reason) {
-  if (!networkHealth.unhealthy) return;
-  const p = persistedSessions.get(sessionId);
-  if (!p) return;
-  const ts = getTaskState(p);
-  networkHealth.heldSessions.set(sessionId, {
-    goal: ts.goal || (typeof p.summary === 'string' ? p.summary.slice(0, 40) : ''),
-    heldAt: Date.now(),
-    reason: reason || 'API 异常',
-  });
-  // Push a one-shot notification so the user knows this session is on hold.
-  const dirId = p.dirId;
-  const note = `上游 API 异常，任务「${ts.goal || '未命名'}」已暂挂，恢复后自动接续`;
-  if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId, state: 'waiting', message: note });
-}
-
-// Resume all held sessions with a gentle prompt. Called when the API recovers.
-function resumeHeldSessions() {
-  const held = new Map(networkHealth.heldSessions);
-  networkHealth.heldSessions.clear();
-  for (const [sid, info] of held) {
-    const resumeMsg = `上游 API 已恢复。之前因 API 异常暂挂的任务「${info.goal || '未命名'}」现在可以继续了。请确认当前状态并继续执行。`;
-    try { waitInjector.safeInject(sid, resumeMsg); } catch (_) {}
-    console.log(`[multicc/net] resumed session ${sid}: ${info.goal}`);
-  }
-}
-
-// Periodically probe upstream API health via a trivial aux request.
-function startNetworkProbe() {
-  stopNetworkProbe();
-  const probe = () => {
-    if (!networkHealth.unhealthy) return;
-    // Use a short timeout so a truly dead API doesn't hang the probe.
-    auxQueue.enqueue({
-      type: 'network_probe',
-      prompt: '回复 ok',
-      meta: { timeout: NETWORK_RECOVERY_PROBE_TIMEOUT_MS },
-    }).then(r => {
-      if (r && !r.cancelled && r.text && /ok/i.test(r.text)) {
-        console.log('[multicc/net] probe OK — API recovered');
-        recordApiSuccess();
-      }
-    }).catch(() => { /* still down — recordApiError already called in drain */ });
-  };
-  networkHealth.probeTimer = setInterval(probe, NETWORK_PROBE_INTERVAL_MS);
-  probe(); // run one immediately
-}
-function stopNetworkProbe() {
-  if (networkHealth.probeTimer) { clearInterval(networkHealth.probeTimer); networkHealth.probeTimer = null; }
-}
-
 function auxHealthProbe() {
   if (!auxQueue.isUnhealthy()) return;
   auxQueue.enqueue({
@@ -6193,14 +6068,9 @@ I = 异常中断（任务没做完就被打断，需要继续）
         setTaskState(sid, { lifecycle: 'interrupted' });
         const hasGoal = !!(ts.goal && ts.goal.trim());
         setSessionSummary(sid, hasGoal ? `异常中断：${goal}` : `异常中断（未命名任务）`);
-        if (hasGoal && !isNetworkUnhealthy()) {
-          // ⑥A: skip resume-inject when the API is down — the resume message
-          // would fail anyway. holdSession instead so the session gets picked
-          // up by resumeHeldSessions on recovery.
+        if (hasGoal) {
           const resumeMsg = `服务刚重启，检测到任务「${goal}」可能未完成就中断了。请确认当前状态：是已完成？还是需要继续？如果需要继续，请接着做。`;
           try { waitInjector.safeInject(sid, resumeMsg); } catch (_) {}
-        } else if (hasGoal && isNetworkUnhealthy()) {
-          holdSession(sid, 'reconcile');
         }
         const dirId = p.dirId;
         const nudge = hasGoal ? `任务「${goal}」疑似中断，已发送续接提示` : `某任务疑似中断（无目标记录），请人工确认`;
@@ -6237,7 +6107,7 @@ function livenessProbe() {
       // get a smart response anyway and the banner already tells the user.
       const cooldown = auxQueue.isUnhealthy() ? 15 * 60 * 1000 : LIVENESS_NUDGE_COOLDOWN_MS;
       const cooled = st.lastNudgeAt && (now - st.lastNudgeAt) < cooldown;
-      if (staleProbes >= LIVENESS_STALE_PROBES && !cooled && !isNetworkUnhealthy()) {  // ⑥A: don't nudge when API is down
+      if (staleProbes >= LIVENESS_STALE_PROBES && !cooled) {
         const goal = st.goal || '当前任务';
         const stallMin = Math.round((now - (st.lastSummaryAt || st.lastTurnEndedAt || now)) / 60000);
         const nudgeMsg = `检测到任务「${goal}」似乎停滞了（已约 ${stallMin} 分钟无进展且回合已结束）。请确认当前状态：是已完成？还是在等待什么？还是遇到了卡点需要继续？`;
@@ -7362,7 +7232,6 @@ function applyClaudeChatEvent(cs, sessionName, evt, forward) {
     // claude reports them as is_error + a non-"success" subtype on the result event.
     if (evt.is_error === true || (evt.subtype && evt.subtype !== 'success' && /error|abort|timeout/i.test(evt.subtype))) {
       cs._sawApiError = true;
-      recordApiError(evt.subtype || 'api_error');
     }
     // Hoisted out of the if-block below: forward() at the end of this branch
     // also needs it. Block-scoping it inside the if made the forward line throw
