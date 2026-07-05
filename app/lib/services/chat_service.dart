@@ -262,6 +262,19 @@ class ChatService {
         _cancelRequested = false;
         break;
 
+      case 'chat_msg_meta':
+        // Server saved a message and assigned its history id. The provider
+        // tags the newest still-un-id'd bubble of that role so its delete
+        // button goes live without waiting for a reload.
+        _emit('chat_msg_meta', msg);
+        break;
+
+      case 'chat_msg_deleted':
+        // Broadcast after a successful delete from any client; drop the
+        // matching bubble. Idempotent — the initiator already removed it.
+        _emit('chat_msg_deleted', msg);
+        break;
+
       default:
         break;
     }
