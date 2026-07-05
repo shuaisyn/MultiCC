@@ -849,6 +849,7 @@ function handleEvent(msg) {
         if (last && !last.dataset.msgId) {
           last.dataset.msgId = msg.id;
           attachDeleteButton(last);
+          attachForkButton(last);
         }
       }
       break;
@@ -1259,6 +1260,52 @@ function attachDeleteButton(msgEl) {
   msgEl.appendChild(btn);
 }
 
+// ── Per-message fork (Happier-parity: branch a session at any message) ──
+// Forks the current session at the hovered message: the server creates a new
+// session that replays the transcript up to (and including) this message as its
+// starting context, copies the source's distilled memory, and inherits the same
+// provider/model/effort/rolePrompt. The new session opens in a new tab so the
+// user keeps their place in the original.
+function attachForkButton(msgEl) {
+  if (!msgEl || !msgEl.dataset.msgId || msgEl.querySelector('.msg-fork')) return;
+  // Only fork from non-system messages (forking at the synthetic forkedFrom
+  // meta message of an already-forked session is meaningless).
+  if (msgEl.classList.contains('system')) return;
+  const btn = document.createElement('button');
+  btn.className = 'msg-fork';
+  btn.title = '从此处分叉出新会话（保留到该点的上下文与记忆）';
+  btn.innerHTML = '&#9741;';   // ⧉ branch symbol
+  btn.onclick = async (e) => {
+    e.stopPropagation();
+    const go = confirm('从此条消息处分叉出新会话？\n新会话将继承到该点的对话上下文与会话记忆，并在新标签页打开。');
+    if (!go) return;
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '…';
+    try {
+      const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/fork`), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ atMessageId: msgEl.dataset.msgId }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      const newId = d.sessionId;
+      const n = d.replayedMessages || 0;
+      // Open the forked session's chat page in a new tab; keep the original open.
+      const url = `${location.pathname}?session=${encodeURIComponent(newId)}${location.hash}`;
+      window.open(url, '_blank');
+      // Lightweight in-place toast via the existing debug-log channel.
+      dbg('chat', `已分叉: ${newId} (replay ${n} 条) → 新标签页已打开`);
+    } catch (err) {
+      alert('分叉失败：' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  };
+  msgEl.appendChild(btn);
+}
+
 // Attach (or refresh) the usage line on a given assistant bubble element.
 function attachUsageLine(bubbleEl, usage, roleBreakdown) {
   if (!bubbleEl) return;
@@ -1432,7 +1479,7 @@ function replayHistory(messages, serverTokenUsage) {
     try {
     if (m.role === 'user') {
       const div = addUserMsg(m.content);
-      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); }
+      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); attachForkButton(div); }
     } else if (m.role === 'assistant') {
       const div = document.createElement('div');
       div.className = 'msg assistant';
@@ -1497,7 +1544,7 @@ function replayHistory(messages, serverTokenUsage) {
       div.appendChild(contentEl);
       messagesEl.appendChild(div);
       // In-progress replay tails (streaming:true) carry no id — not deletable yet.
-      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); }
+      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); attachForkButton(div); }
     }
     } catch (err) {
       console.warn('[multicc] replayHistory: skipped message', mi, err.message);
