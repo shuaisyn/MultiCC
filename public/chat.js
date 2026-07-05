@@ -833,6 +833,30 @@ function handleEvent(msg) {
       }
       break;
 
+    case 'chat_msg_meta': {
+      // Server saved a message and assigned its history id — tag the newest
+      // bubble of that role (if it isn't tagged yet) so its delete button
+      // goes live without waiting for a reload.
+      if (msg.id && msg.role) {
+        const bubbles = messagesEl.querySelectorAll(msg.role === 'user' ? '.msg.user' : '.msg.assistant');
+        const last = bubbles[bubbles.length - 1];
+        if (last && !last.dataset.msgId) {
+          last.dataset.msgId = msg.id;
+          attachDeleteButton(last);
+        }
+      }
+      break;
+    }
+
+    case 'chat_msg_deleted': {
+      // Broadcast from the server after a successful delete (from any client).
+      if (msg.id) {
+        const el = messagesEl.querySelector(`.msg[data-msg-id="${msg.id}"]`);
+        if (el) el.remove();
+      }
+      break;
+    }
+
     case 'chat_history':
       if (!_historyLoaded) {
         _historyLoaded = true;
@@ -1160,6 +1184,35 @@ function buildTimingLine(m) {
   return el;
 }
 
+// ── Per-message delete ──
+// Hover "×" on a bubble whose server-side history id is known. Deleting
+// removes the entry from chat_history (display history only — the CLI's own
+// conversation context is not rewritten). The button lives on the outer .msg
+// element so renderCurrentText()'s .msg-content rebuilds can't wipe it.
+function attachDeleteButton(msgEl) {
+  if (!msgEl || !msgEl.dataset.msgId || msgEl.querySelector('.msg-del')) return;
+  const btn = document.createElement('button');
+  btn.className = 'msg-del';
+  btn.title = '删除这条消息（仅从聊天记录移除）';
+  btn.innerHTML = '&#10005;';
+  btn.onclick = async (e) => {
+    e.stopPropagation();
+    if (!confirm('删除这条消息？仅从聊天记录移除，不可恢复。')) return;
+    try {
+      const r = await fetch(withToken(`/api/sessions/${encodeURIComponent(_sessionName)}/messages/${encodeURIComponent(msgEl.dataset.msgId)}`), { method: 'DELETE' });
+      if (r.ok) {
+        msgEl.remove();  // server also broadcasts chat_msg_deleted; removal is idempotent
+      } else {
+        const err = await r.json().catch(() => null);
+        alert('删除失败：' + ((err && err.error) || r.status));
+      }
+    } catch (err) {
+      alert('删除失败：' + err.message);
+    }
+  };
+  msgEl.appendChild(btn);
+}
+
 // Attach (or refresh) the usage line on a given assistant bubble element.
 function attachUsageLine(bubbleEl, usage, roleBreakdown) {
   if (!bubbleEl) return;
@@ -1332,7 +1385,8 @@ function replayHistory(messages, serverTokenUsage) {
     const m = messages[mi];
     try {
     if (m.role === 'user') {
-      addUserMsg(m.content);
+      const div = addUserMsg(m.content);
+      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); }
     } else if (m.role === 'assistant') {
       const div = document.createElement('div');
       div.className = 'msg assistant';
@@ -1396,6 +1450,8 @@ function replayHistory(messages, serverTokenUsage) {
 
       div.appendChild(contentEl);
       messagesEl.appendChild(div);
+      // In-progress replay tails (streaming:true) carry no id — not deletable yet.
+      if (m.id) { div.dataset.msgId = m.id; attachDeleteButton(div); }
     }
     } catch (err) {
       console.warn('[multicc] replayHistory: skipped message', mi, err.message);

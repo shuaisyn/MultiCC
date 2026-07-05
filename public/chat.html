@@ -221,7 +221,31 @@
       line-height: 1.6;
       word-wrap: break-word;
       overflow-wrap: break-word;
+      position: relative;
     }
+    /* Per-message delete: hidden until hover; faintly visible on touch devices
+       (no hover) so the affordance isn't lost on mobile. */
+    .msg-del {
+      position: absolute;
+      top: -7px;
+      right: -7px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid #30363d;
+      background: #21262d;
+      color: #8b949e;
+      font-size: 11px;
+      line-height: 1;
+      padding: 0;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .15s;
+      z-index: 2;
+    }
+    .msg:hover .msg-del, .msg-del:focus { opacity: 1; }
+    .msg-del:hover { color: #f85149; border-color: #f85149; }
+    @media (hover: none) { .msg-del { opacity: .4; } }
     .msg.user {
       align-self: flex-end;
       background: #1f6feb;
