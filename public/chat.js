@@ -772,7 +772,9 @@ function handleEvent(msg) {
       isStreaming = false;
       var _resultBubble = currentMsgEl;  // capture before finishStreaming() nulls it
       finishStreaming();
-      if (msg.usage) attachUsageLine(_resultBubble, msg.usage);
+      // Pass the per-role breakdown so the message footer shows 主/辅 split
+      // (from claude-proxy onUsage) alongside the CLI's merged aggregate.
+      if (msg.usage || _roleTokens.main) attachUsageLine(_resultBubble, msg.usage, _roleTokens);
       // Live timing line: prefer server-stamped durationMs, else client turn clock.
       if (_resultBubble) {
         const ce = _resultBubble.querySelector('.msg-content');
@@ -819,6 +821,14 @@ function handleEvent(msg) {
       // that the merged CLI result event can't provide.
       if (msg.role) {
         _roleTokens = { main: msg.role.main || null, sub: msg.role.sub || null, subByProvider: msg.role.subByProvider || [] };
+        // Live update: refresh the CURRENTLY STREAMING bubble's footer token
+        // line as each /v1/messages response lands — previously the footer
+        // stayed empty until the `result` event at turn end. currentMsgEl is
+        // non-null mid-stream; pass null usage to let roleBreakdown drive the
+        // numbers (the CLI's aggregate isn't available until result).
+        if (currentMsgEl && isStreaming) {
+          attachUsageLine(currentMsgEl, null, _roleTokens);
+        }
         updateContextBar();
       }
       break;
@@ -1044,14 +1054,66 @@ function createAssistantBubble() {
 // `usage` mirrors Anthropic's shape (input_tokens / output_tokens /
 // cache_read_input_tokens / cache_creation_input_tokens). Returns null when
 // there's nothing meaningful to show.
-function buildUsageLine(usage) {
-  if (!usage) return null;
-  const i  = usage.input_tokens || 0;
-  const o  = usage.output_tokens || 0;
-  const cr = usage.cache_read_input_tokens || 0;
-  const cw = usage.cache_creation_input_tokens || 0;
-  if (i + o + cr + cw === 0) return null;
+//
+// `roleBreakdown` (optional) splits the turn's tokens into 主 (main loop) vs
+// 辅 (Task-tool subagents), each billed to its actual provider — the CLI's
+// `result.usage` merges them into one aggregate even across different
+// providers. When present, the line shows per-role totals with a tooltip
+// breaking down each sub-provider; when absent, falls back to the merged
+// aggregate. roleBreakdown shape: { main:{inputTokens,outputTokens,cacheWrite,cacheRead},
+//                                   sub:{...}|null,
+//                                   subByProvider:[{name,model,inputTokens,outputTokens,...}] }
+function buildUsageLine(usage, roleBreakdown) {
+  if (!usage && !roleBreakdown) return null;
+  const i  = (usage && usage.input_tokens) || 0;
+  const o  = (usage && usage.output_tokens) || 0;
+  const cr = (usage && usage.cache_read_input_tokens) || 0;
+  const cw = (usage && usage.cache_creation_input_tokens) || 0;
   const n = x => x.toLocaleString('en-US');
+
+  // ── Role-split mode (主/辅) ──
+  if (roleBreakdown && (roleBreakdown.main || roleBreakdown.sub)) {
+    const sumB = (b) => b ? { i: b.inputTokens||0, o: b.outputTokens||0, cr: b.cacheRead||0, cw: b.cacheWrite||0, t: (b.inputTokens||0)+(b.outputTokens||0)+(b.cacheRead||0)+(b.cacheWrite||0) } : null;
+    const mb = sumB(roleBreakdown.main);
+    const sb = sumB(roleBreakdown.sub);
+    // Aggregate (main+sub) for the headline numbers; equals the CLI's merged
+    // total when both routes reported — keeps the row comparable to the old
+    // single-number display, with the split as added detail.
+    const ai = (mb?mb.i:0) + (sb?sb.i:0);
+    const ao = (mb?mb.o:0) + (sb?sb.o:0);
+    const acr = (mb?mb.cr:0) + (sb?sb.cr:0);
+    const acw = (mb?mb.cw:0) + (sb?sb.cw:0);
+    if (ai + ao + acr + acw === 0) return null;
+    const el = document.createElement('div');
+    el.className = 'msg-usage';
+    // Tooltip: aggregate + per-role + per-sub-provider detail.
+    let tip = `本条消息 token 用量\n合计 ${n(ai+ao+acr+acw)}\n`;
+    if (mb) tip += `— 主 — 输入 ${n(mb.i)} 输出 ${n(mb.o)} 缓存读 ${n(mb.cr)} 缓存写 ${n(mb.cw)}\n`;
+    if (sb) {
+      tip += `— 辅 合计 — 输入 ${n(sb.i)} 输出 ${n(sb.o)} 缓存读 ${n(sb.cr)} 缓存写 ${n(sb.cw)}\n`;
+      for (const p of (roleBreakdown.subByProvider || [])) {
+        tip += `    · ${p.name||p.providerId} / ${p.model||'?'}: ↑入 ${n(p.inputTokens||0)} ↓出 ${n(p.outputTokens||0)}\n`;
+      }
+    }
+    el.title = tip.trim();
+    // Headline: ↑入 / ↓出 with a 主/辅 split suffix when subagents ran.
+    let html =
+      `<span class="u-in">&#8593;入 ${n(ai)}</span>` +
+      `<span class="u-out">&#8595;出 ${n(ao)}</span>`;
+    if (acr) html += `<span class="u-cache">&#9851;读 ${n(acr)}</span>`;
+    if (acw) html += `<span class="u-cache">&#9851;写 ${n(acw)}</span>`;
+    if (mb && sb) {
+      const mt = mb.t, st = sb.t;
+      html += `<span class="u-role" title="主 ${n(mt)} · 辅 ${n(st)}">主 ${n(mt)} · 辅 ${n(st)}</span>`;
+    } else if (mb) {
+      html += `<span class="u-role" title="仅主循环">主 ${n(mb.t)}</span>`;
+    }
+    el.innerHTML = html;
+    return el;
+  }
+
+  // ── Legacy aggregate mode (no role info, e.g. official/non-proxy sessions) ──
+  if (i + o + cr + cw === 0) return null;
   const el = document.createElement('div');
   el.className = 'msg-usage';
   el.title = `本条消息 token 用量\n输入 ${n(i)}\n输出 ${n(o)}\n缓存读 ${n(cr)}\n缓存写 ${n(cw)}\n合计 ${n(i + o + cr + cw)}`;
@@ -1099,13 +1161,13 @@ function buildTimingLine(m) {
 }
 
 // Attach (or refresh) the usage line on a given assistant bubble element.
-function attachUsageLine(bubbleEl, usage) {
+function attachUsageLine(bubbleEl, usage, roleBreakdown) {
   if (!bubbleEl) return;
   const ce = bubbleEl.querySelector('.msg-content');
   if (!ce) return;
   const old = ce.querySelector('.msg-usage');
   if (old) old.remove();
-  const line = buildUsageLine(usage);
+  const line = buildUsageLine(usage, roleBreakdown);
   if (line) ce.appendChild(line);
 }
 
@@ -1602,20 +1664,6 @@ function updateContextBar(usage, modelUsage) {
     const totalK = (_contextWindow / 1000).toFixed(0);
     parts.push(`<span style="font-size:11px;color:${color}">本轮 ${usedK}k/${totalK}k (${pct.toFixed(1)}%)</span>`);
     parts.push(`<span style="display:inline-block;width:60px;height:5px;background:#21262d;border-radius:3px;margin-left:4px;vertical-align:middle;"><span style="display:block;width:${pct}%;height:100%;background:${color};border-radius:3px;"></span></span>`);
-    // Per-role split for THIS turn: 主 (main loop) / 辅 (Task-tool subagents),
-    // each billed to its actual provider — the CLI's merged result usage can't
-    // recover this. Only shown when a subagent actually ran (else the single
-    // 本轮 number above already reflects the main loop alone).
-    if (_roleTokens.sub) {
-      const sumB = (b) => b ? (b.inputTokens || 0) + (b.outputTokens || 0) + (b.cacheWrite || 0) + (b.cacheRead || 0) : 0;
-      const mainT = sumB(_roleTokens.main);
-      const subT = sumB(_roleTokens.sub);
-      // Tooltip: per-sub-provider detail (provider · model · tokens)
-      const tip = (_roleTokens.subByProvider || []).map((p) =>
-        `${p.name || p.providerId} · ${p.model || '?'}: in ${fmt(p.inputTokens||0)} / out ${fmt(p.outputTokens||0)}`
-      ).join('\n');
-      parts.push(`<span style="margin-left:8px;font-size:11px;color:var(--faint)" title="${escHtml(tip)}">主 ${fmt(mainT)} · 辅 ${fmt(subT)}</span>`);
-    }
   }
   if (parts.length) costBar.innerHTML = parts.join('');
 }
