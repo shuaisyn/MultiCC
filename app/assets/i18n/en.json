@@ -176,6 +176,11 @@
   "msgDeleteConfirm": "Removes from chat history only; cannot be undone. Does not affect model context — the model may still remember the content.",
   "msgDeleted": "Message deleted",
   "msgDeleteFailed": "Delete failed: {error}",
+  "msgForkAction": "Fork session here",
+  "msgForkTitle": "Fork session",
+  "msgForkConfirm": "A new session will inherit the conversation context up to this point (and the session memory), continuing from here. The original session is unaffected.",
+  "msgForked": "Forked as new session {id} (visible in the session list)",
+  "msgForkFailed": "Fork failed: {error}",
   "msgCopyAction": "Copy content",
   "msgCopied": "Copied",
 
