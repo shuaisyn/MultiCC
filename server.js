@@ -2692,6 +2692,22 @@ app.delete('/api/sessions/:id/memory', (req, res) => {
   res.json({ ok: true, files: listMemoryFiles(dir) });
 });
 
+// Delete a single message from this session's persisted chat history.
+// Display-history only: the CLI's own transcript/context is not rewritten,
+// so the model may still "remember" the content in an ongoing conversation.
+app.delete('/api/sessions/:id/messages/:msgId', (req, res) => {
+  const sessionName = req.params.id;
+  if (!persistedSessions.get(sessionName)) return res.status(404).json({ error: 'session not found' });
+  const history = loadChatHistory(sessionName);
+  const idx = history.findIndex(m => m && m.id === req.params.msgId);
+  if (idx === -1) return res.status(404).json({ error: 'message not found' });
+  history.splice(idx, 1);
+  saveChatHistory(sessionName);
+  // All connected clients (including the initiator) drop the bubble on this event.
+  chatBroadcast(sessionName, { type: 'chat_msg_deleted', id: req.params.msgId });
+  res.json({ ok: true });
+});
+
 // ── Session sharing (admin: create/list/revoke; ACCESS_TOKEN-gated) ──
 // The link is built from the request host so a share created via the public
 // (tunnel) URL is reachable externally; created on localhost it'll be a local link.
@@ -5197,6 +5213,11 @@ function loadChatHistory(sessionName) {
         });
       }
       if (cleaned > 0) console.log(`[multicc] sanitized ${cleaned} empty thinking block(s) from ${data.length} messages`);
+      // Backfill ids on entries saved before per-message ids existed, so
+      // every replayed message is deletable. Persisted on the next save.
+      for (const msg of data) {
+        if (msg && msg.role && !msg.id) msg.id = newChatMsgId();
+      }
     }
     chatHistories.set(sessionName, data);
     return data;
@@ -5242,8 +5263,16 @@ function saveChatHistory(sessionName) {
 const _droppedForMemory = new Map();  // sessionName → [msg, …]
 const MEMORY_DISTILL_BATCH = 10;
 
+// Stable per-message id so a single history entry can be addressed later
+// (per-message delete). Monotonic-ish and collision-free within a process.
+let _chatMsgIdSeq = 0;
+function newChatMsgId() {
+  return 'm' + Date.now().toString(36) + '-' + (_chatMsgIdSeq++).toString(36);
+}
+
 function appendChatMessage(sessionName, msg) {
   const history = loadChatHistory(sessionName);
+  if (!msg.id) msg.id = newChatMsgId();
 
   // Dedup: skip if the last message in history is an assistant with identical
   // content and tools (guards against double-saves from stream-replay races).
@@ -5253,11 +5282,13 @@ function appendChatMessage(sessionName, msg) {
         prev.content === msg.content &&
         JSON.stringify(prev.tools || null) === JSON.stringify(msg.tools || null)) {
       // Update usage/timing on the existing message instead of pushing a duplicate.
+      if (!prev.id) prev.id = newChatMsgId();
       if (msg.usage) prev.usage = msg.usage;
       if (msg.cost != null) prev.cost = msg.cost;
       if (msg.durationMs != null) prev.durationMs = msg.durationMs;
       if (msg.ts) prev.ts = msg.ts;
       saveChatHistory(sessionName);
+      chatBroadcast(sessionName, { type: 'chat_msg_meta', id: prev.id, role: prev.role, ts: prev.ts });
       return;
     }
   }
@@ -5292,6 +5323,9 @@ function appendChatMessage(sessionName, msg) {
     }
   }
   saveChatHistory(sessionName);
+  // Tell live clients the id this message was saved under, so the bubble
+  // already on screen becomes individually addressable (delete button).
+  chatBroadcast(sessionName, { type: 'chat_msg_meta', id: msg.id, role: msg.role, ts: msg.ts });
 }
 
 // ── Chat sessions: session-level state for multi-client broadcast ──
