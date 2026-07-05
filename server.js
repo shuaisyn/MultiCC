@@ -2764,6 +2764,83 @@ app.post('/api/sessions/:id/share-messages', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ── Session fork (Happier-parity: branch a session at any message) ──
+// Creates a NEW live session that inherits the source's provider/model/effort/
+// rolePrompt and replays the transcript up to (and including) the chosen message
+// as its starting context — like Happier's forkedTranscriptSnapshot + replaySeed.
+// The 50-message rolling window means old messages may already be distilled into
+// memory; we therefore also copy the source session's private memory folder so the
+// forked session isn't blind to pre-window context. A `forkedFrom` meta record is
+// stamped as the first message of the new history.
+app.post('/api/sessions/:id/fork', (req, res) => {
+  const src = persistedSessions.get(req.params.id);
+  if (!src) return res.status(404).json({ error: 'session not found' });
+  if (src.type === 'aux' || src.type === 'gateway') {
+    return res.status(400).json({ error: 'system session cannot be forked' });
+  }
+  const b = req.body || {};
+  const label = (b.label || '').toString().trim() || null;
+  const includeMemory = b.includeMemory !== false; // default true
+  const atMessageId = b.atMessageId ? String(b.atMessageId) : null;
+
+  // Slice source history up to (and including) the chosen message id.
+  // If atMessageId is null/omitted, fork from the latest message.
+  const history = loadChatHistory(src.id);
+  let sliced;
+  if (!atMessageId) {
+    sliced = history.map(m => ({ ...m }));
+  } else {
+    const idx = history.findIndex(m => m && m.id === atMessageId);
+    if (idx < 0) return res.status(400).json({ error: 'atMessageId not found in history' });
+    sliced = history.slice(0, idx + 1).map(m => ({ ...m }));
+  }
+
+  // Create the forked session record, inheriting the source's CLI/provider/model/
+  // effort/rolePrompt so it continues from the same backend.
+  const dir = directories.get(src.dirId);
+  const r = createSessionRecord({
+    dir, cli: src.cli, kind: 'chat', label: label || `${src.label || src.id} · fork`,
+    provider: src.provider == null ? undefined : src.provider,
+    model: src.model, effort: src.effort, rolePrompt: src.rolePrompt,
+  });
+  if (!r.ok) return res.status(400).json({ error: r.error });
+  const newSid = r.id;
+
+  // Seed the new session's chat history with the sliced transcript. The forkedFrom
+  // meta message goes first so the agent and UI can see this is a fork.
+  const forkMeta = {
+    id: newChatMsgId(),
+    role: 'system',
+    content: `Forked from session \`${src.id}\` (label: ${src.label || '—'}) at message \`${atMessageId || 'latest'}\`. ` +
+             `This session continues from that point; prior context above is the replayed transcript, ` +
+             `and the source session's distilled memory has been copied into this session's memory folder.`,
+    ts: Date.now(),
+    forkedFrom: { sessionId: src.id, atMessageId: atMessageId || null, atTs: sliced.length ? sliced[sliced.length - 1].ts : null },
+  };
+  const newHistory = [forkMeta, ...sliced];
+  chatHistories.set(newSid, newHistory);
+  saveChatHistory(newSid);
+
+  // Copy the source session's private memory folder (CLAUDE.md/AGENTS.md + any
+  // notes) so pre-window distilled context survives into the fork. Best-effort.
+  if (includeMemory) {
+    try {
+      const srcMemDir = sessionMemoryDir(src);
+      const dstMemDir = sessionMemoryDir(r.session);
+      if (fs.existsSync(srcMemDir)) {
+        fs.mkdirSync(dstMemDir, { recursive: true });
+        fs.cpSync(srcMemDir, dstMemDir, { recursive: true });
+      }
+    } catch (e) {
+      console.error(`[multicc/fork] memory copy failed ${src.id}→${newSid}:`, e.message);
+    }
+  }
+
+  appendEvent(src.dirId, 'session_forked', `${src.label || src.id} → ${newSid}`, newSid);
+  res.json({ ok: true, sessionId: newSid, session: r.session,
+             forkedFrom: forkMeta.forkedFrom, replayedMessages: sliced.length });
+});
+
 // ── Share recipient endpoints (NO ACCESS_TOKEN; gated by the share token only) ──
 // The page; the inline JS reads the token from the URL and self-gates.
 app.get('/share/:token', (req, res) => {
