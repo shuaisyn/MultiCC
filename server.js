@@ -6557,7 +6557,7 @@ ${(userText || '').slice(0, 500)}
       if (!cs.currentTask || cs.currentTask.turnSeq !== turnSeq) return;
       let goal = (result && result.text || '').trim().replace(/^[\s"'']+|[\s"'']+$/g, '');
       goal = goal.replace(/^(任务目标[:：]|目标[:：])\s*/, '');
-      if (goal && goal !== '-' && goal !== '—' && goal.length <= 30) {
+      if (goal && goal !== '-' && goal !== '—' && goal.length <= 40) {
         cs.currentTask.goal = goal;
         setTaskState(sessionName, { goal });  // persist refined goal for restart reconcile
         if (cs.isStreaming) {
