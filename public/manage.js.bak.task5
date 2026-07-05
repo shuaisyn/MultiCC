@@ -3191,52 +3191,6 @@ function newSession() {
   openNewDirectoryModal();
 }
 
-// ── Aux health banner (③) ──────────────────────────────────────────────────
-// A non-dismissible red banner pinned to the top of the page while the aux
-// (summary) service is unhealthy, plus a recurring 5-min toast reminder. The
-// summary machinery is the backbone of task/lifecycle state; if it's down the
-// whole board is lying, so we surface it loudly and never let the user dismiss
-// it — only recovery (recordSuccess on the server) removes it.
-function handleAuxHealth(h) {
-  const prev = _auxHealth;
-  _auxHealth = h || null;
-  const unhealthy = !!(h && h.unhealthy);
-  renderAuxHealthBanner(unhealthy ? h : null);
-  if (unhealthy) {
-    // Start the recurring reminder if not already running.
-    if (!_auxToastTimer) {
-      const remind = () => {
-        showToast(`⚠️ 摘要服务异常：${(h.lastFailMsg || '未知错误').slice(0, 60)} — 已用规则判定，请修复`, true);
-      };
-      // Don't fire immediately on transition — the banner already says it. The
-      // 5-min cadence is for "user walked away, task stalled, come fix it".
-      _auxToastTimer = setTimeout(function loop() {
-        if (!(_auxHealth && _auxHealth.unhealthy)) { _auxToastTimer = null; return; }
-        remind();
-        _auxToastTimer = setTimeout(loop, 5 * 60 * 1000);
-      }, 5 * 60 * 1000);
-    }
-  } else if (prev && prev.unhealthy) {
-    // Just recovered.
-    if (_auxToastTimer) { clearTimeout(_auxToastTimer); _auxToastTimer = null; }
-    showToast('摘要服务已恢复', false);
-  }
-}
-
-function renderAuxHealthBanner(h) {
-  let el = document.getElementById('aux-health-banner');
-  if (!h) { if (el) el.remove(); return; }
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'aux-health-banner';
-    el.style.cssText = 'position:sticky;top:0;z-index:9000;background:#5d0f0f;color:#ffd0d0;font-size:13px;padding:6px 14px;border-bottom:1px solid #8b2020;display:flex;align-items:center;gap:10px;box-shadow:0 2px 6px rgba(0,0,0,.4);';
-    document.body.prepend(el);
-  }
-  const fails = h.consecutiveFails || 0;
-  const msg = (h.lastFailMsg || '未知错误').slice(0, 80);
-  el.innerHTML = '<span>⚠️ <b>摘要服务异常</b>（连续失败 ' + fails + ' 次）：' + escapeHtml(msg) + ' — 已切换规则判定，状态可能不准，请检查 aux 配置/上游模型后修复</span>';
-}
-
 function showToast(msg, isError = false) {
   const toast = document.getElementById('toast');
   toast.textContent = msg;
@@ -5286,8 +5240,6 @@ async function cleanupUploads() {
 let _auxWs = null;
 let _auxHistory = [];
 let _auxConnected = false;
-let _auxHealth = null;          // { unhealthy, consecutiveFails, lastFailMsg, sinceAt }
-let _auxToastTimer = null;      // recurring 5-min reminder while unhealthy
 
 function auxConnect() {
   if (_auxWs && _auxWs.readyState <= 1) return;
@@ -5305,9 +5257,6 @@ function auxConnect() {
         if (_focusedSessionId === '__aux__') renderAuxPanel();
       } else if (msg.type === 'aux_init') {
         // status info on connect — will be refreshed via /api/sessions
-        if (msg.health) handleAuxHealth(msg.health);
-      } else if (msg.type === 'aux_health') {
-        handleAuxHealth(msg.health || {});
       } else if (msg.type === 'aux_event') {
         // Real-time task event — append to history display
         if (msg.status === 'done' || msg.status === 'error') {
