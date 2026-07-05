@@ -4666,10 +4666,49 @@ const auxQueue = {
   processing: false,
   totalProcessed: 0,
   lastTaskTime: null,
+  // ── Health monitoring (③) ──────────────────────────────────────────────
+  // consecutiveFails counts failed (non-cancelled) tasks in a row. >=3 →
+  // unhealthy; the summary/liveness/reconcile machinery degrades to rules (④)
+  // and the dashboard shows a non-dismissible red banner. Any success clears it.
+  health: { consecutiveFails: 0, unhealthy: false, lastFailAt: null, lastFailMsg: '', sinceAt: null },
   clients: new Set(), // WebSocket clients watching aux events
   history: [],        // loaded from chat_history/__aux__.json
   _warmProc: null,    // pre-spawned claude process waiting for stdin input
   _warmReady: false,  // true once the warm process has started successfully
+
+  // Record a failed task. Cancelled tasks don't count (user-initiated).
+  // Returns the updated health object.
+  recordFail(msg) {
+    const h = this.health;
+    h.consecutiveFails = (h.consecutiveFails || 0) + 1;
+    h.lastFailAt = Date.now();
+    h.lastFailMsg = String(msg || '').slice(0, 200);
+    if (h.consecutiveFails >= 3 && !h.unhealthy) {
+      h.unhealthy = true;
+      h.sinceAt = Date.now();
+      console.error(`[multicc/aux] UNHEALTHY after ${h.consecutiveFails} consecutive failures: ${h.lastFailMsg}`);
+      this.broadcastHealth();
+    }
+    return h;
+  },
+  // Record a successful task. Any success clears the unhealthy flag.
+  recordSuccess() {
+    const h = this.health;
+    if (h.consecutiveFails || h.unhealthy) {
+      h.consecutiveFails = 0;
+      if (h.unhealthy) {
+        h.unhealthy = false;
+        h.sinceAt = null;
+        console.log('[multicc/aux] recovered: healthy again');
+        this.broadcastHealth();
+      }
+    }
+    return h;
+  },
+  isUnhealthy() { return !!(this.health && this.health.unhealthy); },
+  broadcastHealth() {
+    this.broadcast({ type: 'aux_health', health: { ...this.health } });
+  },
 
   init() {
     this.history = loadChatHistory(AUX_SESSION_ID);
@@ -4759,12 +4798,14 @@ const auxQueue = {
         task.reject({ cancelled: true });
         this.broadcast({ type: 'aux_event', status: 'done', task: { id: task.id, type: task.type }, result: resultText, durationMs, cancelled: true });
       } else {
+        this.recordSuccess();
         task.resolve({ text: resultText, cancelled: false });
         this.broadcast({ type: 'aux_event', status: 'done', task: { id: task.id, type: task.type }, result: resultText, durationMs, cancelled: false });
       }
     } catch (err) {
       const durationMs = Date.now() - startTime;
       const errMsg = err?.message || String(err);
+      this.recordFail(errMsg);
       appendChatMessage(AUX_SESSION_ID, {
         role: 'user', content: task.prompt, ts: task.ts,
         taskType: task.type, taskId: task.id, meta: task.meta,
@@ -4891,6 +4932,7 @@ const auxQueue = {
       totalProcessed: this.totalProcessed,
       lastTaskTime: this.lastTaskTime,
       warmReady: this._warmReady,
+      health: { ...this.health },
     };
   },
 };
@@ -4898,6 +4940,9 @@ const auxQueue = {
 // REST API for aux
 app.get('/api/aux/status', (req, res) => {
   res.json(auxQueue.getStatus());
+});
+app.get('/api/aux/health', (req, res) => {
+  res.json({ health: { ...auxQueue.health } });
 });
 
 app.get('/api/aux/history', (req, res) => {
@@ -8015,7 +8060,7 @@ wss.on('connection', (ws, req) => {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     // Send current status + recent history on connect
-    ws.send(JSON.stringify({ type: 'aux_init', status: auxQueue.getStatus() }));
+    ws.send(JSON.stringify({ type: 'aux_init', status: auxQueue.getStatus(), health: { ...auxQueue.health } }));
     const history = loadChatHistory(AUX_SESSION_ID);
     ws.send(JSON.stringify({ type: 'aux_history', messages: history.slice(-100) }));
     ws.on('close', () => { auxQueue.clients.delete(ws); });
