@@ -2972,10 +2972,11 @@ app.get('/api/sessions/:id/bundle', (req, res) => {
     try {
       if (s.worktreePath && s.branch && fs.existsSync(s.worktreePath)) {
         const tmp = path.join(os.tmpdir(), `multicc-bundle-${s.id}-${Date.now()}.bundle`);
-        // Bundle all refs/heads/<branch> — includes the branch's full history
-        // reachable from its tip, which is what the target needs to recreate it.
+        // Bundle the branch's full history. The branch name (e.g.
+        // "multicc/<sid>") is passed as a refspec — `git bundle create` accepts
+        // refspecs positionally, NOT via a --branch= flag.
         execFileSync('git', ['-C', s.worktreePath, 'bundle', 'create', tmp,
-                             `--branch=${s.branch}`], { encoding: 'buffer', stdio: ['ignore', 'ignore', 'pipe'] });
+                             s.branch], { encoding: 'buffer', stdio: ['ignore', 'ignore', 'pipe'] });
         gitBundleB64 = fs.readFileSync(tmp).toString('base64');
         fs.unlinkSync(tmp);
       } else {
