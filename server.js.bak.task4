@@ -5573,55 +5573,6 @@ function parseClassifyResult(text) {
   return { state, summary, background };
 }
 
-// ── Task state persistence (step ①) ───────────────────────────────────────────
-// persisted.taskState is the durable closed-loop task snapshot: it survives
-// restarts so reconcileTasksAfterRestart (②) and the liveness probe (⑤) can
-// decide what was running, whether it stalled, and whether to nudge. Falls back
-// to {} for legacy sessions that predate this field.
-//
-// Shape:
-//   { goal, phase, startedAt, endedAt, lastSummary, lastSummaryAt,
-//     lastTurnEndedAt, lifecycle, pendingDispatches, progressSig }
-//   lifecycle ∈ running | completed | waiting | interrupted
-//   progressSig: a cheap signature of the latest progress text, used by the
-//   liveness probe to tell "made progress" from "stalled" across probes.
-const TASK_STATE_DEFAULTS = {
-  goal: '', phase: 'idle', startedAt: null, endedAt: null,
-  lastSummary: '', lastSummaryAt: null, lastTurnEndedAt: null,
-  lifecycle: 'idle', pendingDispatches: [], progressSig: '',
-};
-
-function getTaskState(persisted) {
-  if (!persisted) return { ...TASK_STATE_DEFAULTS };
-  const ts = persisted.taskState || {};
-  return { ...TASK_STATE_DEFAULTS, ...ts };
-}
-
-// Cheap progress signature: lowercased alphanumeric words of the summary text,
-// joined and hashed to a short string. Two summaries with the same meaningful
-// content produce the same sig (ignoring punctuation/whitespace), so the probe
-// can detect "no change since last probe".
-function progressSigOf(text) {
-  const words = String(text || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-  const joined = words.join('');
-  // djb2-ish hash → base36, keep it short.
-  let h = 5381;
-  for (let i = 0; i < joined.length; i++) h = ((h * 33) ^ joined.charCodeAt(i)) >>> 0;
-  return h.toString(36);
-}
-
-// Merge a patch into persisted.taskState and persist. Best-effort save: callers
-// may pass {save:false} to batch updates. Always returns the new state.
-function setTaskState(sessionId, patch, opts = {}) {
-  const persisted = persistedSessions.get(sessionId);
-  if (!persisted) return null;
-  const cur = getTaskState(persisted);
-  const next = { ...cur, ...patch };
-  persisted.taskState = next;
-  if (opts.save !== false) savePersistedSessions();
-  return next;
-}
-
 // Store an aux-AI task summary for a session and push it to the workspace board.
 function setSessionSummary(sessionId, summary) {
   if (!summary) return;
@@ -5629,15 +5580,11 @@ function setSessionSummary(sessionId, summary) {
   if (!persisted || persisted.type === 'aux' || persisted.type === 'gateway') return;
   const ts = Date.now();
   sessionSummaries.set(sessionId, { summary, ts });
-  // Persist the one-liner (legacy field, still used by the dashboard tooltip)
-  // AND the full taskState snapshot: lastSummary/lastSummaryAt/progressSig so
-  // the liveness probe (⑤) can compare across probes after a restart.
-  const sig = progressSigOf(summary);
-  const tsChanged = persisted.summary !== summary;
-  const stChanged = (persisted.taskState?.lastSummary !== summary) || (persisted.taskState?.progressSig !== sig);
-  if (tsChanged) persisted.summary = summary;
-  if (tsChanged || stChanged) {
-    setTaskState(sessionId, { lastSummary: summary, lastSummaryAt: ts, progressSig: sig }, { save: false });
+  // Persist so the dir's per-session "上下文特点" survives a server restart
+  // (the in-memory Map alone used to lose it). Throttled-ish: only write when
+  // the text actually changed.
+  if (persisted.summary !== summary) {
+    persisted.summary = summary;
     savePersistedSessions();
   }
   workspaceBroadcast(persisted.dirId, { type: 'summary', sessionId, summary, ts });
@@ -6137,7 +6084,6 @@ ${(userText || '').slice(0, 500)}
       goal = goal.replace(/^(任务目标[:：]|目标[:：])\s*/, '');
       if (goal && goal !== '-' && goal !== '—' && goal.length <= 30) {
         cs.currentTask.goal = goal;
-        setTaskState(sessionName, { goal });  // persist refined goal for restart reconcile
         if (cs.isStreaming) {
           emitRunningNotify(sessionName, `处理中：${goal}`);
         }
@@ -6159,19 +6105,10 @@ function ensureCurrentTask(cs, sessionName, userText) {
   const prev = cs.currentTask;
   if (prev && prev.phase !== 'done' && prev.startedAt && (now - prev.startedAt) < 10 * 60 * 1000) {
     prev.turnSeq = (prev.turnSeq || 0) + 1;
-    // Refresh persisted lifecycle: a continued turn means the closed-loop task
-    // is still running (the prior turn may have rested at completed/waiting).
-    setTaskState(sessionName, { lifecycle: 'running' });
     return prev;
   }
   cs.currentTask = newCurrentTask(briefTaskDescription(userText));
   cs.currentTask.turnSeq = 1;
-  // Persist the new task snapshot so a mid-task restart can reconcile it (②).
-  setTaskState(sessionName, {
-    goal: cs.currentTask.goal, phase: cs.currentTask.phase,
-    startedAt: cs.currentTask.startedAt, endedAt: null,
-    lifecycle: 'running',
-  });
   return cs.currentTask;
 }
 
@@ -6240,13 +6177,6 @@ function emitTurnOutcome(sessionName, { status, notifyState, message, alert }) {
   }
 
   setSessionStatus(sessionName, { status, currentFile: null });
-  // Persist turn-end lifecycle so the liveness probe (⑤) and restart reconcile
-  // (②) know this task's turn ended at this moment. status completed/error →
-  // lifecycle completed; waiting stays waiting. (intent_classify may refine.)
-  {
-    const lc = (status === 'error') ? 'completed' : (status === 'waiting' ? 'waiting' : 'completed');
-    setTaskState(sessionName, { lastTurnEndedAt: Date.now(), endedAt: Date.now(), lifecycle: lc }, { save: false });
-  }
   setSessionSummary(sessionId, message);
   if (alert) {
     triggerPush(sessionId, notifyState, `[Chat] ${message}`);
