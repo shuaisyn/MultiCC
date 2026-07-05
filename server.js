@@ -5975,6 +5975,107 @@ function auxHealthProbe() {
   }).catch(() => { /* recordFail already called inside drain */ });
 }
 
+// ── Restart reconcile (②) ───────────────────────────────────────────────────
+// After a server restart, any task that was 'running' right before the crash
+// never got a clean lifecycle transition — its summary may be stale or wrong
+// (e.g. an old "出现异常" from a prior crash). This re-judges each such session
+// once via the aux AI: completed / waiting-on-user / interrupted. Interrupted
+// sessions get a gentle resume prompt; the user is notified either way.
+//
+// Scope: only sessions whose taskState.lifecycle is running/interrupted AND
+// whose lastTurnEndedAt is within RESTART_RECONCILE_WINDOW_MS (30 min). Older
+// ones are assumed settled (re-judging everything wastes aux calls).
+// Degraded (④): if aux is unhealthy, skip the AI re-judge, mark interrupted,
+// and notify the user to confirm manually.
+const RESTART_RECONCILE_WINDOW_MS = 30 * 60 * 1000;
+
+const RECONCILE_STALE_KEYWORDS = ['出现异常', '异常中断', '中断', 'error', '失败'];
+
+function reconcileTasksAfterRestart() {
+  const now = Date.now();
+  const candidates = [];
+  for (const [sid, p] of persistedSessions) {
+    if (!p || p.type === 'aux' || p.type === 'gateway') continue;
+    const ts = getTaskState(p);
+    // Candidate if: lifecycle is running/interrupted (never cleanly closed),
+    // OR the persisted summary still shows a stale anomaly keyword (pre-taskState
+    // sessions whose last summary was an error/crash marker from a prior run).
+    const lcBad = ts.lifecycle === 'running' || ts.lifecycle === 'interrupted';
+    const summary = (typeof p.summary === 'string' ? p.summary : '').toLowerCase();
+    const staleAnomaly = ts.lifecycle !== 'completed' && ts.lifecycle !== 'waiting'
+      && RECONCILE_STALE_KEYWORDS.some(k => summary.includes(k));
+    if (!lcBad && !staleAnomaly) continue;
+    const endedAt = ts.lastTurnEndedAt || ts.lastSummaryAt || 0;
+    // For stale-anomaly-only candidates with no taskState timestamps, fall back
+    // to the session's lastActivity so very old ones aren't dragged back in.
+    const ref = endedAt || (p.lastActivity ? new Date(p.lastActivity).getTime() : 0);
+    if (ref && (now - ref) > RESTART_RECONCILE_WINDOW_MS) continue;
+    candidates.push({ sid, ts });
+  }
+  if (!candidates.length) return;
+  console.log(`[multicc/reconcile] ${candidates.length} session(s) to re-judge after restart`);
+  for (const { sid, ts } of candidates) {
+    if (auxQueue.isUnhealthy()) {
+      // ④ degraded: can't ask the AI — mark interrupted, notify, let the user decide.
+      setTaskState(sid, { lifecycle: 'interrupted' }, { save: false });
+      const dirId = persistedSessions.get(sid)?.dirId;
+      const msg = `摘要服务异常，无法自动判定任务「${ts.goal || ''}」的状态，请人工确认`;
+      if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId: sid, state: 'waiting', message: msg });
+      triggerPush(sid, 'waiting', `[Chat] ${msg}`);
+      continue;
+    }
+    _reconcileOneSession(sid, ts);
+  }
+  savePersistedSessions();
+}
+
+// Re-judge one session via the aux AI. Reads recent chat history + the prior
+// taskState to decide the outcome. Fire-and-forget.
+function _reconcileOneSession(sid, ts) {
+  let recentTail = '';
+  try {
+    const history = loadChatHistory(sid);
+    const tail = history.slice(-6);
+    recentTail = tail.map(m => `${m.role === 'user' ? '用户' : '助手'}: ${String(m.content || '').slice(0, 300)}`).join('\n');
+  } catch (_) {}
+  const prompt = `服务刚重启，需要判断下面这个任务在重启前的真实结局。任务目标：「${ts.goal || '未知'}」
+最近对话片段：
+${recentTail || '（无）'}
+
+请只输出一个字母判定结局：
+C = 任务已经完成（哪怕重启打断，但实质已完成）
+W = 正在等待用户回复/确认/决策
+I = 异常中断（任务没做完就被打断，需要继续）
+只输出这一个字母，不要解释。`;
+  auxQueue.enqueue({ type: 'restart_reconcile', prompt, meta: { sid } })
+    .then(result => {
+      const verdict = (result && result.text || '').trim().toUpperCase().slice(0, 1);
+      const p = persistedSessions.get(sid);
+      if (!p) return;
+      const goal = ts.goal || '该任务';
+      if (verdict === 'C') {
+        setTaskState(sid, { lifecycle: 'completed', endedAt: Date.now() });
+        setSessionSummary(sid, `任务完成：${goal}`);
+        console.log(`[multicc/reconcile] ${sid}: completed`);
+      } else if (verdict === 'W') {
+        setTaskState(sid, { lifecycle: 'waiting' });
+        setSessionSummary(sid, `等待交互：${goal}`);
+        console.log(`[multicc/reconcile] ${sid}: waiting`);
+      } else {
+        // I = interrupted → resume with a gentle prompt.
+        setTaskState(sid, { lifecycle: 'interrupted' });
+        setSessionSummary(sid, `异常中断：${goal}`);
+        const resumeMsg = `服务刚重启，检测到任务「${goal}」可能未完成就中断了。请确认当前状态：是已完成？还是需要继续？如果需要继续，请接着做。`;
+        try { waitInjector.safeInject(sid, resumeMsg); } catch (_) {}
+        const dirId = p.dirId;
+        if (dirId) workspaceBroadcast(dirId, { type: 'notify', sessionId: sid, state: 'waiting', message: `任务「${goal}」疑似中断，已发送续接提示` });
+        triggerPush(sid, 'waiting', `[Chat] 任务「${goal}」疑似中断，已自动续接`);
+        console.log(`[multicc/reconcile] ${sid}: interrupted → resumed`);
+      }
+    })
+    .catch(e => console.warn(`[multicc/reconcile] ${sid} failed: ${e.message}`));
+}
+
 function livenessProbe() {
   const now = Date.now();
   for (const [sessionName, cs] of chatSessions) {
@@ -8808,6 +8909,9 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
       syncSharedSkills();                           // periodic forward sync
     }, 5 * 60 * 1000).unref();
     reconcileAllTriggers();
+    // ②: re-judge tasks that were running when the server crashed/restarted.
+    // Delay 5s so aux warms up and WS clients reconnect before we broadcast.
+    setTimeout(() => reconcileTasksAfterRestart(), 5000);
     artifacts.cleanup();
     setInterval(() => artifacts.cleanup(), 6 * 3600 * 1000).unref();
     // Liveness probe (⑤): nudge sessions whose task stalled after the turn ended.
