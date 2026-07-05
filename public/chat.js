@@ -499,6 +499,12 @@ let _turnStartMs = 0;  // wall-clock when the current turn was sent (live reply 
 // one usage block even across different providers; this separates them so
 // "本轮" can show 主 A / 辅 B. Null when no subagent ran this turn.
 let _roleTokens = { main: null, sub: null, subByProvider: [] };
+// Per-turn accumulator for the LATEST streaming LLM step's usage, fed by
+// message_start (input/cache) + message_delta (output). Drives the live
+// `.msg-usage` footer on the currently-streaming bubble so token counts show
+// during output, not only at turn end. Reset when a new turn starts.
+// Shape: { inputTokens, outputTokens, cacheWrite, cacheRead }
+let _liveStreamUsage = null;
 // Provider-level time-window token stats (updated after each turn)
 let _providerId = null;
 let _providerName = null;
@@ -929,6 +935,17 @@ function handleStreamEvent(evt) {
       }
       startTitleAnimation();
       updateUI();
+      // Live token display: message_start carries the input-side usage
+      // (input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+      // the instant this LLM step begins. Show it on the streaming bubble's
+      // footer right away so the user sees token counts during output — not
+      // only after the turn ends. output_tokens arrives later in
+      // message_delta. Falls back to _roleTokens (proxy onUsage) for the
+      // 主/辅 split when available.
+      if (evt.message?.usage) {
+        _liveStreamUsage = accumulateLiveUsage(evt.message.usage, _liveStreamUsage);
+        attachUsageLine(currentMsgEl, null, _roleTokens.main ? _roleTokens : { main: _liveStreamUsage, sub: null, subByProvider: [] });
+      }
       break;
 
     case 'content_block_start':
@@ -965,7 +982,17 @@ function handleStreamEvent(evt) {
       break;
 
     case 'message_delta':
-      if (evt.usage) updateContextBar(evt.usage);
+      if (evt.usage) {
+        updateContextBar(evt.usage);
+        // Live token display: message_delta carries output_tokens (cumulative
+        // for this LLM step) near the end of the step. Accumulate into the
+        // streaming bubble's footer line so output tokens appear as soon as
+        // the step finishes — not only at turn-end result.
+        _liveStreamUsage = accumulateLiveUsage(evt.usage, _liveStreamUsage);
+        if (currentMsgEl) {
+          attachUsageLine(currentMsgEl, null, _roleTokens.main ? _roleTokens : { main: _liveStreamUsage, sub: null, subByProvider: [] });
+        }
+      }
       break;
     case 'message_stop':
       break;
@@ -1072,6 +1099,21 @@ function createAssistantBubble() {
   messagesEl.appendChild(div);
   scrollToBottom();
   return div;
+}
+
+// Accumulate Anthropic-native usage (snake_case fields from message_start /
+// message_delta SSE events) into the live streaming bucket (camelCase).
+// output_tokens in message_delta is CUMULATIVE for this LLM step, so take
+// max rather than sum; input/cache fields from message_start are the step's
+// totals and are summed across steps within the turn.
+function accumulateLiveUsage(usage, bucket) {
+  if (!usage) return bucket;
+  const b = bucket || { inputTokens: 0, outputTokens: 0, cacheWrite: 0, cacheRead: 0 };
+  if (typeof usage.input_tokens === 'number') b.inputTokens += usage.input_tokens;
+  if (typeof usage.output_tokens === 'number' && usage.output_tokens > b.outputTokens) b.outputTokens = usage.output_tokens;
+  if (typeof usage.cache_creation_input_tokens === 'number') b.cacheWrite += usage.cache_creation_input_tokens;
+  if (typeof usage.cache_read_input_tokens === 'number') b.cacheRead += usage.cache_read_input_tokens;
+  return b;
 }
 
 // Build the per-message token usage line shown under an assistant bubble.
