@@ -1889,7 +1889,7 @@ function accumulateTokenByRole(info) {
   }
 }
 mountClaudeProxy(app, { getProvider: providers.getProvider, onUsage: accumulateTokenByRole });
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Codex Responses↔Chat 协议转换代理（国产服务商 DeepSeek/GLM/Qwen/MiniMax）。
 // 必须在 express.json() 之后挂载，以便 req.body 已解析。详见 docs/codex-proxy-contract.md。
