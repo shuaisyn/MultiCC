@@ -1353,6 +1353,20 @@ function replayHistory(messages, serverTokenUsage) {
   }
   // Rebuild context bar with latest session totals + last-turn context.
   if (_sessionTokens.input + _sessionTokens.output > 0) updateContextBar();
+
+  // If the last message is an assistant message still streaming (e.g. WS
+  // reconnected mid-turn), point currentMsgEl at its DOM element so the
+  // stream replay events that follow will reuse this bubble instead of
+  // creating a duplicate.
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'assistant' && last.streaming) {
+    const bubbles = messagesEl.querySelectorAll('.msg.assistant');
+    if (bubbles.length > 0) {
+      currentMsgEl = bubbles[bubbles.length - 1];
+      currentTextContent = last.content || '';
+    }
+  }
+
   scrollToBottom();
   setTimeout(scrollToBottom, 300);
 }
