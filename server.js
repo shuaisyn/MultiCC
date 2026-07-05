@@ -2964,21 +2964,44 @@ app.get('/api/sessions/:id/bundle', (req, res) => {
       } catch (e) { /* best-effort */ }
     }
 
-    // 3) git bundle of the session's worktree branch. `git bundle create`
-    //    writes a binary file; use execFileSync with Buffer encoding to avoid
-    //    corrupting it. Bundle the branch so the target can fetch+checkout.
+    // 3) git bundle of the session's worktree branch — but ONLY the commits
+    //    unique to this session (baseBranch..branch). Bundling the full branch
+    //    history would pull in the entire main lineage (100MB+ for a mature
+    //    repo) and OOM the process when base64'd into the JSON payload. If the
+    //    session has no unique commits (already merged back), there is nothing
+    //    to carry — the target machine's main already has the work.
     let gitBundleB64 = null;
     let gitBundleNote = null;
+    const MAX_BUNDLE_BYTES = 100 * 1024 * 1024;  // 100MB hard cap
     try {
       if (s.worktreePath && s.branch && fs.existsSync(s.worktreePath)) {
-        const tmp = path.join(os.tmpdir(), `multicc-bundle-${s.id}-${Date.now()}.bundle`);
-        // Bundle the branch's full history. The branch name (e.g.
-        // "multicc/<sid>") is passed as a refspec — `git bundle create` accepts
-        // refspecs positionally, NOT via a --branch= flag.
-        execFileSync('git', ['-C', s.worktreePath, 'bundle', 'create', tmp,
-                             s.branch], { encoding: 'buffer', stdio: ['ignore', 'ignore', 'pipe'] });
-        gitBundleB64 = fs.readFileSync(tmp).toString('base64');
-        fs.unlinkSync(tmp);
+        const dir = directories.get(s.dirId);
+        const base = dir && dir.baseBranch ? dir.baseBranch : 'main';
+        // Count unique commits on the session branch vs base. Zero → skip.
+        let unique = 0;
+        try {
+          const out = execFileSync('git', ['-C', s.worktreePath, 'rev-list',
+                                            '--count', `${base}..${s.branch}`],
+                                   { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          unique = parseInt(out, 10) || 0;
+        } catch (_) { /* base may not be resolvable yet — fall back to full branch */ }
+        if (unique === 0) {
+          gitBundleNote = `no unique commits vs ${base} (already merged) — target's main has the work; no git payload needed`;
+        } else {
+          const tmp = path.join(os.tmpdir(), `multicc-bundle-${s.id}-${Date.now()}.bundle`);
+          // Range refspec `base..branch` packs only the session's own commits.
+          execFileSync('git', ['-C', s.worktreePath, 'bundle', 'create', tmp,
+                               `${base}..${s.branch}`], { encoding: 'buffer', stdio: ['ignore', 'ignore', 'pipe'] });
+          const stat = fs.statSync(tmp);
+          if (stat.size > MAX_BUNDLE_BYTES) {
+            fs.unlinkSync(tmp);
+            gitBundleNote = `git bundle too large (${(stat.size/1024/1024).toFixed(1)}MB > ${MAX_BUNDLE_BYTES/1024/1024}MB cap) — skipped; merge excess back to base first`;
+          } else {
+            gitBundleB64 = fs.readFileSync(tmp).toString('base64');
+            gitBundleNote = `${unique} unique commits, ${(stat.size/1024).toFixed(0)}KB bundle`;
+            fs.unlinkSync(tmp);
+          }
+        }
       } else {
         gitBundleNote = 'no worktree/branch on disk — bundle has no git payload';
       }
