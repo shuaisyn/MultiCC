@@ -6313,6 +6313,25 @@ function workspaceBroadcast(dirId, payload) {
   broadcastTo(set, payload);
 }
 
+// ── Global meta event bus (Happier-parity: a voice/meta assistant that monitors
+//    ALL sessions needs a single subscription point spanning every directory).
+//    Every workspace event is also fanned out here with the dirId stamped on, so
+//    a /ws/meta subscriber sees the whole fleet's status/message traffic in one
+//    stream. The voice assistant and any future cross-session UI subscribes here.
+const metaClients = new Set();   // Set<ws>
+function metaBroadcast(payload) {
+  if (metaClients.size === 0) return;
+  broadcastTo(metaClients, payload);
+}
+// Wrap workspaceBroadcast so meta subscribers see every workspace event too,
+// without touching each individual call site. The dirId is preserved so a meta
+// client can still scope by directory when it wants to.
+const _origWorkspaceBroadcast = workspaceBroadcast;
+workspaceBroadcast = function (dirId, payload) {
+  _origWorkspaceBroadcast(dirId, payload);
+  metaBroadcast({ ...payload, dirId });
+};
+
 // Statuses where the agent is actively working a turn (the run-time clock ticks).
 // Everything else — completed / idle / error / waiting — is a resting state that
 // freezes the clock.
