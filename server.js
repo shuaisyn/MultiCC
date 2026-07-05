@@ -5244,6 +5244,24 @@ const MEMORY_DISTILL_BATCH = 10;
 
 function appendChatMessage(sessionName, msg) {
   const history = loadChatHistory(sessionName);
+
+  // Dedup: skip if the last message in history is an assistant with identical
+  // content and tools (guards against double-saves from stream-replay races).
+  if (msg.role === 'assistant' && history.length > 0) {
+    const prev = history[history.length - 1];
+    if (prev.role === 'assistant' &&
+        prev.content === msg.content &&
+        JSON.stringify(prev.tools || null) === JSON.stringify(msg.tools || null)) {
+      // Update usage/timing on the existing message instead of pushing a duplicate.
+      if (msg.usage) prev.usage = msg.usage;
+      if (msg.cost != null) prev.cost = msg.cost;
+      if (msg.durationMs != null) prev.durationMs = msg.durationMs;
+      if (msg.ts) prev.ts = msg.ts;
+      saveChatHistory(sessionName);
+      return;
+    }
+  }
+
   history.push(msg);
   if (msg && msg.role === 'assistant') {
     const ts = Number(msg.ts);
