@@ -658,6 +658,12 @@ function connect() {
   ws.onerror = () => {};
 }
 
+function isRecoverableCodexReconnectErrorText(text) {
+  const s = String(text || '');
+  return /^Codex 出错：Reconnecting\.\.\.\s*\d+\/\d+\s*\(/i.test(s)
+    && /stream disconnected before completion|response\.completed/i.test(s);
+}
+
 /* ── Event handler ── */
 function handleEvent(msg) {
   let _s = msg.type;
@@ -903,6 +909,10 @@ function handleEvent(msg) {
     }
 
     case 'error':
+      if (isRecoverableCodexReconnectErrorText(msg.error || '')) {
+        console.warn('[multicc/chat] suppressed recoverable codex reconnect:', msg.error);
+        break;
+      }
       addSystemMsg(`Error: ${msg.error || JSON.stringify(msg)}`);
       isStreaming = false;
       finishStreaming();

@@ -511,6 +511,21 @@ function providerDefaultModel(appType, providerId) {
 // ── Codex CLI binary resolution (mirrors claude lookup) ──
 function resolveCodex() {
   if (process.env.CODEX_CMD) return process.env.CODEX_CMD;
+  if (isWindows && process.env.LOCALAPPDATA) {
+    const local = path.join(process.env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin');
+    try {
+      const localCandidates = fs.readdirSync(local, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => {
+          const exe = path.join(local, d.name, 'codex.exe');
+          try { return fs.existsSync(exe) ? { exe, mtimeMs: fs.statSync(exe).mtimeMs } : null; }
+          catch (_) { return null; }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      if (localCandidates.length) return localCandidates[0].exe;
+    } catch (_) {}
+  }
   const candidates = [
     '/opt/homebrew/bin/codex', '/usr/local/bin/codex',
     path.join(os.homedir(), '.local', 'bin', 'codex'),
@@ -564,6 +579,11 @@ function codexReasoningConfigArg(session) {
 function codexModelConfigArg(session) {
   const model = session && session.model ? String(session.model).trim() : '';
   return model ? `model="${model}"` : null;
+}
+function isCodexRecoverableReconnectError(message) {
+  const s = String(message || '');
+  return /^Reconnecting\.\.\.\s*\d+\/\d+\s*\(/i.test(s)
+    && /stream disconnected before completion|response\.completed/i.test(s);
 }
 function effortLabel(e) {
   return e || claudeDefaultEffort();
@@ -5032,6 +5052,9 @@ const auxQueue = {
         }
         if (evt.type === 'error' || evt.type === 'turn.failed') {
           codexError = (evt.message || (evt.error && evt.error.message) || 'codex failed').toString();
+          if (evt.type === 'error' && isCodexRecoverableReconnectError(codexError)) {
+            codexError = '';
+          }
           return;
         }
         if (evt.type === 'response.output_text.delta' && evt.delta) {
@@ -7971,6 +7994,10 @@ function runChatTurn(sessionName, text, opts = {}) {
         // and flag the turn so the pointless retry is skipped.
         if (evt.type === 'error' || evt.type === 'turn.failed') {
           const emsg = (evt.message || (evt.error && evt.error.message) || '未知错误').toString();
+          if (evt.type === 'error' && isCodexRecoverableReconnectError(emsg)) {
+            console.warn(`[multicc/chat] [${sessionName}] codex recoverable reconnect: ${emsg}`);
+            return;
+          }
           cs._codexError = emsg;
           forward({ type: 'error', error: `Codex 出错：${emsg}` });
           return;
