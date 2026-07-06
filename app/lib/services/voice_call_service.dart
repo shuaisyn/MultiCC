@@ -547,6 +547,27 @@ class VoiceCallService extends ChangeNotifier {
     return json;
   }
 
+  // ── STT correction feedback ─────────────────────────────────────────────────
+  // When the user's confirmation/refinement wording differs materially from the
+  // raw STT transcript, fire-and-forget POST /api/voice/feedback so the server
+  // can extract corrections (raw → userFinal) and merge them into the Whisper
+  // vocabulary. Mirrors web's voice-output.js feedback path. Never blocks or
+  // fails the voice turn — best-effort learning only.
+  void _sendFeedback(String raw, String userFinal) {
+    if (raw.trim().isEmpty || userFinal.trim().isEmpty) return;
+    if (raw.trim() == userFinal.trim()) return;
+    final body = jsonEncode({
+      'raw': raw,
+      'refined': raw,        // server compares raw vs userFinal
+      'userFinal': userFinal,
+    });
+    http
+        .post(Uri.parse(settings.buildHttpUrl('/api/voice/feedback')),
+            headers: _jsonHeaders(), body: body)
+        .timeout(const Duration(seconds: 10))
+        .catchError((_) {}); // swallow — feedback failure is invisible to the user
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   //  EXECUTING + REPORTING  (chat WS dispatch + /api/voice/progress-summary)
   // ══════════════════════════════════════════════════════════════════════════

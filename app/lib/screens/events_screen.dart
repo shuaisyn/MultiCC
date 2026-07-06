@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/message.dart';
 import '../services/manage_service.dart';
 import '../services/session_service.dart';
 import '../services/settings_service.dart';

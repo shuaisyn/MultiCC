@@ -14,8 +14,11 @@ import '../theme.dart';
 import '../widgets/model_picker.dart';
 import 'agent_resources_screen.dart';
 import 'cron_screen.dart';
+import 'dashboard_screen.dart';
+import 'events_screen.dart';
 import 'main_shell.dart';
 import 'provider_screen.dart';
+import 'token_usage_screen.dart';
 
 /// Unified in-app settings page. Covers app-local config (server connection,
 /// default model, notifications, appearance) and links out to the web
@@ -53,6 +56,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _proxyReadOnly = false;
   String? _proxyStatus;
 
+  // Route claude-official (OAuth subscription) through the proxy — localhost-only POST.
+  bool _officialOauthEnabled = false;
+  bool _officialOauthReadOnly = false;
+  String? _officialOauthStatus;
+
+  // Access-token (remote-login password). Masked preview; editable only from localhost.
+  String _accessTokenMasked = '';
+  bool _hasAccessToken = false;
+  bool _accessTokenReadOnly = false;
+  String? _accessTokenStatus;
+  late final TextEditingController _accessTokenCtrl;
+
   bool _checkingUpdate = false;
   String _appVersion = '…';
 
@@ -68,8 +83,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _keepAlive = s.keepAliveEnabled;
     _fontScale = s.fontScale.value;
     _goalMinCtrl = TextEditingController(text: '60');
+    _accessTokenCtrl = TextEditingController();
     _loadGoalConfig();
     _loadProxyConfig();
+    _loadOfficialOauth();
+    _loadAccessToken();
     _loadVersion();
   }
 
@@ -78,6 +96,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _hostCtrl.dispose();
     _tokenCtrl.dispose();
     _goalMinCtrl.dispose();
+    _accessTokenCtrl.dispose();
     super.dispose();
   }
 
@@ -125,6 +144,107 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       if (mounted) setState(() => _proxyEnabled = prev);
       if (mounted) setState(() => _proxyStatus = '保存失败：$e');
+    }
+  }
+
+  Future<void> _loadOfficialOauth() async {
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .get(Uri.parse(s.buildHttpUrl('/api/settings/official-oauth')), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200 || !mounted) return;
+      final d = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      setState(() => _officialOauthEnabled = d['enabled'] == true);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleOfficialOauth(bool v) async {
+    final prev = _officialOauthEnabled;
+    setState(() {
+      _officialOauthEnabled = v;
+      _officialOauthStatus = null;
+    });
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .post(Uri.parse(s.buildHttpUrl('/api/settings/official-oauth')),
+              headers: headers, body: jsonEncode({'enabled': v}))
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (res.statusCode == 403) {
+        setState(() {
+          _officialOauthEnabled = prev;
+          _officialOauthReadOnly = true;
+          _officialOauthStatus = '仅可在服务器本机切换，已禁用';
+        });
+      } else {
+        setState(() => _officialOauthStatus =
+            res.statusCode == 200 ? '已保存' : '保存失败：HTTP ${res.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _officialOauthEnabled = prev);
+      if (mounted) setState(() => _officialOauthStatus = '保存失败：$e');
+    }
+  }
+
+  Future<void> _loadAccessToken() async {
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .get(Uri.parse(s.buildHttpUrl('/api/settings/access-token')), headers: headers)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200 || !mounted) return;
+      final d = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      setState(() {
+        _hasAccessToken = d['hasToken'] == true;
+        _accessTokenMasked = (d['masked'] ?? '') as String;
+        _accessTokenReadOnly = d['canEdit'] != true;
+        _accessTokenCtrl.text = _accessTokenMasked;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveAccessToken() async {
+    final raw = _accessTokenCtrl.text.trim();
+    // The server rejects payloads that still contain the masked placeholder
+    // (no real change). Detect that and treat as a no-op.
+    if (raw == _accessTokenMasked || raw.contains('****')) {
+      if (mounted) setState(() => _accessTokenStatus = '未改动');
+      return;
+    }
+    setState(() => _accessTokenStatus = '保存中…');
+    try {
+      final s = widget.settings;
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      if (s.token.isNotEmpty) headers['X-Access-Token'] = s.token;
+      final res = await http
+          .post(Uri.parse(s.buildHttpUrl('/api/settings/access-token')),
+              headers: headers, body: jsonEncode({'token': raw}))
+          .timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      if (res.statusCode == 403) {
+        setState(() {
+          _accessTokenReadOnly = true;
+          _accessTokenStatus = '仅可在服务器本机修改';
+        });
+      } else if (res.statusCode == 400) {
+        final d = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+        setState(() => _accessTokenStatus = d['error'] ?? '无有效改动');
+      } else if (res.statusCode == 200) {
+        setState(() => _accessTokenStatus = '已保存');
+        await _loadAccessToken(); // refresh the masked preview
+      } else {
+        setState(() => _accessTokenStatus = '保存失败：HTTP ${res.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _accessTokenStatus = '保存失败：$e');
     }
   }
 
@@ -501,8 +621,103 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _Section(
             title: '服务端设置',
             children: [
-              const _Hint('语音密钥、推送通道、WeChat 桥接、外网穿透、macOS 电源等服务器全局/敏感设置，请在网页管理台配置。'),
+              const _Hint('以下设置读写服务器全局配置。带密钥的项（语音密钥、推送通道、WeChat 桥接等）仍需在网页管理台配置；密码类项仅服务器本机可改。'),
               const SizedBox(height: 10),
+              // Access token (remote-login password) — masked preview + edit.
+              const Text('访问密码 (Access Token)',
+                  style: TextStyle(color: AppColors.text, fontSize: 14)),
+              const SizedBox(height: 2),
+              Text(
+                _hasAccessToken ? '当前: $_accessTokenMasked' : '未设置（远程访问无密码保护）',
+                style: const TextStyle(color: AppColors.muted, fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _accessTokenCtrl,
+                      obscureText: true,
+                      enabled: !_accessTokenReadOnly,
+                      style: const TextStyle(color: AppColors.text, fontSize: 13),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        hintText: '留空清除；仅本机可改',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _accessTokenReadOnly ? null : _saveAccessToken,
+                    child: const Text('保存'),
+                  ),
+                ],
+              ),
+              if (_accessTokenStatus != null) ...[
+                const SizedBox(height: 6),
+                Text(_accessTokenStatus!,
+                    style: const TextStyle(color: AppColors.accent, fontSize: 13)),
+              ],
+              if (_accessTokenReadOnly) ...[
+                const SizedBox(height: 4),
+                const _Hint('远程访问只读：在服务器本机打开 App 方可修改密码'),
+              ],
+              const Divider(height: 24),
+              // Route claude-official (OAuth subscription) through the proxy.
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Official OAuth 走代理',
+                    style: TextStyle(color: AppColors.text, fontSize: 14)),
+                subtitle: const Text('让官方订阅会话的 OAuth token 经代理路由到便宜 provider（⚠️ ToS 风险）',
+                    style: TextStyle(color: AppColors.muted, fontSize: 11)),
+                value: _officialOauthEnabled,
+                activeColor: const Color(0xFF04110f),
+                activeTrackColor: AppColors.accent,
+                onChanged: _officialOauthReadOnly ? null : _toggleOfficialOauth,
+              ),
+              if (_officialOauthStatus != null) ...[
+                const SizedBox(height: 6),
+                Text(_officialOauthStatus!,
+                    style: const TextStyle(color: AppColors.accent, fontSize: 13)),
+              ],
+              const Divider(height: 24),
+              _NavTile(
+                icon: Icons.bar_chart_outlined,
+                title: '状态看板',
+                subtitle: '全会话一览（活跃 / 闲置）+ 聚合统计',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => DashboardScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.history,
+                title: '活动记录',
+                subtitle: '查看目录级事件流（完成 / 合并 / 推送 等）',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => EventsScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.token_outlined,
+                title: 'Token 用量',
+                subtitle: '按时间窗查看各模型 token 消耗',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => TokenUsageScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const Divider(height: 24),
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
