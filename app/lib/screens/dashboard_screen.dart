@@ -39,12 +39,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _manage.fetchDashboardStats(),
       ]);
       if (!mounted) return;
-      final sessMap = results[0] as Map<String, dynamic>;
+      final sessMap = results[0];
       setState(() {
         _sessions = (sessMap['sessions'] as List? ?? [])
             .map((e) => (e as Map).cast<String, dynamic>())
             .toList();
-        _stats = results[1] as Map<String, dynamic>;
+        _stats = results[1];
         _loading = false;
       });
     } catch (e) {
