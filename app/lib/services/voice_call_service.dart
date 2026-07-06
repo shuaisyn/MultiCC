@@ -482,6 +482,9 @@ class VoiceCallService extends ChangeNotifier {
     _setState(VoiceCallState.confirming);
     _setStatus('更新需求中…');
     notifyListeners();
+    // The user's spoken refinement may differ from the raw STT transcript — feed
+    // the delta back so Whisper's vocabulary learns from the correction.
+    _sendFeedback(_accumulatedText, userText);
     final breakdown = await _callConfirm(_accumulatedText, _currentBreakdown, userText);
     _applyBreakdown(breakdown);
     if (breakdown['allConfirmed'] == true) {

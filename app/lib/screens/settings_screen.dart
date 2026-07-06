@@ -18,7 +18,10 @@ import 'dashboard_screen.dart';
 import 'events_screen.dart';
 import 'main_shell.dart';
 import 'provider_screen.dart';
+import 'push_settings_screen.dart';
 import 'token_usage_screen.dart';
+import 'tunnel_settings_screen.dart';
+import 'voice_settings_screen.dart';
 
 /// Unified in-app settings page. Covers app-local config (server connection,
 /// default model, notifications, appearance) and links out to the web

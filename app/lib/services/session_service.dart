@@ -78,6 +78,43 @@ class SessionService {
     return map;
   }
 
+  /// Resolve an in-progress rebase: 'continue' marks conflicts resolved and
+  /// proceeds; 'abort' rolls the worktree back to the pre-rebase state. Mirrors
+  /// web manage's rebase-resolve flow. On remaining conflicts (409) the result
+  /// map carries `ok: false` and an updated `conflicts` list.
+  Future<Map<String, dynamic>> rebaseSession(String id,
+      {String action = 'continue'}) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/sessions/$id/rebase')),
+            headers: _headers, body: jsonEncode({'action': action}))
+        .timeout(const Duration(seconds: 30));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['ok'] = false;
+      map['error'] ??= '${res.statusCode}';
+    }
+    return map;
+  }
+
+  /// Relocate a session to a different directory: drops the old worktree and
+  /// creates a fresh one in the target directory's repo. The session keeps its
+  /// id but its worktreePath/branch/dirId change. Used when a session's work
+  /// belongs under a different project.
+  Future<Map<String, dynamic>> relocateSession(String id, String targetDirId) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/sessions/$id/relocate')),
+            headers: _headers, body: jsonEncode({'dirId': targetDirId}))
+        .timeout(const Duration(seconds: 30));
+    final body = jsonDecode(res.body);
+    final map = body is Map<String, dynamic> ? body : <String, dynamic>{};
+    if (res.statusCode >= 400) {
+      map['ok'] = false;
+      map['error'] ??= '${res.statusCode}';
+    }
+    return map;
+  }
+
   /// Fetch the worktree diff against the directory's base branch. Returns the
   /// parsed server response: `{branch, baseBranch, stat, diff, truncated,
   /// mergeState, error}`. On HTTP error sets `ok: false` + `error`.
