@@ -3388,6 +3388,8 @@ app.delete('/api/sessions/:id', (req, res) => {
     if (chat.claudeProc) try { chat.claudeProc.kill('SIGTERM'); } catch (_) {}
     chatStream.close(id);
     if (chat.pendingClassifyTimer) clearTimeout(chat.pendingClassifyTimer);
+    if (chat.taskGoalTimer) clearTimeout(chat.taskGoalTimer);
+    if (chat.progressSummaryTimer) clearTimeout(chat.progressSummaryTimer);
     chatSessions.delete(id);
   }
   waitInjector.cancelForSession(id);
@@ -6821,6 +6823,7 @@ function purgeNotesForSession(sessionId) {
 // ── Chat intent classification: 30s delayed trigger ──
 const CLASSIFY_DELAY_MS = 30000;
 const PROGRESS_SUMMARY_INTERVAL_MS = 45000; // during-stream progress summary cadence
+const TASK_GOAL_DELAY_MS = Math.max(0, parseInt(process.env.TASK_GOAL_DELAY_MS || '8000', 10) || 8000);
 
 function cancelPendingClassify(cs) {
   if (cs.pendingClassifyTimer) {
@@ -7079,6 +7082,28 @@ ${(userText || '').slice(0, 500)}
     .catch(e => console.warn(`[multicc/aux] Task goal ${sessionName} failed: ${e.message}`));
 }
 
+function scheduleTaskGoal(cs, sessionName, userText) {
+  if (!cs || !cs.currentTask) return;
+  if (cs.taskGoalTimer) {
+    clearTimeout(cs.taskGoalTimer);
+    cs.taskGoalTimer = null;
+  }
+  const turnSeq = cs.currentTask.turnSeq;
+  cs.taskGoalTimer = setTimeout(() => {
+    cs.taskGoalTimer = null;
+    if (!cs.isStreaming) return;
+    if (!cs.currentTask || cs.currentTask.turnSeq !== turnSeq) return;
+    generateTaskGoal(cs, sessionName, userText);
+  }, TASK_GOAL_DELAY_MS);
+}
+
+function cancelTaskGoal(cs) {
+  if (cs && cs.taskGoalTimer) {
+    clearTimeout(cs.taskGoalTimer);
+    cs.taskGoalTimer = null;
+  }
+}
+
 // Ensure cs.currentTask exists for this turn. Continuation heuristic: prior task
 // exists, started < 10 min ago, not done → bump turnSeq, keep the goal (the async
 // generateTaskGoal prompt already asks the model to keep the goal stable across
@@ -7257,6 +7282,7 @@ ${tail}`,
 }
 
 function cancelProgressSummary(cs) {
+  cancelTaskGoal(cs);
   if (cs.progressSummaryTimer) {
     clearTimeout(cs.progressSummaryTimer);
     cs.progressSummaryTimer = null;
@@ -7668,6 +7694,7 @@ function runChatTurn(sessionName, text, opts = {}) {
       recentClientMsgIdSet: new Set(),
       pendingClassifyTimer: null,
       pendingClassifyTaskId: null,
+      taskGoalTimer: null,
       progressSummaryTimer: null,
     };
     chatSessions.set(sessionName, cs);
@@ -7747,7 +7774,6 @@ function runChatTurn(sessionName, text, opts = {}) {
   // starts as a synchronous brief fallback (zero-latency first frame) and is
   // refined async by generateTaskGoal into a stable noun-phrase task goal.
   ensureCurrentTask(cs, sessionName, text);
-  generateTaskGoal(cs, sessionName, text);
   cs.currentTaskName = cs.currentTask ? cs.currentTask.goal : briefTaskDescription(text); // compat for legacy callers
   cs.currentToolCalls = [];
   cs.currentCost = null;
@@ -7768,6 +7794,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // shows "what's running" the instant the turn begins — no AI call, zero
   // latency. The in-progress aux-AI summary will refine it ~45s later.
   cancelProgressSummary(cs);
+  scheduleTaskGoal(cs, sessionName, text);
   emitRunningNotify(sessionName, `处理中：${(cs.currentTask && cs.currentTask.goal) || cs.currentTaskName || '新任务'}`);
   startProgressSummary(cs, sessionName);
   // Marks this turn as initiated by an auto-trigger, so post-turn triggers
@@ -8543,6 +8570,7 @@ function handleChatWs(ws, req, urlObj) {
       recentClientMsgIdSet: new Set(),
       pendingClassifyTimer: null,
       pendingClassifyTaskId: null,
+      taskGoalTimer: null,
       progressSummaryTimer: null,
     };
     chatSessions.set(sessionName, cs);
