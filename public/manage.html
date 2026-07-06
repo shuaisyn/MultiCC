@@ -1353,6 +1353,7 @@
         </div>
         <button class="btn btn-sm" id="dir-detail-memo" title="项目备忘 (multicc.memo.md)">📝</button>
         <button class="btn btn-sm" id="dir-detail-push" style="display:none">↑ 推送</button>
+        <button class="btn btn-sm" id="dir-detail-git" title="Git 提交树" style="display:none" onclick="openGitTree()">🌳</button>
         <button class="btn add-new btn-sm" id="dir-detail-add" title="新建会话">+ 新建</button>
         <button class="btn" onclick="closeDirectoryDetail()">关闭</button>
       </div>
@@ -1477,5 +1478,77 @@
     })();
   </script>
   <script src="tour.js"></script>
+
+  <!-- Git tree modal -->
+  <div id="git-tree-modal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeGitTree()">
+    <div class="modal-card" style="width:min(96vw,800px);max-height:88vh;display:flex;flex-direction:column;background:var(--bg);">
+      <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);gap:10px;">
+        <span style="font-weight:680;font-size:14px;">🌳 Git 提交树</span>
+        <span id="git-tree-path" style="font-size:11px;color:var(--blue);font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <button class="btn btn-sm" onclick="closeGitTree()">关闭</button>
+      </div>
+      <div id="git-tree-body" style="flex:1;overflow:auto;padding:12px 16px;font-size:12px;font-family:var(--mono);line-height:1.6;">
+        加载中…
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .git-commit{padding:6px 0;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:8px;}
+    .git-commit:hover{background:rgba(58,214,197,.04);}
+    .git-hash{color:var(--accent);min-width:58px;flex-shrink:0;}
+    .git-date{color:var(--blue);min-width:100px;flex-shrink:0;font-size:11px;}
+    .git-author{color:var(--text);min-width:70px;flex-shrink:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;}
+    .git-subject{color:var(--text);flex:1;word-break:break-word;}
+    .git-refs{color:var(--orange);font-size:10px;margin-left:4px;}
+    .git-branch-line{color:var(--line);margin-right:4px;}
+  </style>
+
+  <script>
+    window._gitTreeDir = null;
+    function openGitTree(dirId) {
+      const id = dirId || window._currentDetailDir;
+      if (!id) return;
+      window._gitTreeDir = id;
+      document.getElementById('git-tree-modal').style.display = 'flex';
+      document.getElementById('git-tree-body').innerHTML = '加载中…';
+      document.getElementById('git-tree-path').textContent = '';
+      fetch('/api/git/log?dirId=' + encodeURIComponent(id) + '&limit=50')
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) { document.getElementById('git-tree-body').innerHTML = '<span style=color:var(--red)>错误: ' + data.error + '</span>'; return; }
+          document.getElementById('git-tree-path').textContent = data.repoPath || '';
+          if (!data.commits || !data.commits.length) {
+            document.getElementById('git-tree-body').innerHTML = '<span style=color:var(--muted)>暂无提交记录</span>';
+            return;
+          }
+          let html = '';
+          data.commits.forEach((c, i) => {
+            html += '<div class=git-commit>';
+            html += '<span class=git-hash>' + c.short + '</span>';
+            html += '<span class=git-date>' + (c.date || '').slice(0, 10) + '</span>';
+            html += '<span class=git-author>' + (c.author || '') + '</span>';
+            html += '<span class=git-subject>' + escHtml(c.subject || '');
+            if (c.refs) {
+              const refs = c.refs.split(',').map(r => r.trim()).filter(Boolean);
+              refs.forEach(r => {
+                const cls = r.includes('tag:') ? 'git-refs' : 'git-refs';
+                html += ' <span class="' + cls + '">(' + escHtml(r.trim()) + ')</span>';
+              });
+            }
+            html += '</span></div>';
+          });
+          document.getElementById('git-tree-body').innerHTML = html;
+        })
+        .catch(e => { document.getElementById('git-tree-body').innerHTML = '<span style=color:var(--red)>加载失败: ' + e.message + '</span>'; });
+    }
+    function closeGitTree() {
+      document.getElementById('git-tree-modal').style.display = 'none';
+      window._gitTreeDir = null;
+    }
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
 </body>
 </html>

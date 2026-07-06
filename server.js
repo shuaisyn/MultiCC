@@ -2604,6 +2604,47 @@ app.post('/api/debug/classify/:id', (req, res) => {
   });
 });
 
+// ── Collect classify test cases ──
+// Iterates all chat sessions with chat_history, extracts the last assistant
+// message + current taskState, and returns structured test cases for review.
+app.get('/api/debug/classify-test-cases', (req, res) => {
+  const cases = [];
+  for (const [sid, p] of persistedSessions) {
+    if (!p || p.type === 'aux' || p.type === 'gateway' || p.kind !== 'chat') continue;
+    const history = loadChatHistory(sid);
+    if (!history || !history.length) continue;
+    let lastText = '';
+    let lastTs = null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i];
+      if (m.role !== 'assistant') continue;
+      if (typeof m.content === 'string') { lastText = m.content; lastTs = m.ts; break; }
+      if (Array.isArray(m.content)) {
+        lastText = m.content.filter(b => b.type === 'text').map(b => b.text).join(' ');
+        lastTs = m.ts;
+        break;
+      }
+    }
+    if (!lastText || lastText.length < 40) continue;
+    const tail = lastText.slice(-1500);
+    const ts = p.taskState || {};
+    cases.push({
+      sessionId: sid,
+      label: p.label || '',
+      lifecycle: ts.lifecycle || 'unknown',
+      goal: ts.goal || '',
+      summary: p.summary || '',
+      lastAssistantTail300: tail.slice(-300),
+      lastAssistantFullTail: tail,
+      lastActivity: p.lastActivity || null,
+      lastTs: lastTs ? new Date(lastTs).toISOString() : null,
+    });
+  }
+  // Sort by most recent first
+  cases.sort((a, b) => (b.lastTs || '').localeCompare(a.lastTs || ''));
+  res.json({ count: cases.length, cases });
+});
+
 app.delete('/api/sessions/:id/messages/:msgId', (req, res) => {
   const sessionName = req.params.id;
   if (!persistedSessions.get(sessionName)) return res.status(404).json({ error: 'session not found' });
@@ -3192,6 +3233,45 @@ app.get('/api/sessions/:id/diff', async (req, res) => {
     mergeState: mergeStateCached(dir, persisted),
     error,
   });
+});
+
+// ── Git tree viewer ──
+// Returns a simplified git log for a directory or session, suitable for
+// rendering a commit-tree in the fleet panel. Supports ?limit= (default 30)
+// and ?all (include all branches).
+app.get('/api/git/log', async (req, res) => {
+  const dirId = req.query.dirId;
+  const sessionId = req.query.sessionId;
+  const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+  const allBranches = req.query.all === '1';
+
+  let repoPath;
+  if (sessionId) {
+    const persisted = persistedSessions.get(sessionId);
+    if (!persisted || !persisted.worktreePath) return res.status(404).json({ error: 'session or worktree not found' });
+    repoPath = persisted.worktreePath;
+  } else if (dirId) {
+    const dir = directories.get(dirId);
+    if (!dir) return res.status(404).json({ error: 'directory not found' });
+    repoPath = dir.path;
+  } else {
+    return res.status(400).json({ error: 'dirId or sessionId required' });
+  }
+  if (!fs.existsSync(repoPath)) return res.status(404).json({ error: 'repo path missing' });
+
+  const args = ['log', `-${limit}`, '--format=%H%x00%h%x00%an%x00%aI%x00%s%x00%D', '--no-color'];
+  if (allBranches) args.push('--all');
+  try {
+    const raw = await gitRunQueued(repoPath, args, { maxBuffer: 512 * 1024 });
+    const lines = raw.trim().split('\n').filter(Boolean);
+    const commits = lines.map(line => {
+      const [hash, short, author, date, subject, refs] = line.split('\x00');
+      return { hash, short, author, date, subject, refs: refs ? refs.replace(/^,\s*/, '').trim() : '' };
+    });
+    res.json({ commits, repoPath });
+  } catch (e) {
+    res.status(500).json({ error: e.stderr ? String(e.stderr).slice(0, 400) : e.message });
+  }
 });
 
 app.delete('/api/sessions/:id', (req, res) => {

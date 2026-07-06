@@ -1395,6 +1395,7 @@ function openDirectoryDetail(dirId) {
   const dir = (_cachedDirectories || []).find(d => d.id === dirId);
   if (!dir) return;
   _detailDirId = dirId;
+  window._currentDetailDir = dirId;
   connectWorkspace(dirId);
   const title = document.getElementById('dir-detail-title');
   const sub = document.getElementById('dir-detail-subtitle');
@@ -1405,6 +1406,9 @@ function openDirectoryDetail(dirId) {
   const memoBtn = document.getElementById('dir-detail-memo');
   if (memoBtn) memoBtn.onclick = (e) => { e.stopPropagation(); openMemo(dirId); };
   updateDirDetailPush(dirId);
+  // Show git tree button
+  const gitBtn = document.getElementById('dir-detail-git');
+  if (gitBtn) gitBtn.style.display = '';
   renderDirectoryDetailBody(dirId);
   const m = document.getElementById('dir-detail-modal');
   if (m) m.classList.add('visible');
