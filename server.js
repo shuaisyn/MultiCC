@@ -7749,6 +7749,8 @@ function runChatTurn(sessionName, text, opts = {}) {
   // totals from the previous turn must not bleed into the new one.
   roleRuntime.delete(sessionName);
   cs._codexRecoveredDisconnect = false;
+  cs._codexPendingStreamError = '';
+  cs._codexPendingStreamErrorCount = 0;
 
   // Task start: immediately stamp a brief description so the dashboard / chat
   // shows "what's running" the instant the turn begins — no AI call, zero
@@ -7998,20 +8000,12 @@ function runChatTurn(sessionName, text, opts = {}) {
         // and flag the turn so the pointless retry is skipped.
         if (evt.type === 'error' || evt.type === 'turn.failed') {
           const emsg = (evt.message || (evt.error && evt.error.message) || '未知错误').toString();
-          if (evt.type === 'error' && isCodexResponseCompletedDisconnect(emsg)) {
-            const hasOutput = !!(cs.currentAssistantText || cs.currentToolCalls.length);
-            if (hasOutput) {
-              cs._codexRecoveredDisconnect = true;
-              console.warn(`[multicc/chat] [${sessionName}] recovered codex response.completed disconnect after output: ${emsg}`);
-              return;
-            }
-            if (isCodexRecoverableReconnectError(emsg)) {
-              console.warn(`[multicc/chat] [${sessionName}] codex recoverable reconnect before output: ${emsg}`);
-              return;
-            }
-          }
-          if (evt.type === 'error' && isCodexRecoverableReconnectError(emsg)) {
-            console.warn(`[multicc/chat] [${sessionName}] codex recoverable reconnect: ${emsg}`);
+          if (isCodexResponseCompletedDisconnect(emsg)) {
+            cs._codexPendingStreamError = emsg;
+            cs._codexPendingStreamErrorCount = (cs._codexPendingStreamErrorCount || 0) + 1;
+            const hasOutput = !!(cs.currentAssistantText || cs.currentToolCalls.length || cs._resultSaved);
+            if (hasOutput) cs._codexRecoveredDisconnect = true;
+            console.warn(`[multicc/chat] [${sessionName}] pending codex response.completed disconnect${hasOutput ? ' after output' : ''} #${cs._codexPendingStreamErrorCount}: ${emsg}`);
             return;
           }
           cs._codexError = emsg;
@@ -8065,7 +8059,14 @@ function runChatTurn(sessionName, text, opts = {}) {
       const durMs = Date.now() - spawnTs;
       const killReason = cs._killReason || null;
       cs._killReason = null;
-      const recoveredCodexDisconnect = !!cs._codexRecoveredDisconnect && !!(cs.currentAssistantText || cs.currentToolCalls.length);
+      const pendingStreamError = cs._codexPendingStreamError || '';
+      const pendingStreamErrorCount = cs._codexPendingStreamErrorCount || 0;
+      const hasTurnOutput = !!(cs._resultSaved || cs.currentAssistantText || cs.currentToolCalls.length);
+      if (pendingStreamError && !hasTurnOutput && !cs._codexError) {
+        cs._codexError = pendingStreamError;
+        chatBroadcast(sessionName, { type: 'error', error: `Codex 出错：${pendingStreamError}` });
+      }
+      const recoveredCodexDisconnect = (!!cs._codexRecoveredDisconnect || !!pendingStreamError) && hasTurnOutput;
       const diag = {
         session: sessionName, cli: cs.cli, pid: proc.pid, code, signal, durMs, killReason,
         resultSaved: !!cs._resultSaved,
@@ -8074,6 +8075,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         liveClients: cs.clients.size,
         isRetry: !!isRetry,
         recoveredCodexDisconnect,
+        pendingStreamErrorCount,
         stderrTail: stderrBuf.slice(-300).trim(),
       };
       let kind = 'normal';
@@ -8146,6 +8148,8 @@ function runChatTurn(sessionName, text, opts = {}) {
       cs._resultSaved = false;
       const hadCodexError = !!cs._codexError && !recoveredCodexDisconnect; cs._codexError = null;
       cs._codexRecoveredDisconnect = false;
+      cs._codexPendingStreamError = '';
+      cs._codexPendingStreamErrorCount = 0;
       // Guard F: resume (capped) if this turn died on an API/transport error,
       // else reset the consecutive-error counter. Skip user-initiated kills.
       const sawApi = cs._sawApiError; cs._sawApiError = false;
