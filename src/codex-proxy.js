@@ -86,7 +86,12 @@ function mountCodexProxy(app, { getProvider, getPort }) {
     const decoder = new StringDecoder('utf8');
     let buffer = '';
     let clientClosed = false;
-    req.on('close', () => { clientClosed = true; });
+    const markClientClosed = () => {
+      if (res.writableEnded) return;
+      clientClosed = true;
+    };
+    req.on('aborted', markClientClosed);
+    res.on('close', markClientClosed);
 
     try {
       while (!clientClosed) {
@@ -204,10 +209,13 @@ async function proxyResponsesCompat(req, res, proxyTarget) {
   }
 
   let clientClosed = false;
-  req.on('close', () => {
+  const markClientClosed = () => {
+    if (res.writableEnded) return;
     clientClosed = true;
     try { aborter.abort(); } catch (_) {}
-  });
+  };
+  req.on('aborted', markClientClosed);
+  res.on('close', markClientClosed);
 
   const reader = upstream.body.getReader();
   const decoder = new StringDecoder('utf8');
