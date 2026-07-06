@@ -588,6 +588,17 @@ function isCodexRecoverableReconnectError(message) {
   const s = String(message || '');
   return /^Reconnecting\.\.\.\s*\d+\/\d+\s*\(/i.test(s) && isCodexResponseCompletedDisconnect(s);
 }
+const CODEX_STREAM_DISCONNECT_CONTINUE_MAX = 2;
+function codexStreamDisconnectContinuePrompt() {
+  return [
+    '上一轮因为传输连接中断提前停了，已有部分输出已经显示给用户。',
+    '请不要重复已经完成或已经输出的内容，从中断处继续完成原任务。',
+    '如果原任务其实已经全部完成，只用一句话确认完成；否则继续执行必要步骤，直到可以交付。',
+  ].join('\n');
+}
+function isGlm52Session(session) {
+  return String(session?.model || '').toLowerCase() === 'xopglm52';
+}
 function effortLabel(e) {
   return e || claudeDefaultEffort();
 }
@@ -7751,6 +7762,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   cs._codexRecoveredDisconnect = false;
   cs._codexPendingStreamError = '';
   cs._codexPendingStreamErrorCount = 0;
+  cs._codexStreamContinuationCount = 0;
 
   // Task start: immediately stamp a brief description so the dashboard / chat
   // shows "what's running" the instant the turn begins — no AI call, zero
@@ -8083,6 +8095,38 @@ function runChatTurn(sessionName, text, opts = {}) {
       else if (code !== 0 && !recoveredCodexDisconnect) kind = 'nonzero_exit';
       else if (!cs._resultSaved && !cs.currentAssistantText && !cs.currentToolCalls.length) kind = 'empty_exit';
       console.log(`[multicc/chat] [${sessionName}] close kind=${kind} ${JSON.stringify(diag)}`);
+      if (
+        cs.cli === 'codex' &&
+        pendingStreamError &&
+        hasTurnOutput &&
+        !cs._resultSaved &&
+        !killReason &&
+        persisted.cliSessionId &&
+        (cs._codexStreamContinuationCount || 0) < CODEX_STREAM_DISCONNECT_CONTINUE_MAX
+      ) {
+        cs._codexStreamContinuationCount = (cs._codexStreamContinuationCount || 0) + 1;
+        cs._codexRecoveredDisconnect = false;
+        cs._codexPendingStreamError = '';
+        cs._codexPendingStreamErrorCount = 0;
+        cs.isStreaming = true;
+        const continuePrompt = codexStreamDisconnectContinuePrompt();
+        const continueArgs = provider.buildChatSpawnArgs(persisted, continuePrompt, {
+          isFirstTurn: false,
+          rolePrompt,
+          maxTurns: goalMaxTurns,
+          skipDefaultModel: provEnv.skipDefaultModel,
+          providerModel: provEnv.providerModel,
+          providerModels: provEnv.providerModels,
+        });
+        const msg = isGlm52Session(persisted)
+          ? `正在使用 GLM-5.2 最高档：检测到连接中断，正在自动续跑剩余任务（${cs._codexStreamContinuationCount}/${CODEX_STREAM_DISCONNECT_CONTINUE_MAX}）。`
+          : `检测到 Codex 连接中断，正在自动续跑剩余任务（${cs._codexStreamContinuationCount}/${CODEX_STREAM_DISCONNECT_CONTINUE_MAX}）。`;
+        chatBroadcast(sessionName, { type: 'system', subtype: 'warning', message: msg });
+        setSessionStatus(sessionName, { status: 'running', currentFile: null });
+        console.warn(`[multicc/chat] [${sessionName}] auto-continuing codex after response.completed disconnect #${cs._codexStreamContinuationCount}`);
+        cs.claudeProc = spawnChat(continueArgs, true);
+        return;
+      }
       cs.isStreaming = false;
       cs.streamReplay = [];
 
@@ -8150,6 +8194,7 @@ function runChatTurn(sessionName, text, opts = {}) {
       cs._codexRecoveredDisconnect = false;
       cs._codexPendingStreamError = '';
       cs._codexPendingStreamErrorCount = 0;
+      cs._codexStreamContinuationCount = 0;
       // Guard F: resume (capped) if this turn died on an API/transport error,
       // else reset the consecutive-error counter. Skip user-initiated kills.
       const sawApi = cs._sawApiError; cs._sawApiError = false;
