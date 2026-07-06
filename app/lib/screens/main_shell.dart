@@ -3519,6 +3519,12 @@ class SessionCard extends StatelessWidget {
                               sessionId: session.id,
                             );
                             break;
+                          case 'rebase':
+                            _rebaseSession(context);
+                            break;
+                          case 'relocate':
+                            _relocateSession(context);
+                            break;
                           case 'note':
                             _leaveNote(context);
                             break;
@@ -3539,6 +3545,8 @@ class SessionCard extends StatelessWidget {
                             '合并 worktree',
                           ),
                         _menuItem('diff', Icons.difference_outlined, '查看 Diff'),
+                        _menuItem('rebase', Icons.call_merge_rounded, 'Rebase 解决冲突'),
+                        _menuItem('relocate', Icons.drive_file_move_outline, '迁移到其他目录'),
                         _menuItem('note', Icons.mail_outline_rounded, '留言'),
                         if (session.isTerminal)
                           _menuItem(
@@ -3815,6 +3823,178 @@ class SessionCard extends StatelessWidget {
           builder: (_) => TerminalScreen(settings: settings, session: session),
         ),
       );
+    }
+  }
+
+  /// Resolve an in-progress rebase: 'continue' marks conflicts resolved and
+  /// proceeds; 'abort' rolls the worktree back to the pre-rebase state. Mirrors
+  /// web manage's rebase-resolve flow. Use after a sync/merge left conflicts.
+  Future<void> _rebaseSession(BuildContext context) async {
+    String action = 'continue';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          backgroundColor: const Color(0xFF0f1115),
+          title: const Text('Rebase 解决冲突',
+              style: TextStyle(fontSize: 15, color: Color(0xFFf2f4f7))),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '解决 worktree 与基分支的冲突。选择「继续」表示冲突已解决并提交，'
+                '服务器会完成 rebase；选择「放弃」回滚到 rebase 前状态。',
+                style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+              ),
+              const SizedBox(height: 12),
+              Column(
+                children: [
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Radio<String>(
+                      value: 'continue',
+                      groupValue: action,
+                      onChanged: (v) {
+                        if (v != null) setLocal(() => action = v);
+                      },
+                    ),
+                    title: const Text('继续（冲突已解决）',
+                        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+                  ),
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Radio<String>(
+                      value: 'abort',
+                      groupValue: action,
+                      onChanged: (v) {
+                        if (v != null) setLocal(() => action = v);
+                      },
+                    ),
+                    title: const Text('放弃（回滚）',
+                        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b))),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(action == 'abort' ? '放弃' : '继续',
+                  style: const TextStyle(
+                      color: Color(0xFF6aa3ff), fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(content: Text(action == 'abort' ? '正在放弃 rebase…' : '正在继续 rebase…')));
+    try {
+      final result = await SessionService(settings: settings)
+          .rebaseSession(session.id, action: action);
+      final hasConflict = result['conflicts'] is List &&
+          (result['conflicts'] as List).isNotEmpty;
+      final msg = result['ok'] == true
+          ? (result['aborted'] == true
+                ? '✓ rebase 已放弃，worktree 回到同步前状态'
+                : (result['done'] == true
+                      ? '✓ rebase 冲突已解决并完成同步'
+                      : '✓ rebase 已继续'))
+          : hasConflict
+          ? '⚠️ 仍有冲突：${(result['conflicts'] as List).join(', ')}'
+          : 'rebase 失败：${result['error'] ?? ''}';
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+      if (hasConflict && context.mounted) {
+        await showConflictDiffDialog(
+          context, sessionId: session.id, result: result);
+      }
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('rebase 请求失败：$e')));
+    }
+  }
+
+  /// Relocate this session to a different directory: drops the old worktree and
+  /// creates a fresh one in the target directory's repo. The session keeps its
+  /// id but its worktreePath/branch/dirId change.
+  Future<void> _relocateSession(BuildContext context) async {
+    final candidates = mgr.directories.where((d) => d.id != session.dirId).toList();
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有其他目录可迁移')));
+      return;
+    }
+    String targetId = candidates.first.id;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          backgroundColor: const Color(0xFF0f1115),
+          title: const Text('迁移到其他目录',
+              style: TextStyle(fontSize: 15, color: Color(0xFFf2f4f7))),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '在目标目录创建新 worktree，删除当前 worktree。会话 ID 与历史保留。',
+                style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
+              ),
+              const SizedBox(height: 10),
+              DropdownButton<String>(
+                value: targetId,
+                isExpanded: true,
+                dropdownColor: const Color(0xFF0f1115),
+                style: const TextStyle(color: Color(0xFFe7eaee), fontSize: 13),
+                items: [
+                  for (final d in candidates)
+                    DropdownMenuItem(value: d.id, child: Text(d.name)),
+                ],
+                onChanged: (v) {
+                  if (v != null) setLocal(() => targetId = v);
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消', style: TextStyle(color: Color(0xFF8a909b))),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('迁移',
+                  style: TextStyle(
+                      color: Color(0xFF6aa3ff), fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('正在迁移会话…')));
+    try {
+      final result = await SessionService(settings: settings)
+          .relocateSession(session.id, targetId);
+      final msg = result['ok'] == true
+          ? '✓ 已迁移到目标目录'
+          : '迁移失败：${result['error'] ?? ''}';
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('迁移请求失败：$e')));
     }
   }
 

@@ -18,7 +18,10 @@ import 'dashboard_screen.dart';
 import 'events_screen.dart';
 import 'main_shell.dart';
 import 'provider_screen.dart';
+import 'push_settings_screen.dart';
 import 'token_usage_screen.dart';
+import 'tunnel_settings_screen.dart';
+import 'voice_settings_screen.dart';
 
 /// Unified in-app settings page. Covers app-local config (server connection,
 /// default model, notifications, appearance) and links out to the web
@@ -714,6 +717,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   context,
                   MaterialPageRoute<void>(
                     builder: (_) => TokenUsageScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.notifications_active_outlined,
+                title: '推送通知',
+                subtitle: 'Bark / Webhook 通道配置与测试',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => PushSettingsScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.vpn_lock_outlined,
+                title: '外网穿透',
+                subtitle: '花生壳 / Tailscale 状态与重启',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => TunnelSettingsScreen(settings: widget.settings),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _NavTile(
+                icon: Icons.record_voice_over_outlined,
+                title: '语音设置',
+                subtitle: 'ASR / TTS / Whisper 配置状态（只读）',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute<void>(
+                    builder: (_) => VoiceSettingsScreen(settings: widget.settings),
                   ),
                 ),
               ),
