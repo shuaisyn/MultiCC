@@ -341,6 +341,18 @@ const CLAUDE_CHAT_DISALLOWED_TOOLS = (process.env.CLAUDE_CHAT_DISALLOWED_TOOLS ?
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
+
+// Codex chat runs non-interactively (codex exec --json --dangerously-bypass-approvals-and-sandbox).
+// In this mode the request_user_input tool is unavailable (Codex replies "is unavailable in Default mode"),
+// and the model can loop calling it repeatedly, stalling the turn. Prepend a short constraint on the
+// first turn so the model asks questions as plain assistant text instead. Toggle via env if needed.
+const CODEX_NO_ASK_TOOL_HINT = process.env.CODEX_NO_ASK_TOOL_HINT ?? '1';
+const CODEX_ENV_CONSTRAINT = CODEX_NO_ASK_TOOL_HINT === '0' ? '' : [
+  '[MultiCC 环境约束]',
+  '- 当前是非交互执行环境，request_user_input / AskUserQuestion 等向用户提问的工具不可用。',
+  '- 需要向用户提问或请求确认时，直接把问题作为普通文本回复发出，不要调用任何提问类工具。',
+  '[MultiCC 环境约束结束]',
+].join('\n');
 // Default-on toggle for the per-session/per-role claude proxy (src/claude-proxy.js).
 // `let`: hot-reloadable at runtime via POST /api/settings/proxy (persists to .env).
 // Set CLAUDE_PROXY_ENABLED=0 in .env to bypass and route claude directly to the provider.
@@ -780,8 +792,14 @@ const cliProviders = {
       // into the prompt text — only on the first turn, since `exec resume` keeps
       // the earlier context (re-sending every turn would just waste tokens).
       let p = prompt;
-      if (opts.isFirstTurn && opts.rolePrompt) {
-        p = `[角色设定]\n${opts.rolePrompt}\n[角色设定结束]\n\n${prompt}`;
+      if (opts.isFirstTurn) {
+        const promptPrefixes = [];
+        // MultiCC runs codex non-interactively; request_user_input is unavailable here.
+        // Prepend an env constraint on the first turn so the model asks questions as
+        // plain text instead of looping on the unavailable tool.
+        if (CODEX_ENV_CONSTRAINT) promptPrefixes.push(CODEX_ENV_CONSTRAINT);
+        if (opts.rolePrompt) promptPrefixes.push(`[角色设定]\n${opts.rolePrompt}\n[角色设定结束]`);
+        if (promptPrefixes.length) p = `${promptPrefixes.join('\n\n')}\n\n${prompt}`;
       }
       if (opts.isFirstTurn) {
         args.push('exec');
@@ -7986,6 +8004,31 @@ function runChatTurn(sessionName, text, opts = {}) {
             if (tc) {
               tc.result = resultText.length > 1000 ? resultText.slice(0, 1000) + '...' : resultText;
               tc.is_error = (it.exit_code && it.exit_code !== 0) || false;
+            }
+            return;
+          }
+          // Degradation: the model called an ask/user-input tool (request_user_input,
+          // AskUserQuestion, ...) which is unavailable in non-interactive codex exec.
+          // Codex already replies "is unavailable in Default mode" and the model may
+          // loop. Surface the question text to the user as plain assistant text so the
+          // turn stays observable instead of silently churning.
+          if (it.type === 'function_call' && /^(request_user_input|AskUserQuestion)$/i.test(it.name || '')) {
+            let questionText = '';
+            try {
+              const parsed = JSON.parse(it.arguments || '{}');
+              const qs = Array.isArray(parsed.questions) ? parsed.questions : [];
+              questionText = qs.map(q => {
+                const h = q.header || q.title || '';
+                const body = q.question || q.text || '';
+                const opts = Array.isArray(q.options) ? q.options.map(o => '  - ' + (o.label || o.text || '') + (o.description ? '：' + o.description : '')).join('\n') : '';
+                return (h ? `**${h}**\n` : '') + body + (opts ? `\n${opts}` : '');
+              }).join('\n\n');
+            } catch (_) { questionText = String(it.arguments || ''); }
+            const surfaced = questionText ? `\n\n> [提问工具 ${it.name} 在非交互环境不可用，已转为文本透传]\n${questionText}\n` : '';
+            if (surfaced) {
+              cs.currentAssistantText += (cs.currentAssistantText ? '\n\n' : '') + surfaced;
+              forward({ type: 'assistant', message: { content: [{ type: 'text', text: surfaced }] } });
+              console.warn(`[multicc/chat] [${sessionName}] codex ask-tool ${it.name} degraded to text`);
             }
             return;
           }
