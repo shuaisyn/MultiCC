@@ -7,8 +7,8 @@ const { responsesToChat, chatStreamToResponses } = require('./codex-proxy-transf
 const { StringDecoder } = require('string_decoder');
 
 let compatRequestSeq = 0;
-const COMPAT_BUSY_RETRY_MAX = 5;
-const COMPAT_BUSY_RETRY_DELAYS_MS = [250, 600, 1200, 2200];
+const COMPAT_BUSY_RETRY_MAX = Math.max(1, parseInt(process.env.XF_BUSY_RETRY_MAX || '8', 10) || 8);
+const COMPAT_BUSY_RETRY_DELAYS_MS = [250, 600, 1200, 2200, 4000, 6500, 9000];
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -27,6 +27,27 @@ function setSseHeaders(res) {
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
 }
 
+function providerModelIds(provider) {
+  const cfg = (provider && provider.settingsConfig && typeof provider.settingsConfig === 'object')
+    ? provider.settingsConfig
+    : {};
+  const ids = new Set();
+  const add = (value) => {
+    const id = String(value || '').trim();
+    if (id) ids.add(id);
+  };
+  if (cfg.modelCatalog && Array.isArray(cfg.modelCatalog.models)) {
+    for (const item of cfg.modelCatalog.models) {
+      add(typeof item === 'string' ? item : item && (item.model || item.id));
+    }
+  }
+  if (provider && typeof provider.model === 'string') add(provider.model);
+  if (provider && typeof provider.models === 'string') {
+    provider.models.split(/\r?\n|,/).forEach(add);
+  }
+  return [...ids];
+}
+
 /**
  * 在 express app 上挂载 codex 协议转换代理端点。
  *   POST /codex-proxy/:providerId/responses
@@ -34,6 +55,31 @@ function setSseHeaders(res) {
  * @param {{ getProvider:(appType:string,id:string)=>any, getPort:()=>number }} opts
  */
 function mountCodexProxy(app, { getProvider, getPort }) {
+  app.get('/codex-proxy/:providerId/models', (req, res) => {
+    const provider = getProvider('codex', req.params.providerId);
+    if (!provider) {
+      return res.status(404).json({ error: `codex provider not found: ${req.params.providerId}` });
+    }
+    const ids = providerModelIds(provider);
+    const models = ids.map(id => ({
+      id,
+      slug: id,
+      name: id,
+      display_name: id,
+      object: 'model',
+      created: 0,
+      owned_by: 'multicc',
+      context_window: 200000,
+      max_output_tokens: 8192,
+      supports_reasoning: true,
+    }));
+    res.json({
+      object: 'list',
+      data: models,
+      models,
+    });
+  });
+
   app.post('/codex-proxy/:providerId/responses', async (req, res) => {
     const providerId = req.params.providerId;
 
