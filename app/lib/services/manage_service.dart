@@ -5,10 +5,12 @@ import '../models/message.dart';
 import 'settings_service.dart';
 
 /// Thin REST client for the server-side management endpoints that the web
-/// dashboard (manage.html) exposes but the app previously lacked: scheduled
-/// tasks (cron), agent resources (skills / Claude history) and the temp-upload
-/// cache. All non-sensitive — sensitive server config (voice keys, push
-/// channels, tunnel, power) stays on the web dashboard by design.
+/// dashboard (manage.html) exposes: scheduled tasks (cron), agent resources
+/// (skills / Claude history), temp-upload cache, token usage, access-token,
+/// official-oauth, dashboard overview, per-directory events, push channels
+/// (Bark / Webhook), external tunnel, and voice settings. Write endpoints that
+/// are localhost-only on the server return 403 from a remote phone — callers
+/// must surface "仅本机可改" for those.
 class ManageService {
   final SettingsService settings;
   ManageService({required this.settings});
@@ -261,6 +263,180 @@ class ManageService {
     final res = await http
         .delete(Uri.parse(_url('/api/uploads/cleanup')), headers: _headers)
         .timeout(const Duration(seconds: 30));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  // ── Server-side config: token usage / access-token / official-oauth ─────────
+  // These were web-dashboard-only; now surfaced in the app so phone clients can
+  // read them. Write endpoints are localhost-only on the server, so a remote
+  // phone gets 403 — callers must handle that (read-only fallback).
+
+  /// Global token usage. `force: true` bypasses the server cache (refresh btn).
+  /// Returns `{generatedAt, responses, windows:{today,week,month,all:{model:tokens}}, byDay}`.
+  Future<Map<String, dynamic>> fetchTokenUsage({bool force = false}) async {
+    final q = force ? '?refresh=1' : '';
+    final res = await http
+        .get(Uri.parse(_url('/api/token-usage/global$q')), headers: _headers)
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  /// Access-token (remote-login password). Masked; editable only from localhost.
+  /// Returns `{hasToken, masked, canEdit}`.
+  Future<Map<String, dynamic>> fetchAccessToken() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/settings/access-token')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  /// Set/clear the access token. Server rejects non-localhost with 403; the
+  /// caller should catch Exception and surface "仅本机可改".
+  Future<void> saveAccessToken(String token) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/settings/access-token')),
+            headers: _headers, body: jsonEncode({'token': token}))
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+  }
+
+  /// Route claude-official (OAuth subscription) through the proxy.
+  /// Returns `{enabled}`. POST is localhost-only.
+  Future<bool> fetchOfficialOauth() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/settings/official-oauth')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map)['enabled'] == true;
+  }
+
+  Future<void> setOfficialOauth(bool enabled) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/settings/official-oauth')),
+            headers: _headers, body: jsonEncode({'enabled': enabled}))
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+  }
+
+  // ── Dashboard (session overview + aggregate stats) ─────────────────────────
+
+  /// All sessions with active flag + lastActivity. Optional `kind` filter.
+  /// Returns `{sessions: [...], count}`.
+  Future<Map<String, dynamic>> fetchDashboardSessions({String? kind}) async {
+    final q = (kind == 'chat' || kind == 'terminal') ? '?kind=$kind' : '';
+    final res = await http
+        .get(Uri.parse(_url('/api/dashboard/sessions$q')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  /// Aggregate stats: `{total, active, byCli, byKind}`.
+  Future<Map<String, dynamic>> fetchDashboardStats() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/dashboard/stats')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  // ── Per-directory activity feed (events) ───────────────────────────────────
+
+  /// Recent events for a directory. Returns `{events: [{ts,type,sessionId,sessionLabel,detail}]}`.
+  Future<List<Map<String, dynamic>>> fetchDirectoryEvents(String dirId) async {
+    final res = await http
+        .get(Uri.parse(_url('/api/directories/$dirId/events')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    final j = jsonDecode(utf8.decode(res.bodyBytes)) as Map;
+    final evs = j['events'] as List? ?? [];
+    return evs.map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
+  // ── Push notification channels (Bark / Webhook) ────────────────────────────
+
+  /// Returns `{barkUrl, hasBark, webhookUrl, hasWebhook}` (URLs masked).
+  Future<Map<String, dynamic>> fetchNotifyConfig() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/settings/notify')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  Future<void> saveNotifyConfig({String? barkUrl, String? webhookUrl}) async {
+    final body = <String, dynamic>{};
+    if (barkUrl != null) body['barkUrl'] = barkUrl;
+    if (webhookUrl != null) body['webhookUrl'] = webhookUrl;
+    final res = await http
+        .post(Uri.parse(_url('/api/settings/notify')),
+            headers: _headers, body: jsonEncode(body))
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+  }
+
+  /// Push health: `{subscriptionCount, global, bark:{configured,...}, webhook:{configured,...}, subscriptions:[...]}`.
+  Future<Map<String, dynamic>> fetchPushHealth() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/push/health')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> testPush() async {
+    final res = await http
+        .post(Uri.parse(_url('/api/push/test')), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> testBark() async {
+    final res = await http
+        .post(Uri.parse(_url('/api/push/test-bark')), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> testWebhook() async {
+    final res = await http
+        .post(Uri.parse(_url('/api/push/test-webhook')), headers: _headers)
+        .timeout(const Duration(seconds: 15));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  // ── External tunnel (花生壳 / Tailscale) ───────────────────────────────────
+
+  /// Returns tunnel.getStatus(): `{phddns:{enabled,url,...}, tailscale:{enabled,url,funnel,...}, ...}`.
+  Future<Map<String, dynamic>> fetchTunnelStatus() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/settings/tunnel')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> restartTunnel(String provider) async {
+    final res = await http
+        .post(Uri.parse(_url('/api/tunnel/restart/$provider')), headers: _headers)
+        .timeout(const Duration(seconds: 20));
+    if (res.statusCode >= 400) _throw(res);
+    return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
+  }
+
+  // ── Voice settings (read-only: keys are sensitive, edit stays on web) ───────
+
+  /// Returns the full voice-config shape (asr / tts / whisper / openrouter).
+  Future<Map<String, dynamic>> fetchVoiceSettings() async {
+    final res = await http
+        .get(Uri.parse(_url('/api/settings/voice')), headers: _headers)
+        .timeout(const Duration(seconds: 10));
     if (res.statusCode >= 400) _throw(res);
     return (jsonDecode(utf8.decode(res.bodyBytes)) as Map).cast<String, dynamic>();
   }
