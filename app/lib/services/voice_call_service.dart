@@ -564,11 +564,19 @@ class VoiceCallService extends ChangeNotifier {
       'refined': raw,        // server compares raw vs userFinal
       'userFinal': userFinal,
     });
-    http
-        .post(Uri.parse(settings.buildHttpUrl('/api/voice/feedback')),
-            headers: _jsonHeaders(), body: body)
-        .timeout(const Duration(seconds: 10))
-        .catchError((_) {}); // swallow — feedback failure is invisible to the user
+    // Fire-and-forget; never blocks or fails the voice turn.
+    _postFeedback(body);
+  }
+
+  Future<void> _postFeedback(String body) async {
+    try {
+      await http
+          .post(Uri.parse(settings.buildHttpUrl('/api/voice/feedback')),
+              headers: _jsonHeaders(), body: body)
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      // swallow — feedback failure is invisible to the user
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════

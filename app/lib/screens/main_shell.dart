@@ -3848,27 +3848,35 @@ class SessionCard extends StatelessWidget {
                 style: TextStyle(color: Color(0xFF8a909b), fontSize: 11),
               ),
               const SizedBox(height: 12),
-              RadioGroup<String>(
-                groupValue: action,
-                onChanged: (v) {
-                  if (v != null) setLocal(() => action = v);
-                },
-                child: const Column(
-                  children: [
-                    ListTile(
-                      dense: true,
-                      leading: Radio<String>(value: 'continue'),
-                      title: Text('继续（冲突已解决）',
-                          style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+              Column(
+                children: [
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Radio<String>(
+                      value: 'continue',
+                      groupValue: action,
+                      onChanged: (v) {
+                        if (v != null) setLocal(() => action = v);
+                      },
                     ),
-                    ListTile(
-                      dense: true,
-                      leading: Radio<String>(value: 'abort'),
-                      title: Text('放弃（回滚）',
-                          style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+                    title: const Text('继续（冲突已解决）',
+                        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+                  ),
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Radio<String>(
+                      value: 'abort',
+                      groupValue: action,
+                      onChanged: (v) {
+                        if (v != null) setLocal(() => action = v);
+                      },
                     ),
-                  ],
-                ),
+                    title: const Text('放弃（回滚）',
+                        style: TextStyle(color: Color(0xFFe7eaee), fontSize: 13)),
+                  ),
+                ],
               ),
             ],
           ),
