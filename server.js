@@ -580,10 +580,13 @@ function codexModelConfigArg(session) {
   const model = session && session.model ? String(session.model).trim() : '';
   return model ? `model="${model}"` : null;
 }
+function isCodexResponseCompletedDisconnect(message) {
+  const s = String(message || '');
+  return /stream disconnected before completion/i.test(s) && /response\.completed/i.test(s);
+}
 function isCodexRecoverableReconnectError(message) {
   const s = String(message || '');
-  return /^Reconnecting\.\.\.\s*\d+\/\d+\s*\(/i.test(s)
-    && /stream disconnected before completion|response\.completed/i.test(s);
+  return /^Reconnecting\.\.\.\s*\d+\/\d+\s*\(/i.test(s) && isCodexResponseCompletedDisconnect(s);
 }
 function effortLabel(e) {
   return e || claudeDefaultEffort();
@@ -5052,7 +5055,7 @@ const auxQueue = {
         }
         if (evt.type === 'error' || evt.type === 'turn.failed') {
           codexError = (evt.message || (evt.error && evt.error.message) || 'codex failed').toString();
-          if (evt.type === 'error' && isCodexRecoverableReconnectError(codexError)) {
+          if (evt.type === 'error' && isCodexResponseCompletedDisconnect(codexError) && assistantText) {
             codexError = '';
           }
           return;
@@ -7745,6 +7748,7 @@ function runChatTurn(sessionName, text, opts = {}) {
   // onUsage hook. A new user turn starts a fresh "本轮" window, so stale subagent
   // totals from the previous turn must not bleed into the new one.
   roleRuntime.delete(sessionName);
+  cs._codexRecoveredDisconnect = false;
 
   // Task start: immediately stamp a brief description so the dashboard / chat
   // shows "what's running" the instant the turn begins — no AI call, zero
@@ -7994,6 +7998,18 @@ function runChatTurn(sessionName, text, opts = {}) {
         // and flag the turn so the pointless retry is skipped.
         if (evt.type === 'error' || evt.type === 'turn.failed') {
           const emsg = (evt.message || (evt.error && evt.error.message) || '未知错误').toString();
+          if (evt.type === 'error' && isCodexResponseCompletedDisconnect(emsg)) {
+            const hasOutput = !!(cs.currentAssistantText || cs.currentToolCalls.length);
+            if (hasOutput) {
+              cs._codexRecoveredDisconnect = true;
+              console.warn(`[multicc/chat] [${sessionName}] recovered codex response.completed disconnect after output: ${emsg}`);
+              return;
+            }
+            if (isCodexRecoverableReconnectError(emsg)) {
+              console.warn(`[multicc/chat] [${sessionName}] codex recoverable reconnect before output: ${emsg}`);
+              return;
+            }
+          }
           if (evt.type === 'error' && isCodexRecoverableReconnectError(emsg)) {
             console.warn(`[multicc/chat] [${sessionName}] codex recoverable reconnect: ${emsg}`);
             return;
@@ -8042,9 +8058,14 @@ function runChatTurn(sessionName, text, opts = {}) {
         console.log(`[multicc/chat] [${sessionName}] stale proc pid=${proc.pid} closed after replacement (code=${code}, signal=${signal || ''})`);
         return;
       }
+      if (cs.lineBuf.trim()) {
+        try { handleLine(cs.lineBuf); } catch (_) {}
+      }
+      cs.lineBuf = '';
       const durMs = Date.now() - spawnTs;
       const killReason = cs._killReason || null;
       cs._killReason = null;
+      const recoveredCodexDisconnect = !!cs._codexRecoveredDisconnect && !!(cs.currentAssistantText || cs.currentToolCalls.length);
       const diag = {
         session: sessionName, cli: cs.cli, pid: proc.pid, code, signal, durMs, killReason,
         resultSaved: !!cs._resultSaved,
@@ -8052,18 +8073,14 @@ function runChatTurn(sessionName, text, opts = {}) {
         toolCalls: cs.currentToolCalls.length,
         liveClients: cs.clients.size,
         isRetry: !!isRetry,
+        recoveredCodexDisconnect,
         stderrTail: stderrBuf.slice(-300).trim(),
       };
       let kind = 'normal';
       if (signal) kind = killReason ? `killed(${killReason})` : `signaled(${signal})`;
-      else if (code !== 0) kind = 'nonzero_exit';
-      else if (!cs._resultSaved && !cs.currentAssistantText) kind = 'empty_exit';
+      else if (code !== 0 && !recoveredCodexDisconnect) kind = 'nonzero_exit';
+      else if (!cs._resultSaved && !cs.currentAssistantText && !cs.currentToolCalls.length) kind = 'empty_exit';
       console.log(`[multicc/chat] [${sessionName}] close kind=${kind} ${JSON.stringify(diag)}`);
-
-      if (cs.lineBuf.trim()) {
-        try { handleLine(cs.lineBuf); } catch (_) {}
-      }
-      cs.lineBuf = '';
       cs.isStreaming = false;
       cs.streamReplay = [];
 
@@ -8071,7 +8088,7 @@ function runChatTurn(sessionName, text, opts = {}) {
       // once with a fresh session id (covers resume-failed / session-id conflict cases).
       // A reported codex error (cs._codexError) is a real provider failure, not a
       // resume glitch — retrying would just hit the same wall, so skip it.
-      if (!isRetry && !cs.currentAssistantText && !killReason && !cs._codexError) {
+      if (!isRetry && !cs.currentAssistantText && !cs.currentToolCalls.length && !killReason && !cs._codexError) {
         const stderrTail = stderrBuf.slice(-300).trim();
         const reason = stderrTail.includes('already in use') ? 'session-id conflict'
           : stderrTail.includes('No conversation found') || stderrTail.includes('session not found') ? 'resume target missing'
@@ -8093,7 +8110,7 @@ function runChatTurn(sessionName, text, opts = {}) {
         return;
       }
 
-      if (isRetry && !cs.currentAssistantText) {
+      if (isRetry && !cs.currentAssistantText && !cs.currentToolCalls.length) {
         const stderrTail = stderrBuf.slice(-300).trim();
         chatBroadcast(sessionName, {
           type: 'error',
@@ -8103,6 +8120,7 @@ function runChatTurn(sessionName, text, opts = {}) {
 
       cs.claudeProc = null;
 
+      let savedInClose = false;
       if (!cs._resultSaved && (cs.currentAssistantText || cs.currentToolCalls.length)) {
         appendChatMessage(sessionName, {
           role: 'assistant', content: cs.currentAssistantText,
@@ -8110,12 +8128,24 @@ function runChatTurn(sessionName, text, opts = {}) {
           cost: cs.currentCost, ts: Date.now(),
         });
         cs.chatTurnCount++;
+        savedInClose = true;
+      }
+      if (recoveredCodexDisconnect && (savedInClose || cs._resultSaved)) {
+        chatBroadcast(sessionName, {
+          type: 'result',
+          total_cost_usd: null,
+          usage: {},
+          durationMs: cs.turnStartedAt ? Date.now() - cs.turnStartedAt : undefined,
+          num_turns: cs.chatTurnCount,
+        });
+        scheduleIntentClassify(cs, sessionName);
       }
       const finalText = cs.currentAssistantText;
       cs.currentAssistantText = '';
       cs.currentToolCalls = [];
       cs._resultSaved = false;
-      const hadCodexError = !!cs._codexError; cs._codexError = null;
+      const hadCodexError = !!cs._codexError && !recoveredCodexDisconnect; cs._codexError = null;
+      cs._codexRecoveredDisconnect = false;
       // Guard F: resume (capped) if this turn died on an API/transport error,
       // else reset the consecutive-error counter. Skip user-initiated kills.
       const sawApi = cs._sawApiError; cs._sawApiError = false;
