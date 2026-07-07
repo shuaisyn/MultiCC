@@ -7775,7 +7775,8 @@ function readUntilArchive(filePath, capChars) {
   let head = marker >= 0 ? body.slice(0, marker) : body;
   head = head.trim();
   if (head.length > capChars) {
-    head = head.slice(0, capChars) + '\n（… 内容超出注入上限，已截断；需要全文用 Read 工具读）';
+    const suffix = '\n（… 内容超出注入上限，已截断；需要全文用 Read 工具读）';
+    head = head.slice(0, Math.max(0, capChars - suffix.length)) + suffix;
   }
   return head;
 }
