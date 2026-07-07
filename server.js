@@ -1101,6 +1101,13 @@ const { createDirectoryModule } = require('./src/directory');
 function seedCommanderSession(dir) {
   const commander = agentCommanderPreset();
   if (commander && commander.prompt) {
+    // M7: set the Commander prompt as the directory's default role, so every
+    // new session under this directory inherits it as the fallback identity
+    // (unless the first prompt triggers coarse/explicit matching).
+    if (!dir.rolePrompt) {
+      dir.rolePrompt = commander.prompt;
+      saveDirectories();
+    }
     const enriched = enrichAgentPresetDefaults(commander);
     const r = createSessionRecord({
       dir,
@@ -1112,7 +1119,8 @@ function seedCommanderSession(dir) {
       effort: enriched.defaultEffort || null,
     });
     if (r.ok) {
-      r.session.rolePrompt = commander.prompt;
+      // The seed session inherits dir.rolePrompt via resolveRolePrompt; no
+      // need to write rolePrompt on the session itself.
       savePersistedSessions();
       appendEvent(dir.id, 'session_role_changed', `${r.session.label || r.session.id}（默认指挥官）`, r.session.id);
     } else {
@@ -7275,6 +7283,11 @@ function sessionMemoryDir(persisted) {
   return path.join(MEMORY_STORE_ROOT, String(persisted.dirId), 'sessions', String(persisted.id));
 }
 function sharedMemoryDir(dirId) {
+  // D1: shared memory lives inside the directory's git repo (.multicc-memory/),
+  // so Codex and MultiCC read/write the same files and git syncs them.
+  // Fallback to the data-area path only when the directory is gone.
+  const dir = directories.get(dirId);
+  if (dir && dir.path) return path.join(dir.path, '.multicc-memory');
   return path.join(MEMORY_STORE_ROOT, String(dirId), '_shared');
 }
 function primaryMemFileName(cli) {
@@ -7359,6 +7372,61 @@ function readMemoryFolder(dir, capChars) {
   return out.join('\n\n');
 }
 
+// ── Sedna fusion helpers ───────────────────────────────────────────────────
+// readUntilArchive: read a file up to (but not including) the "📦 归档" marker,
+// then apply a hard char cap. Missing file → ''. This is the time-window
+// memory discipline from Sedna: inject only the recent/active head, not the
+// archive tail.
+function readUntilArchive(filePath, capChars) {
+  let body;
+  try { body = fs.readFileSync(filePath, 'utf8'); } catch (_) { return ''; }
+  const marker = body.indexOf('## 📦 归档');
+  let head = marker >= 0 ? body.slice(0, marker) : body;
+  head = head.trim();
+  if (head.length > capChars) {
+    head = head.slice(0, capChars) + '\n（… 内容超出注入上限，已截断；需要全文用 Read 工具读）';
+  }
+  return head;
+}
+
+// parseFocusLines: extract the two-tier focus declaration from a session's own
+// private memory text. Returns { focusSet: string[], sessionFocus: string|null }.
+//   业务焦点集: cend, screener, strings
+//   会话焦点: cend
+function parseFocusLines(ownText) {
+  if (!ownText) return { focusSet: [], sessionFocus: null };
+  let focusSet = [];
+  let sessionFocus = null;
+  const setMatch = ownText.match(/^业务焦点集:\s*(.+)$/m);
+  if (setMatch) {
+    focusSet = setMatch[1].split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  }
+  const focusMatch = ownText.match(/^会话焦点:\s*(\w+)/m);
+  if (focusMatch) sessionFocus = focusMatch[1];
+  return { focusSet, sessionFocus };
+}
+
+// readStateHeadline: read a state file's first "## 🎯 当前在追" section and
+// return a one-line pointer "<name> · <first content line>". Falls back to
+// "<name> · <file path>" if the section is missing. Returns '' only when the
+// file itself is missing.
+function readStateHeadline(filePath, name, capChars) {
+  let body;
+  try { body = fs.readFileSync(filePath, 'utf8'); } catch (_) { return ''; }
+  const marker = body.indexOf('## 🎯 当前在追');
+  let snippet = '';
+  if (marker >= 0) {
+    const after = body.slice(marker + '## 🎯 当前在追'.length);
+    const archIdx = after.indexOf('## 📦 归档');
+    const section = archIdx >= 0 ? after.slice(0, archIdx) : after;
+    const lines = section.split('\n').map(s => s.trim()).filter(Boolean);
+    if (lines.length) snippet = lines[0];
+  }
+  if (!snippet) snippet = filePath;
+  const line = `${name} · ${snippet}`;
+  return line.length > capChars ? line.slice(0, capChars - 1) + '…' : line;
+}
+
 // Build the folder-memory injection block (own + shared) for a session. Returns
 // null for aux/gateway/system sessions or when identifiers are missing.
 function buildFolderMemoryBlock(persisted) {
@@ -7366,9 +7434,36 @@ function buildFolderMemoryBlock(persisted) {
   if (persisted.type === 'aux' || persisted.type === 'gateway') return null;
   const { own, shared } = ensureMemoryDirs(persisted);
   const ownText = readMemoryFolder(own, SESSION_MEM_CAP);
-  const sharedText = readMemoryFolder(shared, SHARED_MEM_CAP);
+  // ── M3: three-layer read strategy (Sedna fusion) ──
+  // shared now lives in dir.path/.multicc-memory/ (thin cross-workbench surface).
+  // On top of that, inject STATE.md head + focus-bound state head + pointers.
+  const dir = directories.get(persisted.dirId);
+  let sharedText = readMemoryFolder(shared, 1500);  // .multicc-memory/ thin surface
+  if (dir && dir.path) {
+    // Layer 1: STATE.md top index (up to 📦 归档 marker)
+    const stateHead = readUntilArchive(path.join(dir.path, 'STATE.md'), 800);
+    if (stateHead) {
+      sharedText += (sharedText ? '\n\n' : '') + `#### STATE.md\n${stateHead}`;
+    }
+    // Layer 3: focus binding (parse two-tier focus from own private memory)
+    const { focusSet, sessionFocus } = parseFocusLines(ownText);
+    if (sessionFocus) {
+      const sf = readUntilArchive(path.join(dir.path, 'state', sessionFocus + '.md'), 1500);
+      if (sf) sharedText += (sharedText ? '\n\n' : '') + `#### state/${sessionFocus}.md\n${sf}`;
+    }
+    if (focusSet && focusSet.length) {
+      // Other focus-set lines as minimal pointers (not the session focus)
+      const others = focusSet.filter(x => x !== sessionFocus);
+      for (const line of others) {
+        const hl = readStateHeadline(path.join(dir.path, 'state', line + '.md'), line, 150);
+        if (hl) sharedText += `\n- ${hl}`;
+      }
+    }
+    // Layer 2 trigger: point the model at the full state/ folder for Read-on-demand
+    sharedText += `\n\n（完整台账在 ${path.join(dir.path, 'state')}，重启旧线或查细节时用 Read 读对应文件）`;
+  }
   return (
-`[记忆库｜每轮自动注入] 你有一个持久记忆文件夹（存在 multicc 数据区，不在本仓库、不进 git）。想长期记住的信息，用 Write/Edit 写进对应文件夹的 .md 文件即可，下一轮起自动带上；过时的删掉。
+`[记忆库｜每轮自动注入] 私有记忆在 multicc 数据区（不进 git）；公共记忆已指向仓库内 .multicc-memory/ + STATE.md + state/（进 git，Codex/multicc 共享同一份）。想长期记住的信息，用 Write/Edit 写进对应文件夹的 .md 文件即可，下一轮起自动带上；过时的删掉。
 · 私有记忆（仅本会话可见）文件夹：${own}
 · 公共记忆（本项目所有会话共享）文件夹：${shared}
 
@@ -7410,6 +7505,49 @@ function memScopeDir(persisted, scope) {
 // session-level role wins; otherwise inherit the owning directory's default.
 // The distilled JSON memory (keyword-matched) and the folder-based memory
 // (own + shared) are appended so every turn carries them. Returns null when
+// ── M7: session identity auto-decision (build-time, once) ─────────────────
+// Priority: user explicit in prompt > commander-assigned > keyword
+// coarse-match > fallback (directory default). Decided on the first turn
+// when the session has no explicit rolePrompt, then persisted so it sticks.
+const ROLE_KEYWORD_MAP = [
+  { kw: ['测试', '验收', '回归', 'regression', 'playwright', 'api测试', '端到端'], presetId: 'testing__testing-api-tester' },
+  { kw: ['设计', '原型', 'UI', 'UX', '界面', '交互', '视觉'], presetId: 'design__design-ui-designer' },
+  { kw: ['代码审查', 'review', '重构', 'code review'], presetId: 'engineering__engineering-code-reviewer' },
+  { kw: ['文档', '说明书写', '文档生成'], presetId: 'specialized__specialized-document-generator' },
+];
+const ROLE_EXPLICIT_RE = /(?:用|作为|以)\s*[:：]?\s*([A-Za-z\u4e00-\u9fa5][\w\u4e00-\u9fa5·\-\s]{1,30}?)\s*(?:角色|身份|role|persona)/i;
+
+function findPresetById(id) {
+  const data = loadAgentPresets();
+  return (data && (data.presets || []).find(x => x.id === id)) || null;
+}
+
+// Decide the session role from the first prompt. Returns a prompt string or null.
+function decideSessionRole(promptText, persisted) {
+  if (!promptText) return null;
+  // (1) user explicit: "用 PM 角色" etc.
+  const ex = ROLE_EXPLICIT_RE.exec(promptText);
+  if (ex) {
+    const want = ex[1].trim();
+    const data = loadAgentPresets();
+    const match = data && (data.presets || []).find(p =>
+      (p.name || '').toLowerCase().includes(want.toLowerCase()) ||
+      (p.id || '').toLowerCase().includes(want.toLowerCase()));
+    if (match && match.prompt) return match.prompt;
+  }
+  // (3) coarse keyword match
+  const lower = promptText.toLowerCase();
+  for (const entry of ROLE_KEYWORD_MAP) {
+    if (entry.kw.some(k => lower.includes(k.toLowerCase()) || promptText.includes(k))) {
+      const p = findPresetById(entry.presetId);
+      if (p && p.prompt) return p.prompt;
+    }
+  }
+  // (4) fallback: directory default rolePrompt
+  const dir = persisted && persisted.dirId ? directories.get(persisted.dirId) : null;
+  return (dir && dir.rolePrompt) || null;
+}
+
 // nothing at all applies.
 function resolveRolePrompt(persisted) {
   if (!persisted) return null;
@@ -7806,6 +7944,18 @@ function runChatTurn(sessionName, text, opts = {}) {
     if (note) promptText = note + promptText;
   }
 
+  // M7: on the first turn, if the session has no explicit role, decide one
+  // from the prompt (user explicit > keyword coarse-match > directory default)
+  // and persist it, so the identity sticks for the session's lifetime.
+  if (isFirstTurn && !persisted.rolePrompt) {
+    const decided = decideSessionRole(promptText, persisted);
+    if (decided) {
+      persisted.rolePrompt = decided;
+      savePersistedSessions();
+      appendEvent(persisted.dirId, 'session_role_changed',
+        (persisted.label || persisted.id) + '（自动匹配身份）', persisted.id);
+    }
+  }
   const rolePrompt = resolveRolePrompt(persisted);
 
   // ── Streaming path (flag-gated, claude only) ──
