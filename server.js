@@ -5132,9 +5132,9 @@ const auxQueue = {
     const p = providers.getProvider('claude', auxConfig.providerId);
     if (!p) { this._canDirectHttp = false; return false; }
     let cfg = {};
-    try { cfg = JSON.parse(p.settingsConfig || '{}'); } catch (_) {}
+    try { cfg = (p.settingsConfig && typeof p.settingsConfig === 'object') ? p.settingsConfig : JSON.parse(p.settingsConfig || '{}'); } catch (_) {}
     const hasBase = !!(cfg.env && cfg.env.ANTHROPIC_BASE_URL);
-    const hasKey = !!(cfg.env && cfg.env.ANTHROPIC_API_KEY);
+    const hasKey = !!(cfg.env && (cfg.env.ANTHROPIC_API_KEY || cfg.env.ANTHROPIC_AUTH_TOKEN));
     // Can direct HTTP if: has baseUrl + API key; OR is the official OAuth provider
     // (ccfw proxy handles Keychain OAuth token replay).
     const isOfficial = auxConfig.providerId === 'claude-official';
@@ -5144,11 +5144,78 @@ const auxQueue = {
   },
 
   execute(task) {
-    if (auxConfig.cli === 'codex') return this.executeCodex(task);
+    if (auxConfig.cli === 'codex') {
+      // Codex direct-HTTP: API-key providers POST straight to /chat/completions,
+      // no CLI spawn (symmetric with the claude path). OAuth codex → CLI.
+      const cx = this.canDirectHttpCodex();
+      if (cx.canDirect) return this.executeDirectHttpCodex(task, cx);
+      return this.executeCodex(task);
+    }
     // If aux has a direct API provider (non-OAuth, has baseUrl), skip CLI spawn
     // and use HTTP directly via the proxy — faster, no OAuth dependency.
     if (this.canDirectHttp()) return this.executeDirectHttp(task);
     return this.executeClaude(task);
+  },
+
+  // Codex direct-HTTP capability (cached). Resolves the provider's real
+  // /chat/completions target; canDirect=false for OAuth-only codex providers.
+  _canDirectHttpCodex: null,
+  canDirectHttpCodex() {
+    if (this._canDirectHttpCodex !== null) return this._canDirectHttpCodex;
+    if (!auxConfig.providerId) { this._canDirectHttpCodex = { canDirect: false, reason: 'no provider (default login → CLI)' }; return this._canDirectHttpCodex; }
+    const r = providers.resolveCodexDirectHttp(auxConfig.providerId);
+    this._canDirectHttpCodex = r;
+    if (r.canDirect) console.log(`[multicc/aux] codex direct HTTP mode (no CLI spawn) → ${r.url}`);
+    else console.log(`[multicc/aux] codex uses CLI spawn (${r.reason})`);
+    return r;
+  },
+
+  // Direct HTTP execution for codex providers: POST OpenAI /chat/completions,
+  // no CLI spawn. Mirrors executeDirectHttp (claude) but in OpenAI wire format.
+  executeDirectHttpCodex(task, cx) {
+    return new Promise((resolve, reject) => {
+      const model = auxConfig.model || cx.model || (cx.modelOptions && cx.modelOptions[0]) || '';
+      if (!model) { reject(new Error('codex direct HTTP: no model resolved')); return; }
+      const body = JSON.stringify({
+        model,
+        max_tokens: 256,
+        messages: [{ role: 'user', content: task.prompt }],
+      });
+      let urlObj;
+      try { urlObj = new URL(cx.url); } catch (e) { reject(new Error('bad codex url: ' + cx.url)); return; }
+      const isHttps = urlObj.protocol === 'https:';
+      const lib = isHttps ? require('https') : require('http');
+      const req = lib.request({
+        hostname: urlObj.hostname,
+        port: urlObj.port || (isHttps ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${cx.apiKey}`,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+            // OpenAI chat/completions shape: choices[0].message.content
+            const text = parsed.choices && parsed.choices[0] && parsed.choices[0].message
+              ? (parsed.choices[0].message.content || '')
+              : '';
+            resolve(typeof text === 'string' ? text : JSON.stringify(text));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(body);
+      req.end();
+    });
   },
 
   // Direct HTTP execution: POST /v1/messages via the ccfw proxy, no CLI spawn.
@@ -5458,8 +5525,11 @@ app.get('/api/aux/config', (req, res) => {
     providerId: auxConfig.providerId,
     model: auxConfig.model,
     effort: auxConfig.effort,
-    providers: providers.listProviders(cli).map(p => ({ id: p.id, name: p.name })),
-    claudeProviders: providers.listProviders('claude').map(p => ({ id: p.id, name: p.name })),
+    // Every provider list carries modelOptions so the settings UI can drive a
+    // consistent provider → model linkage (pick provider ⇒ its models populate
+    // the model dropdown) for BOTH claude and codex, exactly like session settings.
+    providers: providers.listProviders(cli).map(p => ({ id: p.id, name: p.name, modelOptions: p.modelOptions || [] })),
+    claudeProviders: providers.listProviders('claude').map(p => ({ id: p.id, name: p.name, modelOptions: p.modelOptions || [] })),
     codexProviders: providers.listProviders('codex').map(p => ({ id: p.id, name: p.name, modelOptions: p.modelOptions || [] })),
   });
 });
@@ -5476,6 +5546,10 @@ app.post('/api/aux/config', (req, res) => {
   auxConfig.providerId = providerId ? String(providerId) : null;
   auxConfig.model = (model && String(model).trim()) || null;
   auxConfig.effort = effort || null;
+  // Invalidate the direct-HTTP capability caches: provider/cli may have changed,
+  // so whether aux can skip CLI spawn must be re-evaluated on the next task.
+  auxQueue._canDirectHttp = null;
+  auxQueue._canDirectHttpCodex = null;
   saveAuxConfig();
   console.log(`[multicc/aux] config updated: cli=${auxConfig.cli} provider=${auxConfig.providerId || 'default'} model=${auxConfig.model || (auxConfig.cli === 'claude' ? 'haiku' : 'provider-default')} effort=${auxConfig.effort || 'default'}`);
   res.json({ ok: true, cli: auxConfig.cli, providerId: auxConfig.providerId, model: auxConfig.model, effort: auxConfig.effort });
@@ -5881,6 +5955,121 @@ app.post('/api/providers/:appType/:id/probe', async (req, res) => {
     const result = await providers.probeRelayModels(env, req.body && req.body.candidates, CLAUDE_CMD);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Speed-test: fire a minimal API call through the provider's real relay and
+// measure round-trip latency.  Returns { ok, ms, status, model, error? }.
+app.post('/api/providers/:appType/:id/speedtest', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const p = providers.getProvider(req.params.appType, req.params.id);
+    if (!p) return res.status(404).json({ ok: false, ms: Date.now() - t0, error: 'provider not found' });
+    const cfg = typeof p.settingsConfig === 'string' ? JSON.parse(p.settingsConfig) : (p.settingsConfig || {});
+    const env = (cfg && cfg.env) || {};
+    const appType = req.params.appType;
+
+    // ── Codex providers ──────────────────────────────────────────────
+    if (appType === 'codex') {
+      const cx = providers.resolveCodexDirectHttp(req.params.id);
+      if (!cx.canDirect) {
+        return res.json({ ok: false, ms: Date.now() - t0, error: cx.reason || 'OAuth 订阅型 provider 不支持测速' });
+      }
+      const model = (cx.modelOptions && cx.modelOptions[0]) || cx.model || 'gpt-4o-mini';
+      const body = JSON.stringify({
+        model,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      let urlObj;
+      try { urlObj = new URL(cx.url); } catch (e) {
+        return res.json({ ok: false, ms: Date.now() - t0, error: 'bad url: ' + cx.url });
+      }
+      const isHttps = urlObj.protocol === 'https:';
+      const lib = isHttps ? require('https') : require('http');
+      await new Promise((resolve, reject) => {
+        const hReq = lib.request({
+          hostname: urlObj.hostname,
+          port: urlObj.port || (isHttps ? 443 : 80),
+          path: urlObj.pathname + urlObj.search,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cx.apiKey}` },
+        }, (hRes) => {
+          let data = '';
+          hRes.on('data', chunk => data += chunk);
+          hRes.on('end', () => {
+            const ms = Date.now() - t0;
+            if (hRes.statusCode >= 200 && hRes.statusCode < 300) {
+              res.json({ ok: true, ms, status: hRes.statusCode, model });
+            } else {
+              let err = `HTTP ${hRes.statusCode}`;
+              try { const pe = JSON.parse(data); if (pe.error) err = (pe.error.message || JSON.stringify(pe.error)); } catch (_) {}
+              res.json({ ok: false, ms, status: hRes.statusCode, model, error: err });
+            }
+            resolve();
+          });
+        });
+        hReq.on('error', (e) => { res.json({ ok: false, ms: Date.now() - t0, error: e.message }); resolve(); });
+        hReq.setTimeout(15000, () => { hReq.destroy(); res.json({ ok: false, ms: Date.now() - t0, error: 'timeout' }); });
+        hReq.write(body);
+        hReq.end();
+      });
+      return;
+    }
+
+    // ── Claude providers ─────────────────────────────────────────────
+    const hasKey = !!(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN);
+    const isOfficial = req.params.id === 'claude-official';
+    const canDirect = (env.ANTHROPIC_BASE_URL && hasKey) || (isOfficial && CLAUDE_OFFICIAL_VIA_PROXY);
+
+    if (!canDirect) {
+      return res.json({ ok: false, ms: Date.now() - t0, error: isOfficial ? 'OAuth 订阅型 provider 不支持测速（开启 CLAUDE_OFFICIAL_VIA_PROXY 可测速）' : '缺少 API Key 或 Base URL' });
+    }
+
+    // Resolve model: modelOptions first, then env overrides, then fallback
+    let model = (p.modelOptions && p.modelOptions[0]) || p.model || '';
+    if (!model) model = env.ANTHROPIC_MODEL || env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'haiku';
+
+    const body = JSON.stringify({
+      model,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    await new Promise((resolve) => {
+      const hReq = require('http').request({
+        hostname: '127.0.0.1',
+        port: PORT,
+        path: `/claude-proxy/${req.params.id}/speedtest/v1/messages?beta=true`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `multicc-speedtest`,
+          'anthropic-version': '2023-06-01',
+          'x-api-key': 'multicc-speedtest',
+        },
+      }, (hRes) => {
+        let data = '';
+        hRes.on('data', chunk => data += chunk);
+        hRes.on('end', () => {
+          const ms = Date.now() - t0;
+          if (hRes.statusCode >= 200 && hRes.statusCode < 300) {
+            res.json({ ok: true, ms, status: hRes.statusCode, model });
+          } else {
+            let err = `HTTP ${hRes.statusCode}`;
+            try { const pe = JSON.parse(data); if (pe.error) err = (pe.error.message || JSON.stringify(pe.error)); } catch (_) {}
+            res.json({ ok: false, ms, status: hRes.statusCode, model, error: err });
+          }
+          resolve();
+        });
+      });
+      hReq.on('error', (e) => { res.json({ ok: false, ms: Date.now() - t0, error: e.message }); resolve(); });
+      hReq.setTimeout(15000, () => { hReq.destroy(); res.json({ ok: false, ms: Date.now() - t0, error: 'timeout' }); });
+      hReq.write(body);
+      hReq.end();
+    });
+  } catch (e) {
+    res.json({ ok: false, ms: Date.now() - t0, error: e.message });
+  }
 });
 
 // Get / set the global default provider per CLI.
@@ -6438,6 +6627,17 @@ function setTaskState(sessionId, patch, opts = {}) {
   const next = { ...cur, ...patch };
   persisted.taskState = next;
   if (opts.save !== false) savePersistedSessions();
+  // Push the aux classify result to the chat client so it can show what the
+  // assistant currently thinks this session's goal/phase is. Cheap; only fires
+  // when a chat WS is connected for this session.
+  try {
+    chatBroadcast(sessionId, {
+      type: 'task_state',
+      goal: next.goal || '',
+      phase: next.phase || 'idle',
+      lifecycle: next.lifecycle || 'idle',
+    });
+  } catch (_) {}
   return next;
 }
 
@@ -6607,8 +6807,7 @@ function reclassifySessionsWithMissingGoals() {
   for (const { sid, lastText, userMsg } of candidates) {
     const prompt = buildClassifyPrompt({
       priorGoal: '',
-      userContext: buildUserContext(sid),
-      userMsg,
+      sessionName: sid,
       reply: lastText,
     });
     auxQueue.enqueue({ type: 'recovery_reclassify', prompt, meta: { sessionName: sid } })
@@ -6694,8 +6893,7 @@ function reconcileOneOnStartup(sid, ts, opts = {}) {
   // Never feed an injected/junk prior goal back into the prompt — it biases classify
   // and, if classify returns '—', we'd keep the junk. Treat junk as no prior goal.
   const cleanPrior = isInjectedOrJunkGoal(ts.goal) ? '' : (ts.goal || '');
-  const userContext = buildUserContext(sid);
-  const prompt = buildClassifyPrompt({ priorGoal: cleanPrior, userContext, userMsg, reply });
+  const prompt = buildClassifyPrompt({ priorGoal: cleanPrior, sessionName: sid, reply });
   auxQueue.enqueue({ type: 'intent_classify', prompt, meta: { sid, startup: true } })
     .then(result => {
       if (result.cancelled) return;
@@ -7122,7 +7320,14 @@ function cancelClassify(cs) {
 // Line 3: P | C | W | B
 // Tolerant of blank lines, prefixes, and model cruft.
 function parseTaskClassify(text) {
-  const clean = String(text || '').replace(/<\/?think>/g, '').replace(/^[\s\n]*/, '');
+  // DeepSeek dirty fix: the model sometimes emits a thinking block delimited by
+  // <｜end▁of▁thinking｜> — the real output is everything after that marker.
+  let clean = String(text || '');
+  const thinkEnd = clean.indexOf('<｜end▁of▁thinking｜>');
+  if (thinkEnd !== -1) {
+    clean = clean.slice(thinkEnd + ' response'.length);
+  }
+  clean = clean.replace(/<\/?think>/g, '').replace(/^[\s\n]*/, '');
   const lines = clean.trim().split('\n').map(l => l.trim()).filter(Boolean);
   // Goal may be English (≤10 words ≈ 60 chars) or Chinese (≤20 chars) → cap at 60.
   const goal    = (lines[0] || '').replace(/^(第1行[:：]|目标[:：]|goal[:：]?)\s*/i, '').slice(0, 60);
@@ -7167,17 +7372,36 @@ function parseTaskClassify(text) {
   return { goal: goalOk ? goal : '', phase, state, background };
 }
 
-// Build the unified 3-line classify prompt. Shared by the live turn path
-// (runClassifyNow) and the startup reconcile path (reconcileOneOnStartup) so
-// there is exactly ONE classify prompt in the codebase.
-function buildClassifyPrompt({ priorGoal, userContext, userMsg, reply }) {
-  const tail = (reply || '').slice(-1500);
-  // The AI reply may be empty (turn just started — AI hasn't output yet). Classify
-  // still提炼 goal from the user message and marks state P (processing).
-  const replyBlock = tail
-    ? `AI 助手的回复：\n${tail}`
-    : `AI 助手的回复：（暂无——AI 刚开始处理这条消息，还没有输出内容）`;
-  return `你是任务状态分析器。结合"用户最新消息"和"AI 助手的回复"，判断当前闭环任务的状态。请严格输出三行。
+// Build the classify prompt. Simply feeds the last N conversation turns
+// (user + assistant interleaved) from chat_history, each truncated to a
+// reasonable length. Same data source the chat page uses — no magic.
+function buildClassifyPrompt({ priorGoal, sessionName, reply }) {
+  const history = loadChatHistory(sessionName);
+  const MAX_TURNS = 20;
+  const MAX_PER_MSG = 400;
+  const parts = [];
+
+  // Walk backwards, collect up to MAX_TURNS user+assistant messages.
+  let count = 0;
+  for (let i = history.length - 1; i >= 0 && count < MAX_TURNS; i--) {
+    const m = history[i];
+    if (!m || !m.content) continue;
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    if (isSystemInjectedMsg(m.content)) continue;
+    const label = m.role === 'user' ? '用户' : '助手';
+    const snippet = String(m.content).slice(0, MAX_PER_MSG);
+    parts.unshift(`${label}：${snippet}`);
+    count++;
+  }
+
+  // Live assistant output not yet in chat_history.
+  if (reply) {
+    parts.push(`助手：${String(reply).slice(0, MAX_PER_MSG)}`);
+  }
+
+  const conversationBlock = parts.join('\n\n');
+
+  return `你是任务状态分析器。结合以下对话记录，判断当前闭环任务的状态。请严格输出三行。
 
 第1行：当前闭环任务的目标，用一个简短的名词性短语。
        语言跟随对话语言：中文用中文（≤20 汉字，如"memo图片更换""给目录卡片加 git 状态行"）；英文用英文（≤10 words, e.g. "Fix login page styling"）。
@@ -7197,20 +7421,10 @@ function buildClassifyPrompt({ priorGoal, userContext, userMsg, reply }) {
 
 判断第3行时站在「对话本身」的角度思考。一段回复可能先汇报结果、再抛反问——后半句反问说明 AI 还在等用户，应判 W。回复为空时判 P。
 
-只输出这三行。不要加序号、解释、引号、空行。${userContext}
+只输出这三行。不要加序号、解释、引号、空行。
 
-用户最新消息：
-${String(userMsg || '').slice(0, 500)}
-
-${replyBlock}`;
-}
-
-// Build the "recent user messages" context block (shared by live + startup paths).
-function buildUserContext(sessionName) {
-  const recent = getRecentUserMessages(sessionName, 3);
-  return recent.length > 0
-    ? `\n最近几轮用户消息（用于理解整体任务）：\n${recent.map((m, i) => `${i + 1}. ${String(m).slice(0, 200)}`).join('\n')}`
-    : '';
+对话记录：
+${conversationBlock}`;
 }
 
 function runClassifyNow(cs, sessionName) {
@@ -7224,11 +7438,10 @@ function runClassifyNow(cs, sessionName) {
 
   const sessionId = persistedSessions.get(sessionName)?.id || sessionName;
   const priorGoal = cs.currentTask?.goal || '';
-  const userContext = buildUserContext(sessionName);
 
   auxQueue.enqueue({
     type: 'intent_classify',
-    prompt: buildClassifyPrompt({ priorGoal, userContext, userMsg, reply }),
+    prompt: buildClassifyPrompt({ priorGoal, sessionName, reply }),
     meta: { sessionName, sessionId },
   }).then(result => {
     if (result.cancelled) return;
@@ -8902,6 +9115,14 @@ function handleChatWs(ws, req, urlObj) {
   const sessionTokenUsage = tokenUsage[sessionName] || null;
   if (replayMessages.length > 0 || sessionTokenUsage) {
     ws.send(JSON.stringify({ type: 'chat_history', messages: replayMessages, tokenUsage: sessionTokenUsage }));
+    // Seed the aux classify bar with the current task snapshot on connect, so
+    // the goal/phase shows immediately (not only after the next classify).
+    try {
+      const ts0 = getTaskState(persistedSessions.get(sessionName));
+      if (ts0 && (ts0.goal || (ts0.phase && ts0.phase !== 'idle'))) {
+        ws.send(JSON.stringify({ type: 'task_state', goal: ts0.goal || '', phase: ts0.phase || 'idle', lifecycle: ts0.lifecycle || 'idle' }));
+      }
+    } catch (_) {}
     // If chat_history already includes the in-progress assistant message
     // (appended just above), skip the streamReplay so the client doesn't
     // receive duplicate events that would create a second bubble.

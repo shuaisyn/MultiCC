@@ -1317,18 +1317,20 @@
       </div>
       <div class="setting-row" style="align-items:flex-start;">
         <label style="padding-top:8px;">Provider</label>
-        <select id="aux-provider" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;"></select>
+        <select id="aux-provider" onchange="refreshAuxModelOptions()" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;"></select>
       </div>
       <div class="setting-row" style="align-items:flex-start;">
         <label style="padding-top:8px;">Model</label>
-        <input id="aux-model" type="text" placeholder="留空使用 provider 默认" autocomplete="off" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;font-family:var(--mono);padding:8px 10px;outline:none;" />
+        <select id="aux-model" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;font-family:var(--mono);padding:8px 10px;outline:none;"></select>
       </div>
       <div class="setting-row" style="align-items:flex-start;">
         <label style="padding-top:8px;">参数档位</label>
         <select id="aux-effort" style="flex:1;min-width:0;background:var(--bg-soft);border:1px solid var(--line);border-radius:9px;color:var(--text);font-size:13px;padding:8px 10px;outline:none;"></select>
       </div>
-      <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:16px;">
-        <span class="status-text" id="aux-modal-status" style="margin-right:auto;"></span>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:16px;">
+        <button class="btn btn-sm" id="aux-reclassify-btn" onclick="reclassifyAllSessions()"
+          title="用当前 AI 助手模型，重新判定所有会话的目标与阶段">🔄 重跑所有会话</button>
+        <span class="status-text" id="aux-modal-status" style="margin-left:auto;"></span>
         <button class="btn" onclick="closeAuxModal()">取消</button>
         <button class="btn btn-green" onclick="saveAuxConfig()">保存</button>
       </div>
@@ -1496,6 +1498,20 @@
         <button class="btn btn-sm" onclick="closeGitTree()">关闭</button>
       </div>
       <div id="git-tree-body" style="flex:1;overflow:auto;padding:12px 16px;font-size:12px;font-family:var(--mono);line-height:1.6;">
+        加载中…
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Assistant (aux) history — simple popup modal, no side panel -->
+  <div id="aux-history-modal" class="modal-backdrop" style="display:none" onclick="if(event.target===this)closeAuxHistoryModal()">
+    <div class="modal-card" style="width:min(96vw,720px);max-height:88vh;display:flex;flex-direction:column;background:var(--bg);">
+      <div style="display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);gap:10px;">
+        <span style="font-weight:680;font-size:14px;color:#d2a8ff;">🤖 AI 助手历史</span>
+        <span style="font-size:11px;color:var(--muted);flex:1;">AuxQueue — 意图分类服务</span>
+        <button class="btn btn-sm" onclick="closeAuxHistoryModal()">关闭</button>
+      </div>
+      <div id="aux-modal-body" style="flex:1;overflow:auto;padding:12px 16px;font-size:12px;font-family:var(--mono);line-height:1.5;">
         加载中…
       </div>
     </div>

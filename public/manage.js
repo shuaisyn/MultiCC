@@ -477,7 +477,7 @@ function renderAuxCard(s, isFocused) {
   const warmDot = aux.warmReady ? '<span title="进程已预热" style="color:#3fb950;">●</span>' : '<span title="进程未就绪" style="color:#484f58;">○</span>';
 
   return `
-    <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="focusAux()" style="border-color:#8957e5;">
+    <div class="session-card${focusedClass}" data-id="${escapeHtml(s.id)}" onclick="openAuxHistoryModal()" style="border-color:#8957e5;">
       <div class="card-top">
         <span class="session-id" style="color:#d2a8ff;">AI Assistant</span>
         <span class="status-badge ${statusClass}">${statusText}</span>
@@ -496,7 +496,7 @@ function renderAuxCard(s, isFocused) {
         <span class="client-count" style="color:#d2a8ff;" title="辅助 AI 当前模型">${escapeHtml(_auxModelLabel())}</span>
         <span style="display:flex;gap:6px;">
           <button class="btn btn-sm" onclick="event.stopPropagation(); openAuxModal()">模型</button>
-          <button class="btn btn-sm" onclick="event.stopPropagation(); focusAux()">History</button>
+          <button class="btn btn-sm" onclick="event.stopPropagation(); openAuxHistoryModal()">History</button>
         </span>
       </div>
     </div>`;
@@ -532,7 +532,32 @@ function refreshAuxProviderOptions() {
     + list.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
   const current = _auxConfig?.cli === cli ? (_auxConfig?.providerId || '') : '';
   sel.value = current;
+  refreshAuxModelOptions();
   refreshAuxEffortOptions();
+}
+// Provider → Model linkage (mirrors session settings): populate the model
+// dropdown from the selected provider's modelOptions. Falls back to a small
+// built-in list so the field is never empty. "留空使用默认" keeps the
+// provider's own default model.
+const _AUX_CLAUDE_MODEL_FALLBACK = ['haiku', 'sonnet', 'opus', 'fable'];
+function refreshAuxModelOptions() {
+  const cli = (document.getElementById('aux-cli')?.value || _auxConfig?.cli || 'claude') === 'codex' ? 'codex' : 'claude';
+  const provId = document.getElementById('aux-provider')?.value || '';
+  const sel = document.getElementById('aux-model');
+  if (!sel) return;
+  const list = cli === 'codex'
+    ? (_auxConfig?.codexProviders || [])
+    : (_auxConfig?.claudeProviders || _auxConfig?.providers || []);
+  const prov = list.find(p => p.id === provId);
+  let models = (prov && Array.isArray(prov.modelOptions)) ? prov.modelOptions.slice() : [];
+  // No provider selected (默认登录) or provider without a model list → fall back
+  // to the built-in tier aliases for claude; codex has no universal fallback.
+  if (!models.length && cli === 'claude') models = _AUX_CLAUDE_MODEL_FALLBACK.slice();
+  sel.innerHTML = '<option value="">默认</option>'
+    + models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  // Preserve the saved model if it's still valid; else leave on 默认.
+  const saved = _auxConfig?.model || '';
+  sel.value = models.includes(saved) ? saved : '';
 }
 function refreshAuxEffortOptions() {
   const cli = (document.getElementById('aux-cli')?.value || _auxConfig?.cli || 'claude') === 'codex' ? 'codex' : 'claude';
@@ -542,14 +567,26 @@ function refreshAuxEffortOptions() {
   sel.innerHTML = opts.map(v => `<option value="${v}">${escapeHtml(v)}</option>`).join('');
   const current = _auxConfig?.effort || (cli === 'codex' ? 'xhigh' : 'medium');
   sel.value = opts.includes(current) ? current : opts[0];
+  // aux runs as a single-shot direct-HTTP call for API-key providers — effort/
+  // reasoning level isn't sent in that path. Hint the user it only applies when
+  // aux falls back to a CLI spawn (OAuth codex / default login).
+  const row = sel.closest('.setting-row');
+  if (row) {
+    let hint = row.querySelector('.aux-effort-hint');
+    if (!hint) {
+      hint = document.createElement('span');
+      hint.className = 'aux-effort-hint';
+      hint.style.cssText = 'font-size:10px;color:var(--faint);margin-left:8px;';
+      sel.parentElement?.appendChild(hint);
+    }
+    hint.textContent = '仅 CLI 回退模式生效';
+  }
 }
 async function openAuxModal() {
   await loadAuxConfig();
   const cliSel = document.getElementById('aux-cli');
   if (cliSel) cliSel.value = (_auxConfig?.cli || 'claude') === 'codex' ? 'codex' : 'claude';
-  refreshAuxProviderOptions();
-  const inp = document.getElementById('aux-model');
-  if (inp) inp.value = _auxConfig?.model || '';
+  refreshAuxProviderOptions();   // → also refreshes model + effort
   const st = document.getElementById('aux-modal-status');
   if (st) st.textContent = '';
   document.getElementById('aux-modal')?.classList.add('visible');
@@ -577,6 +614,28 @@ async function saveAuxConfig() {
     setTimeout(closeAuxModal, 600);
   } catch (e) {
     if (st) st.textContent = '保存失败：' + (e?.message || e);
+  }
+}
+// Re-judge EVERY non-system session's goal/phase with the current aux model.
+// Uses the existing /api/reclassify-all endpoint with onlyJunk:false (all
+// sessions, not just the ones with junk goals). Results arrive async via WS.
+async function reclassifyAllSessions() {
+  const st = document.getElementById('aux-modal-status');
+  const btn = document.getElementById('aux-reclassify-btn');
+  if (btn) btn.disabled = true;
+  if (st) st.textContent = '重跑中…';
+  try {
+    const res = await fetch('/api/reclassify-all' + tokenQS('?'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ onlyJunk: false }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) { if (st) st.textContent = data.error || '重跑失败'; return; }
+    if (st) st.textContent = `已重跑 ${data.count} 个会话，结果稍后异步更新 ✓`;
+  } catch (e) {
+    if (st) st.textContent = '重跑失败：' + (e?.message || e);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -5435,18 +5494,25 @@ function auxConnect() {
       if (msg.type === 'aux_history') {
         _auxHistory = msg.messages || [];
         if (_focusedSessionId === '__aux__') renderAuxPanel();
+        if (_auxModalOpen()) renderAuxModal();
       } else if (msg.type === 'aux_init') {
         // status info on connect — will be refreshed via /api/sessions
         if (msg.health) handleAuxHealth(msg.health);
       } else if (msg.type === 'aux_health') {
         handleAuxHealth(msg.health || {});
       } else if (msg.type === 'aux_event') {
-        // Real-time task event — append to history display
+        // Real-time task event — refresh history on completion
         if (msg.status === 'done' || msg.status === 'error') {
-          // Refresh history from full data on next render
+          // Fetch latest history from API so _auxHistory stays current
+          fetch('/api/aux/history').then(r => r.json()).then(data => {
+            _auxHistory = Array.isArray(data) ? data : _auxHistory;
+            if (_focusedSessionId === '__aux__') renderAuxPanel();
+            if (_auxModalOpen()) renderAuxModal();
+          }).catch(() => {});
           loadSessions();
         }
         if (_focusedSessionId === '__aux__') renderAuxTaskEvent(msg);
+        if (_auxModalOpen()) renderAuxModal();
       }
     } catch (_) {}
   };
@@ -5456,6 +5522,88 @@ function auxConnect() {
     setTimeout(auxConnect, 5000);
   };
   _auxWs.onerror = () => {};
+}
+
+// ── AI Assistant (aux) history — simple popup modal ──
+// Replaces the old focus-panel side view: just pops a modal and renders the
+// aux task history straight into it. No iframe, no panel juggling.
+function openAuxHistoryModal() {
+  acknowledgeSession('__aux__');
+  const modal = document.getElementById('aux-history-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  auxConnect();                 // ensure the /ws/aux socket is live for updates
+  renderAuxModal();             // paint whatever history we already have
+}
+
+function closeAuxHistoryModal() {
+  const modal = document.getElementById('aux-history-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function _auxModalOpen() {
+  const m = document.getElementById('aux-history-modal');
+  return m && m.style.display !== 'none';
+}
+
+// Render the aux task history into the modal body (newest first).
+function renderAuxModal() {
+  const body = document.getElementById('aux-modal-body');
+  if (!body) return;
+  if (_auxHistory.length === 0) {
+    body.innerHTML = '<div style="text-align:center;color:#484f58;padding:40px 0;">暂无任务记录</div>';
+    return;
+  }
+  const tasks = [];
+  for (let i = 0; i < _auxHistory.length; i++) {
+    const msg = _auxHistory[i];
+    if (msg.role === 'user' && i + 1 < _auxHistory.length && _auxHistory[i + 1].role === 'assistant') {
+      tasks.push({ input: msg, output: _auxHistory[i + 1] });
+      i++;
+    } else if (msg.role === 'user') {
+      tasks.push({ input: msg, output: null });
+    }
+  }
+  tasks.reverse();
+  body.innerHTML = tasks.map((t, idx) => {
+    const time = new Date(t.input.ts);
+    const timeStr = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}:${time.getSeconds().toString().padStart(2, '0')}`;
+    const taskType = t.input.taskType || 'unknown';
+    const meta = t.input.meta || {};
+    const metaStr = meta.sessionName ? `session=${escapeHtml(meta.sessionName)}` : '';
+    let resultHtml = '<span style="color:#d29922;">pending...</span>';
+    let durationHtml = '';
+    if (t.output) {
+      const isErr = t.output.error;
+      const isCancelled = t.output.cancelled;
+      const text = escapeHtml((t.output.content || '').trim());
+      const color = isErr ? '#f85149' : isCancelled ? '#d29922' : '#3fb950';
+      const label = isErr ? 'ERR' : isCancelled ? 'CANCELLED' : text;
+      resultHtml = `<span style="color:${color};font-weight:600;">${label}</span>`;
+      if (t.output.durationMs) durationHtml = `<span style="color:#484f58;margin-left:8px;">${(t.output.durationMs / 1000).toFixed(1)}s</span>`;
+    }
+    const promptPreview = escapeHtml((t.input.content || '').split('\n').pop().slice(0, 80));
+    const detailId = 'aux-modal-detail-' + idx;
+    const inputFull = escapeHtml(t.input.content || '');
+    const outputFull = t.output ? escapeHtml(t.output.content || '') : '';
+    const detailHtml = `<div style="margin-top:8px;padding:8px;background:#0d1117;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;">
+        <div style="color:#58a6ff;font-weight:600;margin-bottom:4px;">📥 Input</div>
+        <div style="color:#c9d1d9;margin-bottom:10px;">${inputFull}</div>
+        <div style="color:#3fb950;font-weight:600;margin-bottom:4px;">📤 Output</div>
+        <div style="color:#c9d1d9;">${outputFull || '<span style="color:#484f58;">(no output yet)</span>'}</div>
+      </div>`;
+    return `
+      <div id="${detailId}-card" style="border-left:2px solid #8957e5;padding:6px 10px;margin-bottom:8px;background:#161b22;border-radius:0 6px 6px 0;cursor:pointer;" onclick="var d=document.getElementById('${detailId}');var c=document.getElementById('${detailId}-card');if(d.style.display==='none'){d.style.display='';c.style.background='#1c2128';}else{d.style.display='none';c.style.background='#161b22';}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <span style="color:#484f58;">${timeStr}</span>
+          <span style="color:#d2a8ff;font-weight:600;">${escapeHtml(taskType)}</span>
+          <span style="color:#6e7681;">${metaStr}</span>
+          <span style="margin-left:auto;">${resultHtml}${durationHtml}</span>
+        </div>
+        <div style="color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${promptPreview}</div>
+        <div id="${detailId}" style="display:none;">${detailHtml}</div>
+      </div>`;
+  }).join('');
 }
 
 function focusAux() {
@@ -5512,7 +5660,7 @@ function renderAuxPanel() {
   // Reverse to show newest first
   tasks.reverse();
 
-  const html = tasks.map(t => {
+  const html = tasks.map((t, idx) => {
     const time = new Date(t.input.ts);
     const timeStr = `${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')}:${time.getSeconds().toString().padStart(2, '0')}`;
     const taskType = t.input.taskType || 'unknown';
@@ -5533,16 +5681,26 @@ function renderAuxPanel() {
 
     // Truncated prompt preview
     const promptPreview = escapeHtml((t.input.content || '').split('\n').pop().slice(0, 80));
+    const detailId = 'aux-panel-detail-' + idx;
+    const inputFull = escapeHtml(t.input.content || '');
+    const outputFull = t.output ? escapeHtml(t.output.content || '') : '';
+    const detailHtml = `<div style="margin-top:8px;padding:8px;background:#0d1117;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;">
+        <div style="color:#58a6ff;font-weight:600;margin-bottom:4px;">📥 Input</div>
+        <div style="color:#c9d1d9;margin-bottom:10px;">${inputFull}</div>
+        <div style="color:#3fb950;font-weight:600;margin-bottom:4px;">📤 Output</div>
+        <div style="color:#c9d1d9;">${outputFull || '<span style="color:#484f58;">(no output yet)</span>'}</div>
+      </div>`;
 
     return `
-      <div style="border-left:2px solid #8957e5;padding:6px 10px;margin-bottom:8px;background:#161b22;border-radius:0 6px 6px 0;">
+      <div id="${detailId}-card" style="border-left:2px solid #8957e5;padding:6px 10px;margin-bottom:8px;background:#161b22;border-radius:0 6px 6px 0;cursor:pointer;" onclick="var d=document.getElementById('${detailId}');var c=document.getElementById('${detailId}-card');if(d.style.display==='none'){d.style.display='';c.style.background='#1c2128';}else{d.style.display='none';c.style.background='#161b22';}">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
           <span style="color:#484f58;">${timeStr}</span>
           <span style="color:#d2a8ff;font-weight:600;">${escapeHtml(taskType)}</span>
           <span style="color:#6e7681;">${metaStr}</span>
           <span style="margin-left:auto;">${resultHtml}${durationHtml}</span>
         </div>
-        <div style="color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(t.input.content || '')}">${promptPreview}</div>
+        <div style="color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${promptPreview}</div>
+        <div id="${detailId}" style="display:none;">${detailHtml}</div>
       </div>`;
   }).join('');
 
@@ -5831,6 +5989,15 @@ function renderProviderList() {
       (_providerData.available ? '在下方新增。' : 'cc-switch 不可用。') + '</span>';
     return;
   }
+  if (!_providerLatency) _providerLatency = {};
+  const latencyBadge = (id) => {
+    const r = _providerLatency[id];
+    if (!r) return '';
+    const color = r.ok ? (r.ms < 1000 ? '#3fb950' : r.ms < 3000 ? '#d29922' : '#f85149') : '#f85149';
+    const label = r.ok ? r.ms + 'ms' : 'ERR';
+    const title = r.error ? ` title="${escapeHtml(r.error)}"` : '';
+    return `<span style="color:${color};font-size:10px;font-weight:600;margin-left:4px;"${title}>${label}</span>`;
+  };
   const cardHtml = (p) => {
     const stat = (_providerData.stats || []).find(s => s.providerId === p.id);
     let statHtml = '';
@@ -5848,27 +6015,70 @@ function renderProviderList() {
       parts.push(`累计 <b>${formatTokens(stat.totalTokens)}</b>（${stat.turnCount}轮/${stat.sessionCount}会话）`);
       statHtml = parts.join(' · ');
     }
+    const latBadge = latencyBadge(p.id);
     return `
     <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;">
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:var(--text);font-weight:600">${escapeHtml(p.name)} <span style="font-weight:400;font-size:11px;color:var(--faint)">${p.source === 'ccswitch' ? '· 来自 cc-switch' : '· 本地'}</span></div>
+        <div style="font-size:13px;color:var(--text);font-weight:600">${escapeHtml(p.name)} <span style="font-weight:400;font-size:11px;color:var(--faint)">${p.source === 'ccswitch' ? '· 来自 cc-switch' : '· 本地'}</span>${latBadge}</div>
         ${statHtml ? `<div style="font-size:11px;color:var(--amber);margin-top:3px">${statHtml}</div>` : ''}
         <div style="font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(p.isOfficial ? '默认登录 / 订阅' : (p.baseUrl || ''))}${(p.modelOptions || []).length > 1 ? ' · ' + (p.modelOptions || []).length + ' models' : (p.model ? ' · ' + escapeHtml(p.model) : '')}${p.useChatResponsesProxy ? ' · proxy' : ''}${p.tokenMask ? ' · ' + escapeHtml(p.tokenMask) : ''}</div>
       </div>
+      <button class="btn" style="padding:4px 10px;font-size:12px" onclick="speedTestProvider('${escapeHtml(p.appType)}','${escapeHtml(p.id)}',this)">测速</button>
       <button class="btn" style="padding:4px 10px;font-size:12px" onclick="editProvider('${escapeHtml(p.appType)}','${escapeHtml(p.id)}')">编辑</button>
       <button class="btn" style="padding:4px 10px;font-size:12px" onclick="deleteProvider('${escapeHtml(p.appType)}','${escapeHtml(p.id)}','${escapeHtml(p.name)}')">删除</button>
     </div>`;
   };
+  const groupSpeedTestBtn = (label, providers) => {
+    if (!providers.length) return '';
+    return `<button class="btn" style="padding:2px 8px;font-size:11px;margin-left:8px" onclick="speedTestGroup(this,'${escapeHtml(providers.map(p => p.appType + '|' + p.id).join(','))}')">全部测速</button>`;
+  };
   const groupHtml = (label, emoji, providers) => {
     if (!providers.length) return '';
     return `<div style="margin-bottom:12px;">
-      <div style="font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px;padding:0 2px">${emoji} ${label} <span style="color:var(--faint);font-weight:400">(${providers.length})</span></div>
+      <div style="display:flex;align-items:center;font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px;padding:0 2px">${emoji} ${label} <span style="color:var(--faint);font-weight:400">(${providers.length})</span>${groupSpeedTestBtn(label, providers)}</div>
       <div style="display:flex;flex-direction:column;gap:8px;">${providers.map(cardHtml).join('')}</div>
     </div>`;
   };
   const claudeProvs = _providerData.providers.filter(p => p.appType !== 'codex');
   const codexProvs = _providerData.providers.filter(p => p.appType === 'codex');
   box.innerHTML = groupHtml('Claude', '🤖', claudeProvs) + groupHtml('Codex', '⚡', codexProvs);
+}
+
+// ── Provider speed-test ──────────────────────────────────────────────
+let _providerLatency = {};
+
+async function speedTestProvider(appType, id, btn) {
+  if (btn) { btn.textContent = '测速中…'; btn.disabled = true; }
+  try {
+    const res = await fetch('/api/providers/' + encodeURIComponent(appType) + '/' + encodeURIComponent(id) + '/speedtest' + tokenQS('?'), { method: 'POST' });
+    const d = await res.json();
+    _providerLatency[id] = d;
+  } catch (e) {
+    _providerLatency[id] = { ok: false, ms: 0, error: e.message };
+  }
+  if (btn) { btn.textContent = '测速'; btn.disabled = false; }
+  renderProviderList();
+}
+
+async function speedTestGroup(btn, idList) {
+  const ids = idList.split(',').filter(Boolean);
+  if (!ids.length) return;
+  if (btn) { btn.textContent = '测速中…'; btn.disabled = true; }
+  // Run all in parallel
+  await Promise.all(ids.map(s => {
+    const [appType, id] = s.split('|');
+    return (async () => {
+      try {
+        const res = await fetch('/api/providers/' + encodeURIComponent(appType) + '/' + encodeURIComponent(id) + '/speedtest' + tokenQS('?'), { method: 'POST' });
+        const d = await res.json();
+        _providerLatency[id] = d;
+      } catch (e) {
+        _providerLatency[id] = { ok: false, ms: 0, error: e.message };
+      }
+    })();
+  }));
+  if (btn) { btn.textContent = '全部测速'; btn.disabled = false; }
+  renderProviderList();
 }
 
 async function saveProviderDefaults() {
@@ -6034,7 +6244,7 @@ async function deleteProvider(appType, id, name) {
 
 /* ── Init ── */
 loadDashboard().then(() => {
-  if (new URLSearchParams(location.search).get('focus') === 'aux') focusAux();
+  if (new URLSearchParams(location.search).get('focus') === 'aux') openAuxHistoryModal();
 });
 loadProviders();
 loadVoiceSettings();
